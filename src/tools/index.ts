@@ -1,0 +1,15 @@
+/** Barrel of the shipped tool plugins (mounted by the dsh-base bundle). */
+
+export { fsToolsPlugin } from './fs.js'
+export { fsSearchPlugin } from './search.js'
+export { shellToolsPlugin } from './shell.js'
+export { jobToolsPlugin } from './jobs.js'
+export { todoToolsPlugin, renderTodos, TodoStore, type Todo, type TodoStatus } from './todo.js'
+export { planToolsPlugin, type PlanService, type PlanDecision, type PlanHandler } from './plan.js'
+export { webToolsPlugin } from './web.js'
+export { webSearchToolsPlugin } from './web-search.js'
+export { computerToolsPlugin } from './computer.js'
+export { browserToolsPlugin } from './browser.js'
+export { subagentToolsPlugin, subagentControlPlugin, type SubagentToolConfig } from './subagent.js'
+export { pluginManagerToolPlugin, pluginRegistryPlugin, PluginRegistry, type PluginRegistryEntry } from './plugin-manager.js'
+export { truncate, globToRegExp, resolvePath, SKIP_DIRS } from './util.js'

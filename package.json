@@ -1,0 +1,52 @@
+{
+  "name": "sakuracode",
+  "version": "0.7.1",
+  "description": "SakuraCode — a plugin-first CLI coding agent. Everything is a plugin.",
+  "type": "module",
+  "bin": {
+    "sakura": "dist/cli.js"
+  },
+  "main": "dist/kernel/index.js",
+  "exports": {
+    ".": "./dist/kernel/index.js",
+    "./kernel": "./dist/kernel/index.js",
+    "./core": "./dist/core/index.js",
+    "./tools": "./dist/tools/index.js",
+    "./harness": "./dist/harness.js",
+    "./config": "./dist/config.js",
+    "./web": "./dist/web/server.js"
+  },
+  "files": [
+    "dist",
+    "plugins",
+    "sakura.example.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-web.mjs",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "client": "node scripts/build-client.mjs",
+    "desktop": "node scripts/build-desktop.mjs",
+    "web": "tsx src/cli.ts --web --no-open",
+    "sakura": "tsx src/cli.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "qrcode": "1.5.4",
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/qrcode": "1.5.5",
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+.sakura/
+.DS_Store
+
+# local scratch / packaging artifacts
+tmp/
+build/

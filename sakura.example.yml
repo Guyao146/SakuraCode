@@ -1,0 +1,96 @@
+# SakuraCode configuration example (sakura.yml).
+# Layers: ~/.sakura/config.yml → sakura.yml → --patch YAML → CLI flags.
+
+profile: default
+
+# Web GUI / remote dashboard. Local-only by default; --host / --port override.
+# Bind 0.0.0.0 only on a trusted LAN/VPN. A non-loopback listener or publicOrigin
+# requires a cryptographically random operator token (32-256 ASCII characters).
+# Secrets belong in environment variables, NOT in this file or URL parameters.
+# web:
+#   host: 127.0.0.1
+#   port: 3099
+#   tokenEnv: SAKURA_WEB_TOKEN
+#   viewerTokenEnv: SAKURA_WEB_VIEWER_TOKEN # optional, separate read-only token
+#   publicOrigin: https://sakura.example.com # optional HTTPS proxy, preserve Host
+
+profiles:
+  default: {}
+  # A profile is a named composition: bundles + plugin row overrides.
+  minimal:
+    plugins:
+      tool-web: { disabled: true }
+      tool-subagent: { disabled: true }
+
+# Out-of-tree plugin modules, loaded after the base bundle.
+# Choose EITHER bundles here OR a drop-in folder under pluginsDir — never
+# both for the same plugin: duplicate mounts fail on duplicate tool
+# registration (the harness does dedupe bundles vs. the pluginsDir scan by
+# the plugin's exported name, but do not rely on that).
+# Paths listed here must NOT live under pluginsDir.
+# bundles:
+#   - ./team-plugins/my-plugin.js
+#   - sakuracode-plugin-mytools
+
+pluginsDir: plugins
+
+# Extra text appended to the system prompt.
+# systemPrompt: |
+#   Team conventions: TypeScript strict, no any, tests for new modules.
+
+# MCP (Model Context Protocol) servers over stdio. Each server's tools are
+# bridged into ctx.tools as mcp__<server>__<tool> and gated by the approval
+# mode like any other execute tool.
+# mcpServers:
+#   filesystem:
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+#   memory:
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-memory"]
+#     env: { MEMORY_FILE_PATH: "./.sakura/memory.json" }
+#     timeoutMs: 120000
+
+# Plugin rows: config / disabled, keyed by plugin name.
+plugins:
+  core-llm:
+    config:
+      # model: gpt-4o-mini
+      # thinking: off # off | low | medium | high (adapter needs thinkingParam/thinkingModel)
+      # baseURL: https://api.openai.com/v1
+      # apiKey is preferred from env: SAKURA_API_KEY
+      models:
+        - gpt-4o-mini
+        - gpt-4o
+  core-approval:
+    config:
+      mode: default # plan | default | acceptEdits | yolo
+      # Rule engine: deny wins over allow; matched tools skip the approval prompt.
+      # rules:
+      #   - { effect: allow, tools: "read*" }
+      #   - { effect: allow, tools: "kind:write" }
+      #   - { effect: deny, tools: bash, args: { command: "rm " }, reason: no destructive shell }
+  core-agent:
+    config:
+      maxSteps: 40
+      allowNestedSubagents: false
+  core-compaction:
+    config:
+      auto: 120 # auto-compact when the session log passes this many events (0 = off)
+      # compactModel: glm-4.7 # sumarize with a fixed model instead of the current one; omitted/empty follows the selection
+  core-hooks:
+    config:
+      hooks:
+        # - event: pre-tool-call   # pre-tool-call | post-tool-call | turn-end | session-start
+        #   matcher: "write*"      # glob on tool name (pre/post only)
+        #   command: node ./hooks/guard.js
+        #   timeoutMs: 30000       # non-zero exit on pre-tool-call rejects the call
+  tool-web-search:
+    config:
+      # endpoint: https://html.duckduckgo.com/html
+      maxResults: 6
+  tool-shell:
+    config:
+      defaultTimeoutMs: 120000
+  # Disable any builtin plugin by name:
+  # tool-web: { disabled: true }
