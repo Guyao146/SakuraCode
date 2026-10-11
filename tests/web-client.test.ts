@@ -692,4 +692,40 @@ browserSuite('web client — real browser', () => {
       await fs.rm(updatesWs, { recursive: true, force: true, retryDelay: 100 }).catch(() => {})
     }
   })
+
+  it('toggles the expert session and browses the plugin market from the brand button', async () => {
+    await browser.waitFor("!document.getElementById('expertChip').hidden")
+    expect(await browser.evaluate("document.getElementById('expertChip').textContent")).toBe('专家 · 关闭')
+    // The toggle spawns the built-in team and turns the chip into an active mode.
+    await browser.fill('#input', '评审这个仓库的测试覆盖')
+    await browser.evaluate("document.getElementById('expertChip').click()")
+    await browser.waitFor("document.getElementById('expertChip').textContent === '专家 · 协同中'")
+    await browser.waitFor("(async () => (await (await fetch('/api/state')).json()).expertMode === true)()")
+    // The draft became the opening task and left the composer.
+    expect(await browser.evaluate<string>("document.getElementById('input').value")).toBe('')
+    await browser.waitFor("document.querySelectorAll('.agent-row').length === 4")
+    const names = await browser.evaluate<string[]>("[...document.querySelectorAll('.agent-row .agent-name')].map((n) => n.textContent)")
+    expect(names.sort()).toEqual(['main', '实现者', '架构师', '审查者'].sort())
+    // The market dialog opens from the top-left brand area and lists plugins + skills.
+    expect(await browser.evaluate("document.getElementById('marketBtn').checkVisibility()")).toBe(true)
+    await browser.evaluate("document.getElementById('marketBtn').click()")
+    await browser.waitFor("document.getElementById('marketDialog').open")
+    expect((await browser.evaluate<string>("document.querySelector('#marketBody .market-section h1, #marketBody .market-section h2')?.textContent")).trim()).toContain('已挂载插件')
+    const counts = await browser.evaluate<{ plugins: number; skills: number }>(`(() => {
+      const badges = [...document.querySelectorAll('#marketBody .count-badge')].map((b) => Number(b.textContent));
+      return {plugins: badges[0], skills: badges[1]};
+    })()`)
+    expect(counts.plugins).toBeGreaterThan(0)
+    // Search filters both sections in place.
+    await browser.fill('#marketSearch', 'compaction')
+    const filtered = await browser.evaluate<number>("[...document.querySelectorAll('#marketBody .market-card')].length")
+    expect(filtered).toBeLessThan(counts.plugins + counts.skills)
+    await browser.evaluate("document.getElementById('marketClose').click()")
+    await browser.waitFor("!document.getElementById('marketDialog').open")
+    // Turning the mode off keeps the experts on the roster.
+    await browser.evaluate("document.getElementById('expertChip').click()")
+    await browser.waitFor("document.getElementById('expertChip').textContent === '专家 · 关闭'")
+    await browser.waitFor("(async () => (await (await fetch('/api/state')).json()).expertMode === false)()")
+    expect(await browser.evaluate("document.querySelectorAll('.agent-row').length")).toBe(4)
+  })
 })

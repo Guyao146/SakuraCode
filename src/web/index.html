@@ -196,6 +196,7 @@ a:hover {
 .panel-toggle[aria-expanded='true'] { background: var(--surface-soft); color: var(--text); }
 .panel-toggle .count-badge { color: var(--accent); background: var(--accent-soft); }
 .sidebar-brand { display: flex; align-items: center; justify-content: space-between; height: 72px; flex: none; padding: 0 18px; }
+.brand-actions { display: flex; align-items: center; gap: 2px; }
 .icon-btn.drawer-close { display: none; }
 .project-card { display: flex; align-items: center; gap: 10px; margin: 10px 14px 18px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-raised); box-shadow: var(--shadow); }
 .project-icon { flex: none; width: 34px; height: 36px; display: grid; place-items: center; border-radius: 9px; background: var(--violet-soft); color: var(--violet); }
@@ -223,6 +224,8 @@ a:hover {
   background: var(--surface-soft); color: var(--text-soft); border-radius: 999px; padding: 3px 12px;
   font-size: 13px; line-height: 1.5;
 }
+/* Expert session toggle — the "on" state reads as an active mode. */
+.chip.chip-on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-border); }
 .cwd {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 14px; color: var(--muted);
@@ -724,6 +727,20 @@ a:hover {
 }
 .spawn-panel h3 { margin: 0; font-size: 19px; font-weight: 650; color: var(--heading); }
 .spawn-panel h1 { margin: 0; font-size: 22px; font-weight: 650; color: var(--heading); }
+.market-modal { width: min(680px, calc(100vw - 32px)); }
+.market-panel { padding: 22px 24px; }
+.market-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.market-head h1 { margin: 0; }
+.market-body { display: flex; flex-direction: column; gap: 18px; min-height: 120px; }
+.market-section h2 { margin: 0 0 8px; font-size: 13px; font-weight: 650; color: var(--heading); display: flex; align-items: center; gap: 8px; }
+.market-section h2 .count-badge { font-weight: 400; }
+.market-list { display: flex; flex-direction: column; gap: 6px; }
+.market-card { display: flex; align-items: baseline; gap: 10px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); }
+.market-card .market-name { flex: none; font-size: 13px; font-weight: 600; color: var(--heading); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.market-card .market-desc { flex: 1; min-width: 0; font-size: 12px; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.market-card .extension-badge { flex: none; }
+.market-empty { font-size: 12px; color: var(--muted); padding: 4px 2px; }
+
 .form-field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-soft); }
 .form-field .approval-select { width: 100%; height: 38px; background: var(--page); }
 .form-error { margin: 0; font-size: 12px; color: var(--err); overflow-wrap: anywhere; }
@@ -892,9 +909,13 @@ a:hover {
   background: transparent; color: var(--text); font-size: 15px; line-height: 1.7;
 }
 .composer-tools { width: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.composer-options { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.composer-options .approval-select { max-width: 180px; height: 28px; font-size: 11px; padding-left: 8px; }
-.composer-options .chip { max-width: 180px; padding: 4px 8px; border-radius: 6px; font-size: 11px; }
+.composer-options { flex: 1; min-width: 0; display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; overflow: hidden; }
+.composer-options .approval-select { max-width: 158px; height: 28px; font-size: 11px; padding-left: 8px; min-width: 0; }
+.composer-options .chip { max-width: 150px; padding: 4px 8px; border-radius: 6px; font-size: 11px; }
+/* Shrinking the mode selects beats wrapping the row (the extra row would
+   push the welcome screen below the fold on short windows). */
+.composer-options .select-wrap { min-width: 0; }
+.composer-options .select-wrap .approval-select { max-width: 100%; width: 100%; }
 .composer-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .composer-hint { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--muted); padding: 0 2px; }
 .composer-hint kbd { font: inherit; }
@@ -1290,6 +1311,7 @@ body.history-view .composer-zone { display: none; }
     <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></symbol>
     <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5.6 5.6l1.9 1.9M16.5 16.5l1.9 1.9M18.4 5.6l-1.9 1.9M7.5 16.5l-1.9 1.9"/></symbol>
+    <symbol id="i-market" viewBox="0 0 24 24"><path d="M3.6 10 5.2 4.7A1 1 0 0 1 6.2 4h11.6a1 1 0 0 1 1 .7L20.4 10Z"/><path d="M5.5 10v9.5h13V10"/><path d="M9.5 19.5V14h5v5.5"/></symbol>
   </defs>
 </svg>
 <div class="scrim" id="scrim" aria-hidden="true"></div>
@@ -1300,7 +1322,10 @@ body.history-view .composer-zone { display: none; }
       <span class="brand-mark"><svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-flower"/></svg></span>
       <div class="brand-text"><span class="brand-title">SakuraCode</span><span class="brand-caption">AGENT WORKSPACE</span></div>
     </div>
-    <button class="icon-btn drawer-close" id="closeSidebarBtn" type="button" aria-label="关闭会话侧栏"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+    <div class="brand-actions">
+      <button class="icon-btn" id="marketBtn" type="button" aria-label="插件市场" title="插件市场：查看已挂载的插件与技能"><svg class="icon" aria-hidden="true"><use href="#i-market"/></svg></button>
+      <button class="icon-btn drawer-close" id="closeSidebarBtn" type="button" aria-label="关闭会话侧栏"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+    </div>
   </div>
   <button class="project-card project-picker" id="projectPicker" type="button" aria-label="选择工作区" aria-expanded="false" aria-controls="workspaceSection">
     <span class="project-icon"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></span>
@@ -1522,6 +1547,7 @@ body.history-view .composer-zone { display: none; }
                 <option value="high">思考 · 高</option>
               </select>
             </label>
+            <button class="chip mono" id="expertChip" type="button" data-write="1" aria-pressed="false" title="专家协同模式：生成架构师 / 实现者 / 审查者，之后每条消息同时发给主智能体与各位专家">专家 · 关闭</button>
           </div>
           <div class="composer-actions">
             <button class="icon-btn" id="attachBtn" type="button" title="添加图片" aria-label="添加图片"><svg class="icon" aria-hidden="true"><use href="#i-attach"/></svg></button>
@@ -1629,6 +1655,18 @@ body.history-view .composer-zone { display: none; }
     <label class="form-field" for="renameSessionTitle"><span class="field-label">会话名称</span><input id="renameSessionTitle" type="text" autocomplete="off" spellcheck="false" maxlength="60"></label>
     <p class="settings-message error" id="renameSessionError" role="alert" hidden></p>
     <div class="dialog-actions"><button class="btn btn-soft" id="renameSessionCancel" type="button">取消</button><button class="btn btn-accent" id="renameSessionConfirm" type="submit">保存名称</button></div>
+  </form>
+</dialog>
+
+<dialog class="spawn-modal market-modal" id="marketDialog" aria-labelledby="marketDialogTitle">
+  <form class="spawn-panel market-panel" id="marketForm">
+    <div class="market-head">
+      <h1 id="marketDialogTitle">插件市场</h1>
+      <button class="icon-btn" id="marketClose" type="button" aria-label="关闭插件市场"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+    </div>
+    <p class="panel-note">当前工作区实际挂载的插件、技能、工具与 MCP 连接。全部来自本地目录与配置，不走网络商店。</p>
+    <label class="search-box" for="marketSearch"><svg class="icon" width="16" height="16" aria-hidden="true"><use href="#i-search"/></svg><input id="marketSearch" type="search" placeholder="过滤插件 / 技能…" autocomplete="off" aria-label="过滤市场列表"></label>
+    <div class="market-body" id="marketBody" aria-live="polite"></div>
   </form>
 </dialog>
 
@@ -2000,6 +2038,12 @@ const settingsModelOptions = $('settingsModelOptions');
 const settingsCheckUpdates = $('settingsCheckUpdates');
 const settingsUpdateStatus = $('settingsUpdateStatus');
 const settingsUpdateHint = $('settingsUpdateHint');
+const marketBtn = $('marketBtn');
+const marketDialog = $('marketDialog');
+const marketClose = $('marketClose');
+const marketSearch = $('marketSearch');
+const marketBody = $('marketBody');
+const expertChip = $('expertChip');
 let settingsProviderId = '';
 let settingsFetchedModels = [];
 const settingsApiKey = $('settingsApiKey');
@@ -2045,6 +2089,8 @@ const app = {
     models: [],
     providers: [],
     update: null,
+    expertMode: false,
+    skills: [],
     thinking: 'off',
     agentTypes: [],
     todos: [],
@@ -2512,6 +2558,103 @@ settingsCheckUpdates.addEventListener('click', async function () {
     settingsCheckUpdates.textContent = '检查更新';
   }
 });
+
+/* ============================================================
+   插件市场与专家协同模式
+   ============================================================ */
+
+/** Expert session toggle: spawns the built-in team and fans out every message. */
+function renderExpertChip() {
+  const on = !!app.state.expertMode;
+  expertChip.textContent = on ? '专家 · 协同中' : '专家 · 关闭';
+  expertChip.setAttribute('aria-pressed', String(on));
+  expertChip.classList.toggle('chip-on', on);
+}
+
+expertChip.addEventListener('click', async function () {
+  if (!canOperate()) { addNotice({ level: 'error', message: '只读访客不能开启专家协同模式' }); return; }
+  if (app.state.expertMode) {
+    try {
+      await api('/api/experts/stop', { method: 'POST' });
+    } catch (e) { addNotice({ level: 'error', message: '关闭专家模式失败：' + (e.message || '') }); }
+    return;
+  }
+  // The current draft becomes the team's opening task (same as sending it to main).
+  const task = input.value.trim();
+  expertChip.disabled = true;
+  try {
+    const result = await api('/api/experts/start', { method: 'POST', body: task ? { task: task } : {} });
+    if (result && result.expertMode) {
+      if (task) { input.value = ''; autoGrow(); }
+    } else {
+      addNotice({ level: 'error', message: '专家团队生成失败，请查看错误提示。' });
+    }
+  } catch (e) {
+    addNotice({ level: 'error', message: '开启专家模式失败：' + (e.message || '') });
+  } finally {
+    expertChip.disabled = false;
+  }
+});
+
+/** Plugin market: the installed plugins, skills, tools and MCP connections. */
+const MARKET_SOURCE_LABELS = { builtin: '内置', external: '外部', project: '项目', user: '用户', extra: '额外', mcp: 'MCP' };
+
+function marketCard(name, description, source) {
+  const card = el('div', 'market-card');
+  const badge = el('span', 'extension-badge' + (source === 'external' || source === 'project' ? ' external' : ''), MARKET_SOURCE_LABELS[source] || source);
+  card.appendChild(el('span', 'market-name', name));
+  card.appendChild(el('span', 'market-desc', description || ''));
+  card.appendChild(badge);
+  return card;
+}
+
+function renderMarket() {
+  const query = (marketSearch.value || '').trim().toLowerCase();
+  const match = function (name, desc) { return !query || name.toLowerCase().includes(query) || String(desc || '').toLowerCase().includes(query); };
+  marketBody.textContent = '';
+
+  const plugins = (app.state.plugins || []).filter(function (p) { return match(p.name, p.description); });
+  const skills = (app.state.skills || []).filter(function (s) { return match(s.name, s.description); });
+  const tools = (app.state.tools || []).filter(function (t) { return match(t.name, t.description); });
+  const mcp = (app.state.mcp || []).filter(function (m) { return match(m.name, m.state); });
+
+  function section(title, items, cardFor) {
+    const sec = el('section', 'market-section');
+    const heading = el('h2', '', title + ' ');
+    heading.appendChild(el('span', 'count-badge', String(items.length)));
+    sec.appendChild(heading);
+    const list = el('div', 'market-list');
+    if (!items.length) {
+      list.appendChild(el('p', 'market-empty', query ? '没有匹配项。' : '当前工作区没有此项。'));
+    } else {
+      items.forEach(function (item) { list.appendChild(cardFor(item)); });
+    }
+    sec.appendChild(list);
+    marketBody.appendChild(sec);
+  }
+
+  section('已挂载插件', plugins, function (p) {
+    return marketCard(p.name, p.description, p.source);
+  });
+  section('技能', skills, function (sk) {
+    return marketCard(sk.name, (sk.description || '') + (sk.whenToUse ? '（' + sk.whenToUse + '）' : ''), sk.source);
+  });
+  section('工具目录', tools, function (t) {
+    return marketCard(t.name, t.description, t.source === 'mcp' || t.source === 'computer' ? t.source : 'builtin');
+  });
+  section('MCP 连接', mcp, function (m) {
+    return marketCard(m.name, (m.state || '') + (m.toolCount ? ' · ' + m.toolCount + ' 个工具' : '') + (m.error ? ' · ' + m.error : ''), 'mcp');
+  });
+}
+
+function openMarket() {
+  renderMarket();
+  marketDialog.showModal();
+}
+
+marketBtn.addEventListener('click', openMarket);
+marketClose.addEventListener('click', function () { marketDialog.close(); });
+marketSearch.addEventListener('input', renderMarket);
 
 /** Checkboxes for the agent types configured to open with this workspace. */
 function renderSettingsAgents() {
@@ -4567,6 +4710,8 @@ function applyState(st) {
   if (Array.isArray(st.models)) app.state.models = st.models;
   if (Array.isArray(st.providers)) app.state.providers = st.providers;
   if (st.update) app.state.update = st.update;
+  app.state.expertMode = !!st.expertMode;
+  if (Array.isArray(st.skills)) app.state.skills = st.skills;
   if (st.modelStatus) app.state.modelStatus = st.modelStatus;
   if (st.contextBudget) app.state.contextBudget = st.contextBudget;
   if ('compactModel' in st) app.state.compactModel = st.compactModel ?? null;
@@ -4591,6 +4736,7 @@ function applyState(st) {
   renderExtensions();
   renderWeixin();
   renderUpdateStatus();
+  renderExpertChip();
   setDocumentTitle();
   if (st.sessionId && st.sessionId !== app.state.sessionId) {
     adoptSession(st.sessionId, { replay: !!app.state.sessionId || !app.everLive });

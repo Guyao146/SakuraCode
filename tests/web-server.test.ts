@@ -1218,3 +1218,86 @@ describe('web server — update checks', () => {
     expect(release.requests).toBeGreaterThanOrEqual(2)
   })
 })
+
+describe('web server — collaborative expert session', () => {
+  const post = (url: string, body?: unknown) => fetch(url, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body),
+  })
+
+  it('spawns the expert team, delivers the opening task and fans out later messages', async () => {
+    const received: string[] = []
+    const adapter = new MockAdapter([(req) => {
+      received.push(String(req.messages.at(-1)?.content ?? ''))
+      return [text('expert reply')]
+    }])
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-experts-'))
+    const handle = await runWebServer({ cwd: tmpDir, sessionDir: 'sessions', jobsDir: 'jobs', adapter, approvalMode: 'yolo', quiet: true, open: false })
+    cleanups.push(async () => {
+      await handle.close()
+      await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {})
+    })
+    try {
+      const started = await (await post(handle.url + 'api/experts/start', { task: '重构登录模块' })).json() as { expertMode: boolean; started: string[] }
+      expect(started.expertMode).toBe(true)
+      expect(started.started).toEqual(['架构师', '实现者', '审查者'])
+      const state = await (await fetch(handle.url + 'api/state')).json() as { expertMode: boolean; agents: Array<{ name: string }> }
+      expect(state.expertMode).toBe(true)
+      expect(state.agents.map((a) => a.name).sort()).toEqual(['main', '实现者', '架构师', '审查者'].sort())
+      // The opening task went to every expert (background turns, async).
+      await vi.waitFor(() => expect(received.filter((m) => m === '重构登录模块').length).toBe(3), { timeout: 10_000 })
+      // A user message reaches main + all three experts (4 requests).
+      await post(handle.url + 'api/message', { text: '补充测试用例' })
+      await vi.waitFor(() => expect(received.filter((m) => m === '补充测试用例').length).toBe(4), { timeout: 10_000 })
+      expect(received).toHaveLength(7)
+    } catch (error) {
+      throw error
+    }
+  })
+
+  it('stop ends the fan-out but keeps the experts on the roster', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-experts-stop-'))
+    const handle = await runWebServer({ cwd: tmpDir, sessionDir: 'sessions', jobsDir: 'jobs', adapter: new MockAdapter([text('ok')]), approvalMode: 'yolo', quiet: true, open: false })
+    cleanups.push(async () => {
+      await handle.close()
+      await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {})
+    })
+    await (await post(handle.url + 'api/experts/start')).json()
+    const stateAfter = await (await fetch(handle.url + 'api/state')).json() as { expertMode: boolean; agents: Array<{ name: string }> }
+    expect(stateAfter.expertMode).toBe(true)
+    const stopped = await (await post(handle.url + 'api/experts/stop')).json() as { ok: boolean; stopped: boolean }
+    expect(stopped).toEqual({ ok: true, stopped: true })
+    const state = await (await fetch(handle.url + 'api/state')).json() as { expertMode: boolean; agents: Array<{ name: string }> }
+    expect(state.expertMode).toBe(false)
+    expect(state.agents.map((a) => a.name)).toContain('架构师')
+    // stop is idempotent: a second call reports nothing to stop.
+    const again = await (await post(handle.url + 'api/experts/stop')).json() as { stopped: boolean }
+    expect(again.stopped).toBe(false)
+  })
+
+  it('rejects unknown expert keys and an empty task', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-experts-bad-'))
+    const handle = await runWebServer({ cwd: tmpDir, sessionDir: 'sessions', jobsDir: 'jobs', adapter: new MockAdapter([text('ok')]), approvalMode: 'yolo', quiet: true, open: false })
+    cleanups.push(async () => {
+      await handle.close()
+      await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {})
+    })
+    expect((await post(handle.url + 'api/experts/start', { experts: ['ghost'] })).status).toBe(400)
+    expect((await post(handle.url + 'api/experts/start', { task: '   ' })).status).toBe(400)
+    // A single valid subset starts only that member.
+    const started = await (await post(handle.url + 'api/experts/start', { experts: ['reviewer'] })).json() as { started: string[] }
+    expect(started.started).toEqual(['审查者'])
+  })
+
+  it('exposes mounted skills in the state snapshot', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-experts-skills-'))
+    await fs.mkdir(path.join(tmpDir, '.sakura', 'skills', 'bug-hunt'), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, '.sakura', 'skills', 'bug-hunt', 'SKILL.md'), '---\nname: bug-hunt\ndescription: 定位 bug\nwhenToUse: 修 bug 时\n---\n按步骤定位问题。\n')
+    const handle = await runWebServer({ cwd: tmpDir, sessionDir: 'sessions', jobsDir: 'jobs', adapter: new MockAdapter([text('ok')]), approvalMode: 'yolo', quiet: true, open: false })
+    cleanups.push(async () => {
+      await handle.close()
+      await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {})
+    })
+    const state = await (await fetch(handle.url + 'api/state')).json() as { skills: Array<{ name: string; description: string; whenToUse: string; source: string }> }
+    expect(state.skills).toContainEqual({ name: 'bug-hunt', description: '定位 bug', whenToUse: '修 bug 时', source: 'project' })
+  })
+})

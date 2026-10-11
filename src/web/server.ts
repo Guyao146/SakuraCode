@@ -16,7 +16,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { fileURLToPath } from 'node:url'
 import * as path from 'node:path'
 import { createHarness, type Harness, type HarnessOptions } from '../harness.js'
-import { APPROVAL_MODES, type ApprovalMode, type ConfirmHandler, type HarnessContext } from '../core/index.js'
+import { APPROVAL_MODES, type ApprovalMode, type AgentHandle, type ConfirmHandler, type HarnessContext } from '../core/index.js'
 import { isSessionId, SessionError } from '../core/session.js'
 import { fetchUpstreamModels, type UpstreamFormat } from '../core/llm.js'
 import { loadConfig, type SakuraConfig } from '../config.js'
@@ -30,6 +30,7 @@ import type { ToolContext } from '../core/types.js'
 import { WeixinBridge, WeixinBridgeError, type WeixinSaved } from '../integrations/weixin.js'
 import type { WeixinTransport } from '../integrations/weixin-client.js'
 import { UpdateChecker, type UpdateInfo } from '../updates.js'
+import { DEFAULT_EXPERTS, resolveExperts, type ExpertPreset } from '../experts.js'
 
 const VERSION = '0.7.1'
 
@@ -250,6 +251,12 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   let liveApprovalMode = opts.approvalMode
   let contextCache: { key: string; tokens: number } | null = null
   const persistSettings = opts.onPersistSettings
+  /**
+   * Collaborative expert session: when on, every user message is delivered to
+   * the main agent and each live expert. Cleared on workspace remount.
+   */
+  let expertMode = false
+  const expertIds = new Set<string>()
   /** Release feed for the settings "check for updates" card; failures land in `error`, never throw. */
   const updateChecker = new UpdateChecker(VERSION, opts.updatesBaseUrl)
 
@@ -422,8 +429,65 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     }
   }
 
+  /** Live expert handles (dead ids are pruned); the team dies with its session. */
+  function liveExperts(): AgentHandle[] {
+    const handles: AgentHandle[] = []
+    for (const id of expertIds) {
+      const handle = ctx.agents.get(id)
+      if (handle) handles.push(handle)
+    }
+    if (handles.length !== expertIds.size) {
+      for (const id of [...expertIds]) if (!ctx.agents.get(id)) expertIds.delete(id)
+      if (expertIds.size === 0) expertMode = false
+    }
+    return handles
+  }
+
+  /**
+   * Start the collaborative expert session: spawn the requested presets as
+   * background sub-agents (existing roster names are skipped) and optionally
+   * deliver the opening task to each of them.
+   */
+  async function startExpertTeam(task?: string, keys?: string[]): Promise<{ started: string[]; skipped: string[] }> {
+    const presets = resolveExperts(keys)
+    const started: string[] = []
+    const skipped: string[] = []
+    const takenNames = new Set(ctx.agents.list().map((a) => a.name))
+    for (const preset of presets) {
+      if (takenNames.has(preset.name)) { skipped.push(preset.name); continue }
+      try {
+        const handle = ctx.agents.spawn({
+          name: preset.name,
+          seed: '',
+          autoStart: false,
+          persistentSession: true,
+          background: true,
+          systemPrompt: preset.systemPrompt,
+          tools: preset.tools,
+          meta: { role: 'sub', expert: preset.key, description: preset.description },
+        })
+        expertIds.add(handle.id)
+        started.push(preset.name)
+      } catch (error) {
+        broadcast({ type: 'notice', level: 'error', message: `专家「${preset.name}」启动失败:${error instanceof Error ? error.message : String(error)}` })
+      }
+    }
+    if (started.length) {
+      expertMode = true
+      if (task && task.trim()) {
+        // The opening task is the user's, not a parent's — deliver it raw so
+        // the mailbox prefix from deliver() does not clutter the prompt.
+        for (const handle of liveExperts()) void handle.turn(task.trim()).catch(() => {})
+      }
+    }
+    return { started, skipped }
+  }
+
   function bindHarness(next: Harness): void {
     contextCache = null
+    // The roster is rebuilt on remount, so the expert team cannot survive one.
+    expertMode = false
+    expertIds.clear()
     const previous: Harness | undefined = harness
     previous?.dispose()
     harness = next
@@ -575,6 +639,9 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     // Otherwise an in-flight snapshot can resurrect a just-deleted session.
     if (mount !== ctx || snapshotWorkspace !== workspaceId() || snapshotRevision !== revision) return stateSnapshot()
     const plugins = ctx.peek<{ list(): Array<{ name: string; description?: string; source: string }> }>('plugins')
+    const skills = ctx.peek<{
+      list(): Array<{ name: string; description?: string; whenToUse?: string; source: string }>
+    }>('skills')
     const mcp = ctx.peek<McpLike>('mcp')
     return {
       version: VERSION,
@@ -600,6 +667,10 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       compactModel: compactionModel(),
       /** Cached update-check result; absent until the first check completes. */
       update: updateChecker.cached(),
+      /** Collaborative expert session: user messages also go to the expert team. */
+      expertMode,
+      /** Mounted skills (.sakura/skills + user dir + extra dirs), absent without core-skills. */
+      skills: skills?.list().map((s) => ({ name: s.name, description: s.description ?? '', whenToUse: s.whenToUse ?? '', source: s.source })) ?? [],
       sessions: sessions.map((s) => ({ id: s.id, title: s.title ?? s.id, updatedAt: s.startedAt, size: s.events, deleteBlocked: sessionDeletionBlock(s.id) })),
       agents: ctx.agents.list().map(projectAgent),
       tools: ctx.tools.list().map((t) => ({
@@ -683,6 +754,9 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       pendingQuestions.cancel()
       pendingPlans.cancel()
       ctx.agents.disposeAll()
+      // The expert team lived in the old session's roster; switching ends it.
+      expertMode = false
+      expertIds.clear()
       ctx.approval.engine.clearSessionAllows()
       harness.main({ resumeSessionId: sessionId })
       // Preserve the selected model on the new main agent.
@@ -1200,7 +1274,47 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
         .catch((error: unknown) => {
           broadcast({ type: 'notice', level: 'error', message: error instanceof Error ? error.message : String(error) })
         })
+      // Expert session: the same task goes to every live expert (text only —
+      // pasted images stay with the main agent).
+      if (expertMode) {
+        for (const handle of liveExperts()) void handle.turn(text).catch(() => {})
+      }
       json(res, 202, { ok: true, queued })
+      return
+    }
+
+    if (pathname === '/api/experts/start' && method === 'POST') {
+      const body = await bodyJson(req) as { task?: unknown; experts?: unknown }
+      assertWorkspaceSame()
+      if (body.task !== undefined && body.task !== null && (typeof body.task !== 'string' || !body.task.trim())) {
+        throw new HttpError(400, 'task must be a non-empty string')
+      }
+      let presets: ExpertPreset[]
+      try {
+        presets = resolveExperts(Array.isArray(body.experts) ? body.experts.map(String) : undefined)
+      } catch (error) {
+        throw new HttpError(400, error instanceof Error ? error.message : String(error))
+      }
+      const result = await startExpertTeam(typeof body.task === 'string' ? body.task : undefined, presets.map((p) => p.key))
+      await refreshState()
+      if (result.started.length) {
+        broadcast({ type: 'notice', level: 'info', message: `专家协同模式已开启：${result.started.join('、')}${result.skipped.length ? `（${result.skipped.join('、')}已在花名册中，共用现有成员）` : ''}。` })
+      } else {
+        broadcast({ type: 'notice', level: 'error', message: '专家协同模式开启失败：没有可生成的专家成员。' })
+      }
+      json(res, 200, { expertMode: result.started.length > 0, ...result })
+      return
+    }
+
+    if (pathname === '/api/experts/stop' && method === 'POST') {
+      assertWorkspaceSame()
+      const stopped = expertMode
+      expertMode = false
+      await refreshState()
+      if (stopped) {
+        broadcast({ type: 'notice', level: 'info', message: '专家协同模式已关闭；专家成员保留在花名册中，可继续单独对话或删除。' })
+      }
+      json(res, 200, { ok: true, stopped })
       return
     }
 
