@@ -29,6 +29,7 @@ import { PendingRequests } from './pending.js'
 import type { ToolContext } from '../core/types.js'
 import { WeixinBridge, WeixinBridgeError, type WeixinSaved } from '../integrations/weixin.js'
 import type { WeixinTransport } from '../integrations/weixin-client.js'
+import { UpdateChecker, type UpdateInfo } from '../updates.js'
 
 const VERSION = '0.7.1'
 
@@ -111,6 +112,10 @@ export interface WebServerOptions {
   onPersistWeixin?: (settings: WeixinSaved) => Promise<void>
   /** Injected transport for offline integration tests or a compatible provider. */
   weixinTransport?: WeixinTransport
+  /** Override the release URL the update check polls (tests use a local server). */
+  updatesBaseUrl?: string
+  /** Run the periodic background update check (default true). */
+  updatesAutoCheck?: boolean
 }
 
 export interface WebServerHandle {
@@ -245,6 +250,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   let liveApprovalMode = opts.approvalMode
   let contextCache: { key: string; tokens: number } | null = null
   const persistSettings = opts.onPersistSettings
+  /** Release feed for the settings "check for updates" card; failures land in `error`, never throw. */
+  const updateChecker = new UpdateChecker(VERSION, opts.updatesBaseUrl)
 
   // ------------------------------------------------------------------
   // SSE fan-out
@@ -282,6 +289,38 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     } catch {
       /* harness already torn down — nothing to report */
     }
+  }
+
+  // ------------------------------------------------------------------
+  // Update checks — the periodic background poll notifies SSE clients exactly
+  // once per release. A failed poll (offline, blocked) only caches `error`.
+  // ------------------------------------------------------------------
+  let updateTimer: ReturnType<typeof setTimeout> | undefined
+  const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
+  const runUpdateCheck = async (): Promise<void> => {
+    if (closed) return
+    try {
+      const { info, isNew } = await updateChecker.checkAndDetectChange()
+      if (closed) return
+      if (isNew) {
+        // The notice renders as a chat line; the 'update' frame drives the
+        // settings badge and survives reloads via state.update.
+        broadcast({ type: 'notice', level: 'info', message: `发现新版本 v${info.latest}，可在设置中查看详情。` })
+        broadcast({ type: 'update', update: info })
+      } else {
+        // Keep state.update fresh (checkedAt / recovery after an error).
+        void refreshState()
+      }
+    } catch {
+      /* checkAndDetectChange never throws; defensive only */
+    } finally {
+      if (!closed && updateTimer !== undefined) {
+        updateTimer = setTimeout(() => void runUpdateCheck(), UPDATE_CHECK_INTERVAL_MS)
+      }
+    }
+  }
+  if (opts.updatesAutoCheck !== false) {
+    updateTimer = setTimeout(() => void runUpdateCheck(), 5_000)
   }
 
   // ------------------------------------------------------------------
@@ -559,6 +598,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       contextBudget: contextBudget(),
       /** Present only when the compaction plugin is mounted; a value is a dedicated summary model. */
       compactModel: compactionModel(),
+      /** Cached update-check result; absent until the first check completes. */
+      update: updateChecker.cached(),
       sessions: sessions.map((s) => ({ id: s.id, title: s.title ?? s.id, updatedAt: s.startedAt, size: s.events, deleteBlocked: sessionDeletionBlock(s.id) })),
       agents: ctx.agents.list().map(projectAgent),
       tools: ctx.tools.list().map((t) => ({
@@ -1063,6 +1104,15 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
 
     if (pathname === '/api/state' && method === 'GET') {
       json(res, 200, await stateSnapshot())
+      return
+    }
+
+    if (pathname === '/api/updates/check' && method === 'POST') {
+      // Read-only and workspace-independent: available to viewers too, so a
+      // read-only dashboard still shows the version banner.
+      const info = await updateChecker.check()
+      if (info.hasUpdate) broadcast({ type: 'update', update: info })
+      json(res, 200, info)
       return
     }
 
@@ -1679,6 +1729,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       if (closed) return
       closed = true
       clearInterval(heartbeat)
+      if (updateTimer !== undefined) clearTimeout(updateTimer)
       await weixin?.close()
       ctx.agents.disposeAll()
       pending.cancel()

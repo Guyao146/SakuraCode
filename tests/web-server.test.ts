@@ -1126,3 +1126,95 @@ describe('web server — sessions titles and upstream model list', () => {
     }
   })
 })
+
+describe('web server — update checks', () => {
+  const post = (url: string) => fetch(url, { method: 'POST' })
+
+  /** Local fake release feed; tagSequence is served one entry per request. */
+  async function feed(tags: string[]): Promise<{ url: string; requests: number; close(): Promise<void> }> {
+    const requests = { count: 0 }
+    const server = http.createServer((req, res) => {
+      requests.count += 1
+      const tag = tags[Math.min(requests.count - 1, tags.length - 1)] ?? tags.at(-1) ?? ''
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ tag_name: tag, html_url: `https://example.com/releases/${tag}` }))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    return {
+      url: `http://127.0.0.1:${port}/releases/latest`,
+      get requests() { return requests.count },
+      async close() {
+        server.closeAllConnections()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      },
+    }
+  }
+
+  it('reports the latest release and an available update', async () => {
+    const release = await feed(['v99.0.0'])
+    cleanups.push(async () => { await release.close() })
+    const { handle, base } = await boot([text('ok')], 'yolo', { updatesBaseUrl: release.url, updatesAutoCheck: false })
+    const info = await (await post(`${base}/api/updates/check`)).json() as {
+      current: string; latest: string; hasUpdate: boolean; releaseUrl: string
+    }
+    expect(info.current).toBe('0.7.1')
+    expect(info).toMatchObject({ latest: '99.0.0', hasUpdate: true, releaseUrl: 'https://example.com/releases/v99.0.0' })
+    // The cached result is mirrored into the state snapshot so reloads keep the badge.
+    const state = await (await fetch(`${base}/api/state`)).json() as { update?: { latest?: string } }
+    expect(state.update).toMatchObject({ latest: '99.0.0', hasUpdate: true })
+    expect(handle.url).toBeTruthy()
+  })
+
+  it('reports "already up to date" for an equal version', async () => {
+    const release = await feed(['v0.7.1'])
+    cleanups.push(async () => { await release.close() })
+    const { base } = await boot([text('ok')], 'yolo', { updatesBaseUrl: release.url, updatesAutoCheck: false })
+    const info = await (await post(`${base}/api/updates/check`)).json() as { hasUpdate: boolean; latest: string }
+    expect(info).toMatchObject({ latest: '0.7.1', hasUpdate: false })
+  })
+
+  it('treats a prerelease tag as its base version and older releases as no update', async () => {
+    const release = await feed(['v0.7.0-rc1', 'v0.6.2'])
+    cleanups.push(async () => { await release.close() })
+    const { base } = await boot([text('ok')], 'yolo', { updatesBaseUrl: release.url, updatesAutoCheck: false })
+    const first = await (await post(`${base}/api/updates/check`)).json() as { hasUpdate: boolean }
+    expect(first.hasUpdate).toBe(false)
+    const second = await (await post(`${base}/api/updates/check`)).json() as { hasUpdate: boolean }
+    expect(second.hasUpdate).toBe(false)
+  })
+
+  it('keeps serving when the release feed is unreachable and reports the error', async () => {
+    // Port 1 is reserved and never accepts connections on loopback.
+    const { base } = await boot([text('ok')], 'yolo', {
+      updatesBaseUrl: 'http://127.0.0.1:1/releases/latest', updatesAutoCheck: false,
+    })
+    const response = await post(`${base}/api/updates/check`)
+    expect(response.status).toBe(200)
+    const info = await response.json() as { hasUpdate: boolean; error?: string }
+    expect(info.hasUpdate).toBe(false)
+    expect(info.error).toBeTruthy()
+    // The failure is cached in state, not fatal to the rest of the API.
+    const state = await (await fetch(`${base}/api/state`)).json() as { update?: { error?: string } }
+    expect(state.update?.error).toBeTruthy()
+  })
+
+  it('notifies SSE clients once per release from the background check', async () => {
+    const release = await feed(['v99.0.0'])
+    cleanups.push(async () => { await release.close() })
+    const { base } = await boot([text('ok')], 'yolo', { updatesBaseUrl: release.url })
+    const sse = sseCollect(base)
+    cleanups.push(async () => { await sse.stop() })
+    // The background poll starts ~5s after boot and detects the newer release;
+    // the notice fires exactly once, the 'update' frame drives the settings badge.
+    await vi.waitFor(() => {
+      expect(sse.frames.filter((f) => f.type === 'notice' && String(f.message).includes('发现新版本'))).toHaveLength(1)
+      expect(sse.frames.filter((f) => f.type === 'update')).toHaveLength(1)
+    }, { timeout: 15_000 })
+    // A manual re-check refreshes the badge but stays quiet on the notice channel.
+    await post(`${base}/api/updates/check`)
+    await vi.waitFor(() => expect(sse.frames.filter((f) => f.type === 'update')).toHaveLength(2), { timeout: 10_000 })
+    expect(sse.frames.filter((f) => f.type === 'notice' && String(f.message).includes('发现新版本'))).toHaveLength(1)
+    expect(release.requests).toBeGreaterThanOrEqual(2)
+  })
+})

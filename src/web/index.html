@@ -300,6 +300,12 @@ a:hover {
 .btn-soft {
   background: var(--surface-soft); color: var(--text-soft);
 }
+/* Update-available dot on the settings button. */
+.btn.update-dot { position: relative; }
+.btn.update-dot::after {
+  content: ''; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--surface-raised);
+}
 .btn-soft:hover {
   color: var(--text);
 }
@@ -1412,6 +1418,13 @@ body.history-view .composer-zone { display: none; }
             <span class="field-hint">打开该工作区时自动创建这些协作成员；取消勾选的成员在下次切换 / 重挂工作区后不再出现。</span>
           </div>
         </div>
+        <div class="settings-card">
+          <h2>版本与更新</h2>
+          <div class="form-field"><span class="field-label">检查更新</span>
+            <div class="field-row"><span class="field-hint" id="settingsUpdateStatus">尚未检查。</span><button class="btn btn-soft" id="settingsCheckUpdates" type="button" aria-label="检查 SakuraCode 新版本">检查更新</button></div>
+            <span class="field-hint" id="settingsUpdateHint">从 GitHub Releases 读取最新版本；检查失败只提示，不影响其他功能。</span>
+          </div>
+        </div>
         <div class="settings-actions"><button class="btn btn-accent" id="settingsSave" type="button">保存设置</button><span class="settings-message" id="settingsMessage" role="status"></span></div>
       </div>
       <section class="settings-card weixin-card" id="weixinCard" aria-labelledby="weixinTitle" hidden>
@@ -1984,6 +1997,9 @@ const settingsProviderSel = $('settingsProvider');
 const settingsFormatSel = $('settingsFormat');
 const settingsFetchModels = $('settingsFetchModels');
 const settingsModelOptions = $('settingsModelOptions');
+const settingsCheckUpdates = $('settingsCheckUpdates');
+const settingsUpdateStatus = $('settingsUpdateStatus');
+const settingsUpdateHint = $('settingsUpdateHint');
 let settingsProviderId = '';
 let settingsFetchedModels = [];
 const settingsApiKey = $('settingsApiKey');
@@ -2028,6 +2044,7 @@ const app = {
     compactModel: null,
     models: [],
     providers: [],
+    update: null,
     thinking: 'off',
     agentTypes: [],
     todos: [],
@@ -2454,6 +2471,47 @@ async function fetchUpstreamModelList() {
     settingsFetchModels.textContent = '拉取模型';
   }
 }
+
+/** Update-check card: renders the cached check result and runs manual checks. */
+function renderUpdateStatus() {
+  const info = app.state.update;
+  settingsViewBtn.classList.toggle('update-dot', !!(info && info.hasUpdate));
+  if (!info) {
+    settingsUpdateStatus.textContent = '尚未检查。';
+    settingsUpdateHint.textContent = '从 GitHub Releases 读取最新版本；检查失败只提示，不影响其他功能。';
+    return;
+  }
+  if (info.error) {
+    settingsUpdateStatus.textContent = '当前 v' + info.current + ' · 检查失败：' + info.error;
+    settingsUpdateHint.textContent = '网络不可达或更新源无响应；可稍后重试。';
+    return;
+  }
+  if (info.hasUpdate) {
+    settingsUpdateStatus.textContent = '当前 v' + info.current + ' · 最新 v' + info.latest;
+    settingsUpdateHint.textContent = '有新版本可用。前往 GitHub Releases 页面下载更新。';
+  } else {
+    settingsUpdateStatus.textContent = '当前 v' + info.current + ' · 最新 v' + (info.latest || info.current);
+    settingsUpdateHint.textContent = '已是最新版本。';
+  }
+}
+
+settingsCheckUpdates.addEventListener('click', async function () {
+  settingsCheckUpdates.disabled = true;
+  settingsCheckUpdates.textContent = '检查中…';
+  try {
+    const info = await api('/api/updates/check', { method: 'POST' });
+    app.state.update = info;
+    renderUpdateStatus();
+    if (info && info.hasUpdate) {
+      addNotice({ level: 'info', message: '发现新版本 v' + info.latest + '，可在设置中查看详情。' });
+    }
+  } catch (e) {
+    settingsUpdateStatus.textContent = '检查失败：' + (e.message || '无法连接更新源');
+  } finally {
+    settingsCheckUpdates.disabled = false;
+    settingsCheckUpdates.textContent = '检查更新';
+  }
+});
 
 /** Checkboxes for the agent types configured to open with this workspace. */
 function renderSettingsAgents() {
@@ -4508,6 +4566,7 @@ function applyState(st) {
   if (Array.isArray(st.mcp)) app.state.mcp = st.mcp;
   if (Array.isArray(st.models)) app.state.models = st.models;
   if (Array.isArray(st.providers)) app.state.providers = st.providers;
+  if (st.update) app.state.update = st.update;
   if (st.modelStatus) app.state.modelStatus = st.modelStatus;
   if (st.contextBudget) app.state.contextBudget = st.contextBudget;
   if ('compactModel' in st) app.state.compactModel = st.compactModel ?? null;
@@ -4531,6 +4590,7 @@ function applyState(st) {
   renderMcp();
   renderExtensions();
   renderWeixin();
+  renderUpdateStatus();
   setDocumentTitle();
   if (st.sessionId && st.sessionId !== app.state.sessionId) {
     adoptSession(st.sessionId, { replay: !!app.state.sessionId || !app.everLive });
@@ -5300,6 +5360,9 @@ function handleFrame(f) {
       break;
     case 'notice':
       addNotice(f);
+      break;
+    case 'update':
+      if (f.update) { app.state.update = f.update; renderUpdateStatus(); }
       break;
     default:
       break;

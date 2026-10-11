@@ -1,6 +1,7 @@
 /** Real GUI regressions against the local harness, with a scripted model only.
  * Set SAKURA_UI_SCREENSHOTS to a directory to keep desktop/mobile previews. */
 import { promises as fs, readFileSync } from 'node:fs'
+import * as http from 'node:http'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { Script } from 'node:vm'
@@ -653,5 +654,42 @@ browserSuite('web client — real browser', () => {
     await browser.waitFor("!document.getElementById('renameSessionError').hidden")
     expect(await browser.evaluate("document.getElementById('renameSessionDialog').open")).toBe(true)
     await browser.evaluate("document.getElementById('renameSessionCancel').click()")
+  })
+
+  it('checks for updates from the settings card and badges the settings button', async () => {
+    const updatesWs = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-updates-ui-'))
+    await fs.writeFile(path.join(updatesWs, 'package.json'), '{"type":"module"}')
+    const feed = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ tag_name: 'v99.0.0', html_url: 'https://example.com/releases/v99.0.0' }))
+    })
+    await new Promise<void>((resolve) => feed.listen(0, '127.0.0.1', resolve))
+    const feedPort = (feed.address() as { port: number }).port
+    const updates = await runWebServer({
+      cwd: updatesWs,
+      adapter: new GuiAdapter(),
+      config: { pluginsDir: 'no-plugins' },
+      open: false, quiet: true,
+      updatesBaseUrl: `http://127.0.0.1:${feedPort}/releases/latest`,
+    })
+    try {
+      await browser.navigate(updates.url)
+      await browser.waitFor("document.getElementById('connectionLabel')?.textContent === '本地服务已连接'")
+      // No check yet: the card waits and the settings button has no badge.
+      await browser.evaluate("document.getElementById('settingsViewBtn').click()")
+      await browser.waitFor("!document.getElementById('settingsView').hidden")
+      expect(await browser.evaluate("document.getElementById('settingsUpdateStatus').textContent")).toBe('尚未检查。')
+      expect(await browser.evaluate("document.getElementById('settingsViewBtn').classList.contains('update-dot')")).toBe(false)
+      // A manual check renders latest/current and sets the badge.
+      await browser.evaluate("document.getElementById('settingsCheckUpdates').click()")
+      await browser.waitFor("document.getElementById('settingsUpdateStatus').textContent.includes('最新 v99.0.0')")
+      expect(await browser.evaluate<string>("document.getElementById('settingsUpdateStatus').textContent")).toContain('当前 v')
+      expect(await browser.evaluate("document.getElementById('settingsViewBtn').classList.contains('update-dot')")).toBe(true)
+    } finally {
+      await updates.close()
+      feed.closeAllConnections()
+      feed.close()
+      await fs.rm(updatesWs, { recursive: true, force: true, retryDelay: 100 }).catch(() => {})
+    }
   })
 })

@@ -240,6 +240,7 @@ REPL 也接受管道喂入（`echo "任务" | sakura`）：stdin 到达 EOF 时�
 - **会话命名**：新建会话时立即要求输入名称（可留空走默认），会话项右侧 ✎ 可随时重命名（`PATCH /api/sessions/:id {title}`，单行 ≤60 字符，自动截断）；标题持久化为 `session/note` 事件，回放与导出都能读到，不再是启动时的时间戳 id。
 - **默认模型与端点**：`DEFAULT_MODEL` 为 `gpt-4o-mini`，默认 base URL 指向 `https://api.openai.com/v1`，只回退 `SAKURA_*` 环境变量，文档与示例配置只写 OpenAI 官方示例（配置文件与插件 schema 里仍可自由填写任意兼容服务）。密钥建议用 `SAKURA_API_KEY`。
 - **主页与侧栏布局**：欢迎页在常见窗口高度下不再垂直滚动（内容区上边距与间距收紧、低高度下压缩欢迎区）；「新建会话」按钮移到「最近会话」标题与搜索框之间，搜索框下方只保留会话列表本身。
+- **检查更新**：设置页「版本与更新」卡的「检查更新」调用 `POST /api/updates/check`，从 GitHub Releases（`api.github.com/repos/Guyao146/SakuraCode/releases/latest`，可用 `updatesBaseUrl` 选项覆盖）读取最新 tag 并与当前版本做 semver 比较（忽略预发布后缀）。服务启动 5 秒后自动检查一次、之后每 6 小时复检；发现新版本时**每个版本只通知一次**——SSE 推送一条 `notice`（聊天气泡）和一个 `update` 帧（驱动设置按钮上的红点徽标，随 `state.update` 持久化到状态快照，刷新页面后仍在）。检查失败只缓存 `error` 字段并显示「检查失败」，不影响任何其他功能；接口对所有已登录角色开放（只读访客也能看到版本提示），`updatesAutoCheck: false` 可完全关闭后台轮询。
 
 ## 健壮性（Windows 及其他）
 
