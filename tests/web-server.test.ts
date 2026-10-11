@@ -843,7 +843,7 @@ describe('web server — workspace switch keeps tools on the new workspace', () 
     await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve))
     const port = (probe.address() as { port: number }).port
     // No custom adapter: the built-in OpenAI-compatible adapter is the
-    // registered "deepseek-chat" model, so the patch must reconfigure it
+    // registered "chat-pro" model, so the patch must reconfigure it
     // rather than taking the registered-model shortcut.
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-web-patch-'))
     const handle = await runWebServer({
@@ -862,11 +862,11 @@ describe('web server — workspace switch keeps tools on the new workspace', () 
     try {
       const applied = await (await post(handle.url + 'api/desktop/settings', {
         baseURL: `http://127.0.0.1:${port}`,
-        model: 'deepseek-chat',
+        model: 'chat-pro',
         apiKey: 'patched-key',
       })).json() as { hasApiKey: boolean; model: string }
       expect(applied.hasApiKey).toBe(true)
-      expect(applied.model).toBe('deepseek-chat')
+      expect(applied.model).toBe('chat-pro')
       await post(handle.url + 'api/message', { text: 'probe' })
       await vi.waitFor(() => expect(requests.some((r) => r.url === '/chat/completions')).toBe(true), { timeout: 5000 })
       expect(requests.find((r) => r.url === '/chat/completions')?.auth).toBe('Bearer patched-key')

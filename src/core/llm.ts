@@ -309,7 +309,7 @@ export class LLMService {
 }
 
 // ---------------------------------------------------------------------------
-// OpenAI-compatible adapter (OpenAI / DeepSeek / GLM / Moonshot / local)
+// OpenAI-compatible adapter (OpenAI / GLM / Moonshot / local endpoints)
 // ---------------------------------------------------------------------------
 
 /** Built-in default chat model (what `--dump-config` and the REPL banner report). */

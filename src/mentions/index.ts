@@ -1,10 +1,10 @@
 /**
  * mentions — expand `@path` / `@path:start-end` tokens in user input into
- * appended file-context blocks (ZCode-style @-mentions, prompt injection).
+ * appended file-context blocks (prompt injection).
  * Pure functions only: upstream wiring decides when to call expandMentions;
  * this module registers nothing.
  *
- * Token grammar (paths never contain whitespace, ZCode constraint):
+ * Token grammar (paths never contain whitespace):
  *   @<path>            whole file
  *   @<path>:<start>    from 1-based line <start> to end of file
  *   @<path>:<s>-<e>    1-based closed interval [<s>, <e>]

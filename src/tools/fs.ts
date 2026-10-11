@@ -1,5 +1,5 @@
 /**
- * tool-fs — read / write / edit. Aligns with dsh-tool-fs: line-numbered
+ * tool-fs — read / write / edit. Line-numbered
  * reads, a read-before-write policy, exact-match string editing.
  */
 

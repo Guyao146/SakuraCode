@@ -115,7 +115,7 @@ describe('agentDefsPlugin — discovery', () => {
 
 describe('agentDefsPlugin — frontmatter', () => {
   it('parses description/model and keeps tools "full"/"core" as-is', async () => {
-    writeAgent(projDir, 'fulla', 'description: all tools\nmodel: deepseek-reasoner\ntools: full')
+    writeAgent(projDir, 'fulla', 'description: all tools\nmodel: reasoner-pro\ntools: full')
     writeAgent(projDir, 'cored', 'description: core tools\ntools: core')
     useProjectCwd()
     const ctx = await mountAgents()
@@ -123,7 +123,7 @@ describe('agentDefsPlugin — frontmatter', () => {
 
     expect(service.get('fulla')).toMatchObject({
       description: 'all tools',
-      model: 'deepseek-reasoner',
+      model: 'reasoner-pro',
       tools: 'full',
     })
     expect(service.get('cored')?.tools).toBe('core') // passes through, not ['core']

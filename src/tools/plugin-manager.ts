@@ -32,7 +32,7 @@ export const pluginRegistryPlugin: PluginModule = {
 }
 
 export const pluginManagerToolPlugin: PluginModule = {
-  name: 'dsh-plugin-manager',
+  name: 'tool-plugin-manager',
   description: 'plugin_manager — list mounted plugins',
   inject: ['tools', 'plugins'],
   apply(_ctx, _config, toolsLike: unknown, registryLike: unknown) {

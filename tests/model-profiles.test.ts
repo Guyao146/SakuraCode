@@ -35,7 +35,7 @@ afterEach(async () => {
 
 /**
  * Mount the minimal kernel. The core-llm row is pinned (explicit baseURL/model)
- * so SAKURA_* / DEEPSEEK_* env vars on the dev machine cannot skew the tests.
+ * so SAKURA_* env vars on the dev machine cannot skew the tests.
  */
 async function mount(profiles?: Record<string, ModelProfileConfig>): Promise<Context> {
   const ctx = new Context()

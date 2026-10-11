@@ -1,5 +1,5 @@
 /**
- * Permission rules — ZCode-style allow/deny lists evaluated before the
+ * Permission rules — allow/deny lists evaluated before the
  * classic approval flow (src/core/approval.ts). Rules glob-match tool
  * names (or `kind:*` class forms) with optional argument-prefix
  * constraints. deny always beats allow; anything unmatched falls

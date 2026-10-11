@@ -1,7 +1,7 @@
 /**
  * @sakura/kernel — a Cordis-style microkernel.
  *
- * Design aligns with DeepSeek Harness (dsh): "Everything is a Plugin".
+ * Design philosophy: "Everything is a Plugin".
  * A running harness is a Context — a repository of services. Plugins are
  * plain modules exporting `name` / `inject` / `apply(ctx, config)`, or a
  * Service subclass whose lifecycle the kernel mounts into the context.

@@ -1,4 +1,4 @@
-/** Barrel of the shipped tool plugins (mounted by the dsh-base bundle). */
+/** Barrel of the shipped tool plugins (mounted by the base bundle). */
 
 export { fsToolsPlugin } from './fs.js'
 export { fsSearchPlugin } from './search.js'

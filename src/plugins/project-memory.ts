@@ -1,9 +1,9 @@
 /**
- * core-project-memory — AGENTS.md / CLAUDE.md project memory. Memory files are
+ * core-project-memory — AGENTS.md project memory. Memory files are
  * discovered from the configured cwd (the harness working directory) upward to
- * the filesystem root (nearest first, AGENTS.md preferred over CLAUDE.md in the
- * same directory) and exposed as a reversible system-prompt section so models
- * pick up per-project instructions without any configuration.
+ * the filesystem root (nearest first, one file per directory) and exposed as
+ * a reversible system-prompt section so models pick up per-project
+ * instructions without any configuration.
  */
 
 import * as fs from 'node:fs'
@@ -33,8 +33,8 @@ export interface ProjectMemoryConfig {
   maxChars?: number
 }
 
-/** Candidate basenames per directory; first existing one wins (AGENTS.md first). */
-const MEMORY_BASENAMES = ['AGENTS.md', 'CLAUDE.md'] as const
+/** Memory basename scanned in every directory up the tree. */
+const MEMORY_BASENAME = 'AGENTS.md'
 
 interface CacheEntry {
   mtimeMs: number
@@ -87,16 +87,11 @@ class ProjectMemory implements ProjectMemoryService {
     const found: string[] = []
     let dir = this.cwd
     for (;;) {
-      for (const base of MEMORY_BASENAMES) {
-        const candidate = path.join(dir, base)
-        try {
-          if (fs.statSync(candidate).isFile()) {
-            found.push(candidate)
-            break
-          }
-        } catch {
-          // missing or unreadable — try the next basename
-        }
+      const candidate = path.join(dir, MEMORY_BASENAME)
+      try {
+        if (fs.statSync(candidate).isFile()) found.push(candidate)
+      } catch {
+        // missing or unreadable — keep scanning upward
       }
       if (found.length >= this.maxFiles) break
       const parent = path.dirname(dir)
@@ -125,12 +120,12 @@ class ProjectMemory implements ProjectMemoryService {
 
 export const projectMemoryPlugin: PluginModule<ProjectMemoryConfig> = {
   name: 'core-project-memory',
-  description: 'Loads AGENTS.md/CLAUDE.md project memory from cwd upward into the system prompt',
+  description: 'Loads AGENTS.md project memory from cwd upward into the system prompt',
   inject: ['systemPrompt'],
   config: {
     type: 'object',
     properties: {
-      cwd: { type: 'string', description: 'directory the upward AGENTS.md/CLAUDE.md scan starts from (default process.cwd())' },
+      cwd: { type: 'string', description: 'directory the upward AGENTS.md scan starts from (default process.cwd())' },
       maxFiles: { type: 'number', description: 'maximum memory files loaded, nearest first (default 3)' },
       maxChars: { type: 'number', description: 'per-file character cap (default 8000)' },
     },

@@ -53,9 +53,9 @@ const memoryOf = (ctx: Context) => ctx.get<ProjectMemoryService>('projectMemory'
 const assemble = (ctx: Context) => ctx.get<SystemPromptService>('systemPrompt').assemble()
 
 describe('projectMemoryPlugin', () => {
-  it('finds nearest-first: cwd AGENTS.md before parent CLAUDE.md, with correct char counts', async () => {
+  it('finds nearest-first up the tree, with correct char counts', async () => {
     const root = await makeTree({
-      'CLAUDE.md': 'p'.repeat(40),
+      'AGENTS.md': 'p'.repeat(40),
       'inner/AGENTS.md': 'a'.repeat(10),
     })
     process.chdir(path.join(root, 'inner'))
@@ -65,26 +65,12 @@ describe('projectMemoryPlugin', () => {
 
     expect(files).toHaveLength(2)
     expect(files[0]).toEqual({ path: path.join(root, 'inner', 'AGENTS.md'), chars: 10 })
-    expect(files[1]).toEqual({ path: path.join(root, 'CLAUDE.md'), chars: 40 })
-  })
-
-  it('prefers AGENTS.md over CLAUDE.md when both live in the same directory', async () => {
-    const root = await makeTree({
-      'AGENTS.md': 'agents wins',
-      'CLAUDE.md': 'claude loses',
-    })
-    process.chdir(root)
-
-    const ctx = await mount({ maxFiles: 1 })
-    const files = memoryOf(ctx).files()
-
-    expect(files).toHaveLength(1)
-    expect(files[0]!.path).toBe(path.join(root, 'AGENTS.md'))
+    expect(files[1]).toEqual({ path: path.join(root, 'AGENTS.md'), chars: 40 })
   })
 
   it('renders a system-prompt section with both contents and cwd-relative titles', async () => {
     const root = await makeTree({
-      'CLAUDE.md': 'from the parent directory',
+      'AGENTS.md': 'from the parent directory',
       'inner/AGENTS.md': 'from the working directory',
     })
     process.chdir(path.join(root, 'inner'))
@@ -93,19 +79,19 @@ describe('projectMemoryPlugin', () => {
     const prompt = assemble(ctx)
 
     expect(prompt).toContain('## Project instructions — AGENTS.md')
-    expect(prompt).toContain('## Project instructions — ../CLAUDE.md')
+    expect(prompt).toContain('## Project instructions — ../AGENTS.md')
     expect(prompt).toContain('from the working directory')
     expect(prompt).toContain('from the parent directory')
-    const agentsAt = prompt.indexOf('AGENTS.md')
-    const claudeAt = prompt.indexOf('../CLAUDE.md')
-    expect(agentsAt).toBeGreaterThanOrEqual(0)
-    expect(claudeAt).toBeGreaterThan(agentsAt)
+    const innerAt = prompt.indexOf('AGENTS.md')
+    const parentAt = prompt.indexOf('../AGENTS.md')
+    expect(innerAt).toBeGreaterThanOrEqual(0)
+    expect(parentAt).toBeGreaterThan(innerAt)
   })
 
   it('reload() re-reads changed files: chars and assemble() reflect new content', async () => {
     const root = await makeTree({
       'inner/AGENTS.md': 'before reload',
-      'CLAUDE.md': 'stable parent',
+      'AGENTS.md': 'stable parent',
     })
     process.chdir(path.join(root, 'inner'))
 
@@ -135,7 +121,7 @@ describe('projectMemoryPlugin', () => {
 
   it('honors maxChars truncation and maxFiles cap', async () => {
     const root = await makeTree({
-      'CLAUDE.md': 'x'.repeat(100),
+      'AGENTS.md': 'x'.repeat(100),
       'inner/AGENTS.md': 'y'.repeat(50),
     })
     process.chdir(path.join(root, 'inner'))

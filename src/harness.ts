@@ -1,6 +1,6 @@
 /**
- * createHarness — composes the running harness (the dsh-base bundle
- * equivalent): core services, the shipped tool plugins, identity prompt,
+ * createHarness — composes the running harness (the base
+ * bundle): core services, the shipped tool plugins, identity prompt,
  * out-of-tree bundles, and plugin-config/disabled rows from the YAML config.
  * Everything below is a plugin; the composition itself is data.
  */
@@ -83,7 +83,7 @@ export const BASE_BUNDLE: Array<{ plugin: Plugin; name: string }> = [
   { name: 'tool-subagent', plugin: subagentToolsPlugin },
   { name: 'tool-subagent-control', plugin: subagentControlPlugin },
   { name: 'mcp-manager', plugin: mcpPlugin },
-  { name: 'dsh-plugin-manager', plugin: pluginManagerToolPlugin },
+  { name: 'tool-plugin-manager', plugin: pluginManagerToolPlugin },
 ]
 
 export interface HarnessOptions {
@@ -171,7 +171,7 @@ async function composeHarness(ctx: HarnessContext, opts: HarnessOptions): Promis
     ...(opts.systemPrompt || config.systemPrompt ? { prompt: opts.systemPrompt ?? config.systemPrompt } : {}),
     ...(cwd ? { cwd } : {}),
   })
-  // Discovery plugins: keep .sakura/* lookups — and the AGENTS.md/CLAUDE.md
+  // Discovery plugins: keep .sakura/* lookups — and the AGENTS.md
   // scan — on the harness cwd, not process.cwd().
   if (cwd) {
     setRow('core-skills', { cwd })

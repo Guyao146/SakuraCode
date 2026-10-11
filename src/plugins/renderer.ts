@@ -2,7 +2,7 @@
  * ui-renderer — terminal rendering as a plugin. It only listens to ui/*
  * events the agent loop emits, so the loop never imports UI code.
  * Modes: 'repl' streams the main agent's text live; 'headless' buffers the
- * answer and prints it at turn end (like zcode -p).
+ * answer and prints it at turn end (like `sakura -p`).
  */
 
 import type { PluginModule } from '../kernel/index.js'

@@ -1,6 +1,6 @@
 # SakuraCode
 
-**SakuraCode** 是一个对标 ZCode 风格的终端编码智能体（CLI coding agent），用 TypeScript（ESM）编写。模型通过工具循环读写代码、执行命令、检索仓库，并能把自包含子任务并行委派给 subagent。它的插件体系刻意对齐 DeepSeek Harness（dsh）的架构哲学 —— **Everything is a Plugin**：内置一个零依赖的 Cordis 风格微内核，服务、工具、审批门、终端渲染全部以插件形式挂载，组合本身就是数据。
+**SakuraCode** 是一个终端编码智能体（CLI coding agent），用 TypeScript（ESM）编写。模型通过工具循环读写代码、执行命令、检索仓库，并能把自包含子任务并行委派给 subagent。它的插件体系遵循 **Everything is a Plugin** 的架构哲学：内置一个零依赖的 Cordis 风格微内核，服务、工具、审批门、终端渲染全部以插件形式挂载，组合本身就是数据。
 
 ## 特性
 
@@ -26,8 +26,8 @@
 ```bash
 npm install
 
-# 环境变量（任意 OpenAI 兼容端点均可：DeepSeek / GLM / Moonshot / OpenAI / 本地 vLLM …）
-export SAKURA_API_KEY="sk-..."                       # 或 DEEPSEEK_API_KEY
+# 环境变量（任意 OpenAI 兼容端点均可：OpenAI / GLM / Moonshot / 本地 vLLM …）
+export SAKURA_API_KEY="sk-..."
 export SAKURA_BASE_URL="https://api.openai.com/v1"    # 可选，默认 https://api.openai.com/v1
 export SAKURA_MODEL="gpt-4o-mini"                    # 可选，默认 gpt-4o-mini
 
@@ -46,7 +46,7 @@ npx tsx src/cli.ts --web --port 3099   # 自定端口并自动打开浏览器
 
 ## Windows 桌面 GUI
 
-Windows 10/11 x64 上可构建双击启动的 **SakuraCode Desktop.exe**：原生启动器内置独立运行引擎，直接用系统 Chrome / Edge 的应用模式打开聊天工作区（没有普通浏览器标签栏）；项目和模型设置位于主界面，不弹启动前设置窗，也不是把 CLI 快捷方式重命名成桌面版。它沿用 Web GUI 的会话、协作、审批和运行看板；不复刻 DeepSeek Harness 的 Electron 框架或账户 / 自动更新功能。
+Windows 10/11 x64 上可构建双击启动的 **SakuraCode Desktop.exe**：原生启动器内置独立运行引擎，直接用系统 Chrome / Edge 的应用模式打开聊天工作区（没有普通浏览器标签栏）；项目和模型设置位于主界面，不弹启动前设置窗，也不是把 CLI 快捷方式重命名成桌面版。它沿用 Web GUI 的会话、协作、审批和运行看板。
 
 ```powershell
 Set-Location 'D:\VSProject\SakuraCode'
@@ -169,14 +169,14 @@ REPL 也接受管道喂入（`echo "任务" | sakura`）：stdin 到达 EOF 时�
 
 ## Skills / Hooks / 上下文压缩 / 项目记忆 / ask_user / web_search
 
-对齐 ZCode 的六项能力，全部以插件形式提供：
+六项核心能力，全部以插件形式提供：
 
 - **Skills**（`core-skills`）：`.sakura/skills/<名字>/SKILL.md`（YAML frontmatter：name/description/whenToUse + 正文指令）自动注入系统提示词，模型用 `skill` 工具按需加载完整指令。项目 > 用户 > extraDirs 优先级，`/skills` 查看。
 - **Hooks**（`core-hooks`）：`plugins.core-hooks.config.hooks` 配置 `pre-tool-call | post-tool-call | turn-end | session-start` 四类事件的外部命令（glob matcher）；pre 钩子非零退出即否决该工具调用。命令经 stdin 收到 JSON payload，环境变量 `SAKURA_*` 同步。
 - **上下文压缩**（`core-compaction`）：会话事件超过阈值（默认 120，`auto: 0` 关闭）自动用模型摘要压缩旧上下文；`/compact [focus]` 手动触发。压缩标记进会话日志，`deriveMessages` 投影自动截断。
 - **压缩用别的模型**：摘要请求默认跟随当前选中的模型；`plugins.core-compaction.config.compactModel`(已注册模型名或适配器 id)让所有压缩固定走指定模型。写在 `~/.sakura/config.yml` 即为全局统一；写在项目 `sakura.yml` 里则该项目单独覆盖(逐键合并,项目优先)。Web GUI 输入框上方的「压缩 · 跟随当前」下拉也可即时调整(经 `POST /api/settings {compactModel}`,只影响之后的压缩,运行中也能改)。GUI 运行时选择不落盘;要持久化请用配置文件。
 - **按工作区配置**：桌面模式下每个工作区可单独指定「会话目录」(默认 `<工作区>/.sakura/sessions`;填绝对路径或相对工作区的路径,修改后该工作区重新挂载);「自动开启的智能体」勾选 `.sakura/agents/*.md` 里定义的类型,挂载该工作区时自动创建这些协作成员,取消勾选在下次切换/重挂后生效。全局的「新工作区默认目录」决定「新建工作区」按钮在哪里创建子目录(留空时需填写完整路径);服务端会递归创建目录,不存在的目标仍然会被拒绝切换。这些偏好随桌面设置持久化(每工作区一条),不写入项目目录。
-- **项目记忆**（`core-project-memory`）：从工作目录向上发现 AGENTS.md（缺失则 CLAUDE.md，每层二选一），最多 3 层注入系统提示词，`/memory` 查看。
+- **项目记忆**（`core-project-memory`）：从工作目录向上发现 AGENTS.md（每层一个），最多 3 层注入系统提示词，`/memory` 查看。
 - **ask_user**（`core-interaction` + `tool-ask-user`）：模型通过 `ask_user` 工具向用户提问（2-4 个选项或自由文本）；REPL 走终端问答，Web GUI 渲染成对话流里的选项卡片。
 - **web_search**（`tool-web-search`）：DuckDuckGo HTML 端点搜索，返回标题/URL/摘要列表，`endpoint` 可换自建代理。
 
@@ -238,16 +238,8 @@ REPL 也接受管道喂入（`echo "任务" | sakura`）：stdin 到达 EOF 时�
 - **多上游站点与格式**：设置页的「上游站点」按已注册提供方列出（`state.providers`，仅含 id / 默认模型 / 是否默认 / 格式，不含密钥），可保存多个站点配置并切换；每站点独立选择**请求格式**——`chat-completions`（`POST {baseURL}/chat/completions`）或 `responses`（`POST {baseURL}/responses`，OpenAI Responses API）。`responses` 格式把消息映射为 `input` 项（assistant 的历史 `tool_calls` 展开为 `function_call` 项、tool 回合展开为 `function_call_output` 项，无正文内容的 assistant 回合不占项），工具声明使用扁平 schema（`{type:'function', name, description, parameters}`），并解析 `response.output_text.delta` / `response.function_call_arguments.delta` / `response.completed` 等事件——文本、思考摘要、工具调用、用量与 done 原因都与 chat-completions 对齐。不含推理事件的兼容服务在 `completed` 时回落解析 `output_text`。
 - **拉取模型列表**：设置页「拉取模型」调用 `POST /api/models/upstream`（仅桌面/操控端可用且与当前工作区一致），GET `{baseURL}/models` 并解析 `{data:[{id}]}`，去重排序后填入模型输入框的候选列表（最多 512 条，15 秒超时）。仅允许 https（loopback http 除外）地址，避免把密钥发到明文端点；该接口只读取列表，不改配置。
 - **会话命名**：新建会话时立即要求输入名称（可留空走默认），会话项右侧 ✎ 可随时重命名（`PATCH /api/sessions/:id {title}`，单行 ≤60 字符，自动截断）；标题持久化为 `session/note` 事件，回放与导出都能读到，不再是启动时的时间戳 id。
-- **默认值去 DeepSeek 化**：`DEFAULT_MODEL` 改为 `gpt-4o-mini`，默认 base URL 指向 `https://api.openai.com/v1`，`DEEPSEEK_*` 环境变量回落与文档 / 示例配置里的 deepseek 占位全部移除（配置文件与插件 schema 里仍可自由填写任意兼容服务）。密钥建议用 `SAKURA_API_KEY`。
+- **默认模型与端点**：`DEFAULT_MODEL` 为 `gpt-4o-mini`，默认 base URL 指向 `https://api.openai.com/v1`，只回退 `SAKURA_*` 环境变量，文档与示例配置只写 OpenAI 官方示例（配置文件与插件 schema 里仍可自由填写任意兼容服务）。密钥建议用 `SAKURA_API_KEY`。
 - **主页与侧栏布局**：欢迎页在常见窗口高度下不再垂直滚动（内容区上边距与间距收紧、低高度下压缩欢迎区）；「新建会话」按钮移到「最近会话」标题与搜索框之间，搜索框下方只保留会话列表本身。
-
-### 交互参考
-
-本轮参考的是官方文档而非竞品实机验收：
-
-- [Claude Code interactive mode](https://code.claude.com/docs/en/interactive-mode)：任务运行期间继续输入、明确区分排队与中断，以及文件列表到差异的定位。SakuraCode 使用自己的串行邮箱语义，不声称与其 steering/后台机制等价。
-- [OpenCode agents](https://opencode.ai/docs/agents/)：主智能体/子智能体的角色区分和独立子会话导航，落实为不破坏主任务的只读入口。
-- [OpenAI Codex 官方仓库](https://github.com/openai/codex)：确认了 CLI/桌面产品入口；详细特性页本次未能读取，不据此声称完成审批或队列细节对比。
 
 ## 健壮性（Windows 及其他）
 
@@ -276,7 +268,7 @@ REPL 也接受管道喂入（`echo "任务" | sakura`）：stdin 到达 EOF 时�
 │  → core-jobs → core-agent                                      │
 │  → tool-fs / tool-fs-search / tool-shell / tool-jobs           │
 │  → tool-todo / tool-web / tool-subagent / tool-subagent-control│
-│  → dsh-plugin-manager → (bundles + pluginsDir drop-in)          │
+│  → tool-plugin-manager → (bundles + pluginsDir drop-in)          │
 │  → ui-renderer（终端渲染，只听 ui/* 事件）                      │
 └──────────────────────────┬────────────────────────────────────┘
                            │ ctx.plugin(name/inject/apply)
@@ -317,23 +309,6 @@ UI 观测事件：ui/turn/start · ui/text · ui/tool/call · ui/tool/result · 
 - 会话切换是真正的重绑定：`harness.main({ resumeSessionId })` 在目标会话与当前主会话不同时丢弃旧主代理并按目标会话重建；主代理正在跑 turn 时会拒绝并提示先 `interrupt()`/`wait()`。Web GUI 的 `POST /api/sessions` 走同一路径，启动时传的 `--resume` 只在启动时生效一次，不会顶掉之后的切换。
 - 模型选择直达请求：`/model`、GUI 下拉与 `/api/settings {model}` 都会把所选模型名写进请求（`ctx.llm.select()`），而不是只改路由——之前的「换完仍发旧模型/发空字符串」已修；子代理按各自 handle 的 model 行事，不会被全局选择篡改。
 - Web GUI 默认仅限本机；远端监听强制令牌、请求同源校验和访客只读，HTTPS 反代 origin 需显式配置。请求体 15s 内未读完返回 408 并释放连接，不再被挂住的 body 拖死。
-
-## 与 DeepSeek Harness (dsh) 的对齐映射
-
-| 概念 | dsh | SakuraCode |
-| --- | --- | --- |
-| 微内核 | Cordis Context | `src/kernel` 的 `Context`（内置的 Cordis 风格实现，零依赖） |
-| 插件形态 | `name` / `inject` / `apply(ctx)` | 相同 |
-| 服务键 | `ctx.sessions` `ctx.llm` `ctx.tools` `ctx.systemPrompt` `ctx.agents` `ctx.agentLoop` `ctx.shell*` | 相同键名；`ctx.shell` → `ctx.jobs` |
-| 事件模式 | `emit` / `waterfall` / `parallel` / `serial` / `bail` | 相同五种 |
-| 工具管道 | `tools/pre-execute → tools/execute → tools/post-execute` 瀑布 | 相同 |
-| turn 流事件 | `turn/start` `agent/pre-step` `agent/request` `llm/stream` `step/start|end` `turn/end` `agent/turn-stopping` | 相同名（终端渲染走 `ui/*` 前缀） |
-| 会话格式 | `session.jsonl` append-only，"model-visible means logged" | v0 同理念（尚无 zstd 压缩与格式迁移） |
-| 组合 | profile / bundle / patch、`--dump-config` | profile / plugins rows / bundles / `--patch` / `--dump-config` |
-| 多智能体 | `ctx.agents.create`、subagent 工具、`send_message` / `interrupt_agent` / `list_agents` | `ctx.agents.spawn` + 同名工具（mailbox / interrupt / 花名册） |
-| CLI | `dsh web`（Web UI profile） | `sakura` REPL / `-p` one-shot / `sakura --web`（Web GUI） |
-
-诚实的差异：dsh 基于 Cordis 库实现，SakuraCode 则内置了一个同风格的微内核以保持零额外依赖（运行时仅 `yaml`）；dsh 的 tool-catalog 更大，SakuraCode 内置 35 个工具并靠插件补齐长尾。以上是架构与接口形态的对齐映射，不代表任意 dsh 插件可以直接安装；涉及 Cordis 特有 API 或服务契约的插件，仍需适配并针对具体版本验证。
 
 ## 插件开发指南
 

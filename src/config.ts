@@ -1,5 +1,5 @@
 /**
- * Config — profiles & patches, dsh-style. A config is a composition: plugin
+ * Config — profiles & patches. A config is a composition: plugin
  * rows with `config` and `disabled`, out-of-tree `bundles` (module
  * specifiers to import), and a `pluginsDir` for auto-discovered plugin
  * files. Layers: defaults → home file → project file → --patch YAML → flags.

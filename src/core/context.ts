@@ -1,6 +1,6 @@
 /**
  * HarnessContext — the Context subtype a running SakuraCode harness uses.
- * Adds dsh-style typed service accessors (ctx.tools / ctx.llm / ctx.sessions
+ * Adds typed service accessors (ctx.tools / ctx.llm / ctx.sessions
  * / ctx.agents / …) on top of the kernel's key-based registry. Plugin scopes
  * and forks are also HarnessContexts via createContext().
  */

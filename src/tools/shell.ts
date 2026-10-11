@@ -1,6 +1,5 @@
 /**
- * tool-shell — bash / pwsh. Same shape as dsh-tool-bash(-persistent) /
- * dsh-tool-pwsh: { command, description, timeoutMs, workdir,
+ * tool-shell — bash / pwsh. Shape: { command, description, timeoutMs, workdir,
  * run_in_background }. The background option requires ctx.jobs; without the
  * jobs seam it is simply unavailable.
  */

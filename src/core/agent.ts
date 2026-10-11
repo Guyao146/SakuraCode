@@ -1,7 +1,7 @@
 /**
  * ctx.agents / ctx.agentLoop — the Agent interface and the default driver.
  *
- * Turn flow (aligns with dsh):
+ * Turn flow:
  *   turn/start → append user/message → for each step:
  *     agent/pre-step (waterfall; rejection closes the turn without a step)
  *     → step/start → assemble prompt + tool schemas → agent/request

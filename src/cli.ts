@@ -649,7 +649,7 @@ async function main(): Promise<number> {
       case '/memory': {
         const pm = harness.ctx.peek<{ files(): Array<{ path: string; chars: number }> }>('projectMemory')
         const files = pm?.files() ?? []
-        if (!files.length) console.log('no AGENTS.md / CLAUDE.md found from the working directory upward')
+        if (!files.length) console.log('no AGENTS.md found from the working directory upward')
         for (const f of files) console.log(`${f.path}  (${f.chars} chars)`)
         break
       }

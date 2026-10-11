@@ -207,7 +207,7 @@ namespace SakuraCode.Desktop
             Name = "SakuraCodeDesktopHost";
             // The launcher shell stays invisible: the product surface is the
             // dedicated browser app window (no tab bar, no address bar), just
-            // like a native client such as dsh.
+            // like a native client.
             ShowInTaskbar = false;
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
             StartPosition = FormStartPosition.Manual;
@@ -644,7 +644,7 @@ namespace SakuraCode.Desktop
 
         private string Redact(string value)
         {
-            foreach (string secret in new[] { activeSecret, Environment.GetEnvironmentVariable("SAKURA_API_KEY"), Environment.GetEnvironmentVariable("DEEPSEEK_API_KEY") })
+            foreach (string secret in new[] { activeSecret, Environment.GetEnvironmentVariable("SAKURA_API_KEY") })
                 if (!String.IsNullOrEmpty(secret)) value = value.Replace(secret, "[redacted]");
             return Regex.Replace(value, @"(?i)(Bearer\s+)[^\s]+", "$1[redacted]");
         }
