@@ -1,5 +1,8 @@
 # SakuraCode
 
+[![樱落生态成员](https://raw.githubusercontent.com/Guyao146/Sakura-EcoSystem-wiki/main/assets/ConnectEcoSystem.svg)](https://mcylyr.cn)
+[![已编写Wiki](https://raw.githubusercontent.com/Guyao146/Sakura-EcoSystem-wiki/main/assets/sakura-wiki.svg)](https://wiki.mcylyr.cn/)
+
 **SakuraCode** 是一个终端编码智能体（CLI coding agent），用 TypeScript（ESM）编写。模型通过工具循环读写代码、执行命令、检索仓库，并能把自包含子任务并行委派给 subagent。它的插件体系遵循 **Everything is a Plugin** 的架构哲学：内置一个零依赖的 Cordis 风格微内核，服务、工具、审批门、终端渲染全部以插件形式挂载，组合本身就是数据。
 
 ## 特性
