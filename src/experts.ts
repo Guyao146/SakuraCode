@@ -10,7 +10,7 @@
  * which 'core' keeps available.
  */
 
-import type { ToolPolicy } from './core/agent.js'
+import type { AgentHandle, AgentsService, ToolPolicy } from './core/agent.js'
 
 export interface ExpertPreset {
   /** Stable key; clients select members with it. */
@@ -72,4 +72,35 @@ export function resolveExperts(keys?: string[]): ExpertPreset[] {
     if (!presets.some((p) => p.key === key)) presets.push(preset)
   }
   return presets
+}
+
+/**
+ * Spawn the resolved presets onto an agents service, skipping roster names
+ * that already exist (shared by the web server's expert session and the
+ * CLI's /experts command). Never throws per-member; failures just drop out
+ * of the spawned list.
+ */
+export function spawnExperts(
+  agents: AgentsService,
+  keys?: string[],
+  takenNames: ReadonlySet<string> = new Set(agents.list().map((a) => a.name)),
+): { spawned: AgentHandle[]; skipped: string[] } {
+  const spawned: AgentHandle[] = []
+  const skipped: string[] = []
+  for (const preset of resolveExperts(keys)) {
+    if (takenNames.has(preset.name)) { skipped.push(preset.name); continue }
+    spawned.push(
+      agents.spawn({
+        name: preset.name,
+        seed: '',
+        autoStart: false,
+        persistentSession: true,
+        background: true,
+        systemPrompt: preset.systemPrompt,
+        tools: preset.tools,
+        meta: { role: 'sub', expert: preset.key, description: preset.description },
+      }),
+    )
+  }
+  return { spawned, skipped }
 }

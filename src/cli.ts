@@ -15,6 +15,8 @@ import type { ApprovalMode } from './core/index.js'
 import { APPROVAL_MODES } from './core/index.js'
 import type { PluginRegistry } from './tools/plugin-manager.js'
 
+import { DEFAULT_EXPERTS, spawnExperts } from './experts.js'
+import { UpdateChecker } from './updates.js'
 const VERSION = '0.7.1'
 
 interface ParsedArgs {
@@ -69,7 +71,7 @@ function usage(): string {
     '  -h, --help           show this help',
     '  --version            show version',
     '',
-    'REPL commands: /help /exit /agents /mode /model /thinking /tools /plugins /sessions /resume /skills /compact /memory /export /hooks /permissions',
+    'REPL commands: /help /exit /agents /experts /update /mode /model /thinking /tools /plugins /sessions /resume /skills /compact /memory /export /hooks /permissions',
     'Custom commands: .sakura/commands/<name>.md (project) or ~/.sakura/commands/<name>.md → /<name> [args]',
     '',
     `API: set SAKURA_API_KEY, optional SAKURA_BASE_URL, SAKURA_MODEL.`,
@@ -360,8 +362,35 @@ async function main(): Promise<number> {
   })
   rl.prompt()
 
+  // Release notification: checked in the background ~2s after startup so a
+  // reachable update source never delays the first prompt. One line per run.
+  void new UpdateChecker(VERSION)
+    .checkAndDetectChange()
+    .then(({ info, isNew }) => {
+      if (isNew && info.latest) {
+        console.log(`〔更新〕发现新版本 v${info.latest}（当前 v${VERSION}）— https://github.com/Guyao146/SakuraCode/releases/latest`)
+      }
+    })
+    .catch(() => {})
+
   let running = false
   let confirming = false
+  /**
+   * Collaborative expert session (CLI side): every user line goes to the main
+   * agent AND each live expert; the team dies with /new and /resume (they
+   * dispose the roster like the web GUI does on session switch).
+   */
+  const expertHandles: Array<import('./core/agent.js').AgentHandle> = []
+  const expertNames = () => expertHandles.map((h) => h.name).filter((n) => n)
+  function expertModeOn(): boolean {
+    for (let i = expertHandles.length - 1; i >= 0; i--) {
+      if (!harness.ctx.agents.get(expertHandles[i]!.id)) expertHandles.splice(i, 1)
+    }
+    return expertHandles.length > 0
+  }
+  const deliverToExperts = (text: string) => {
+    for (const handle of expertHandles) void handle.turn(text).catch(() => {})
+  }
   interactiveConfirm = async (req, summary) => {
     confirming = true
     try {
@@ -467,7 +496,12 @@ async function main(): Promise<number> {
       for (const miss of expansion.missing) console.log(`[mention] ${miss.mention}: ${miss.reason}`)
       return expansion.text
     })()
-      .then((expanded) => harness.run(expanded))
+      .then((expanded) => {
+        // Same task text goes to every live expert (after @-mention expansion,
+        // matching the web GUI's fan-out).
+        if (expertModeOn()) deliverToExperts(expanded)
+        return harness.run(expanded)
+      })
       .then(() => {})
       .catch((error) => console.error(`[error] ${(error as Error).message}`))
       .finally(() => {
@@ -497,6 +531,8 @@ async function main(): Promise<number> {
     const current = harness.main()
     if (current.status === 'running') current.interrupt()
     harness.ctx.agents.disposeAll()
+    // The expert team lived in the old session's roster.
+    expertHandles.length = 0
     const sessionId = id ? (await harness.ctx.sessions.open(id)).id : (await harness.ctx.sessions.create()).id
     harness.main({ resumeSessionId: sessionId })
     // A fresh main agent is born with the configured default model — carry the
@@ -570,6 +606,47 @@ async function main(): Promise<number> {
         for (const agent of list) {
           console.log(`${agent.id} ${agent.name} — ${agent.status}${agent.result ? ` · ${agent.result.slice(0, 80)}` : ''}`)
         }
+        break
+      }
+      case '/experts': {
+        // usage: /experts (status) | /experts on [opening task] | /experts off
+        const sub = rest[0] ?? 'status'
+        if (sub === 'off') {
+          expertHandles.length = 0
+          console.log('专家协同模式已关闭；专家成员保留在 /agents 花名册中，可继续投递消息。')
+          break
+        }
+        if (sub !== 'on' && sub !== 'status') {
+          console.log('usage: /experts | /experts on [开场任务] | /experts off')
+          break
+        }
+        if (sub === 'status') {
+          if (!expertModeOn()) console.log('专家协同模式关闭中。/experts on [开场任务] 开启三人专家组并行处理同一个任务。')
+          else for (const name of expertNames()) console.log(`${name} — 专家（专家模式开启，每条消息同时发给主智能体与全部专家）`)
+          break
+        }
+        const task = rest.slice(1).join(' ').trim()
+        const { spawned, skipped } = spawnExperts(harness.ctx.agents)
+        for (const handle of spawned) expertHandles.push(handle)
+        if (!spawned.length && expertHandles.length) {
+          console.log('专家已在花名册中（复用现有成员），专家协同模式保持开启。')
+        } else if (!spawned.length) {
+          console.log('专家团队生成失败；请用 /agents 查看花名册。')
+        } else {
+          console.log(`专家协同模式已开启：${spawned.map((h) => h.name).join('、')}${skipped.length ? `（${skipped.join('、')}已在花名册中，共用现有成员）` : ''}。`)
+          console.log('之后每条消息同时发给主智能体与全部专家；/experts off 关闭分发。')
+          if (task) {
+            console.log(`开场任务已投递：${task}`)
+            deliverToExperts(task)
+          }
+        }
+        break
+      }
+      case '/update': {
+        const info = await new UpdateChecker(VERSION).check()
+        if (info.error) console.log(`检查更新失败：${info.error}`)
+        else if (info.hasUpdate) console.log(`发现新版本 v${info.latest}（当前 v${info.current}）：https://github.com/Guyao146/SakuraCode/releases/latest`)
+        else console.log(`已是最新版本 v${info.current}。`)
         break
       }
       case '/tools':

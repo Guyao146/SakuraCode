@@ -30,7 +30,7 @@ import type { ToolContext } from '../core/types.js'
 import { WeixinBridge, WeixinBridgeError, type WeixinSaved } from '../integrations/weixin.js'
 import type { WeixinTransport } from '../integrations/weixin-client.js'
 import { UpdateChecker, type UpdateInfo } from '../updates.js'
-import { DEFAULT_EXPERTS, resolveExperts, type ExpertPreset } from '../experts.js'
+import { DEFAULT_EXPERTS, resolveExperts, spawnExperts, type ExpertPreset } from '../experts.js'
 
 const VERSION = '0.7.1'
 
@@ -459,28 +459,12 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
    * deliver the opening task to each of them.
    */
   async function startExpertTeam(task?: string, keys?: string[]): Promise<{ started: string[]; skipped: string[] }> {
-    const presets = resolveExperts(keys)
-    const started: string[] = []
-    const skipped: string[] = []
     const takenNames = new Set(ctx.agents.list().map((a) => a.name))
-    for (const preset of presets) {
-      if (takenNames.has(preset.name)) { skipped.push(preset.name); continue }
-      try {
-        const handle = ctx.agents.spawn({
-          name: preset.name,
-          seed: '',
-          autoStart: false,
-          persistentSession: true,
-          background: true,
-          systemPrompt: preset.systemPrompt,
-          tools: preset.tools,
-          meta: { role: 'sub', expert: preset.key, description: preset.description },
-        })
-        expertIds.add(handle.id)
-        started.push(preset.name)
-      } catch (error) {
-        broadcast({ type: 'notice', level: 'error', message: `专家「${preset.name}」启动失败:${error instanceof Error ? error.message : String(error)}` })
-      }
+    const { spawned, skipped } = spawnExperts(ctx.agents, keys, takenNames)
+    const started: string[] = []
+    for (const handle of spawned) {
+      expertIds.add(handle.id)
+      started.push(handle.name)
     }
     if (started.length) {
       expertMode = true
