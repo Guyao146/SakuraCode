@@ -1240,9 +1240,16 @@ describe('web server — collaborative expert session', () => {
       const started = await (await post(handle.url + 'api/experts/start', { task: '重构登录模块' })).json() as { expertMode: boolean; started: string[] }
       expect(started.expertMode).toBe(true)
       expect(started.started).toEqual(['架构师', '实现者', '审查者'])
-      const state = await (await fetch(handle.url + 'api/state')).json() as { expertMode: boolean; agents: Array<{ name: string }> }
+      const state = await (await fetch(handle.url + 'api/state')).json() as {
+        expertMode: boolean
+        agents: Array<{ name: string; expert?: string; description?: string }>
+      }
       expect(state.expertMode).toBe(true)
       expect(state.agents.map((a) => a.name).sort()).toEqual(['main', '实现者', '架构师', '审查者'].sort())
+      // Experts carry their preset key and role description for the roster badge.
+      const architect = state.agents.find((a) => a.name === '架构师')
+      expect(architect?.expert).toBe('architect')
+      expect(architect?.description).toContain('方案分解')
       // The opening task went to every expert (background turns, async).
       await vi.waitFor(() => expect(received.filter((m) => m === '重构登录模块').length).toBe(3), { timeout: 10_000 })
       // A user message reaches main + all three experts (4 requests).
@@ -1299,5 +1306,10 @@ describe('web server — collaborative expert session', () => {
     })
     const state = await (await fetch(handle.url + 'api/state')).json() as { skills: Array<{ name: string; description: string; whenToUse: string; source: string }> }
     expect(state.skills).toContainEqual({ name: 'bug-hunt', description: '定位 bug', whenToUse: '修 bug 时', source: 'project' })
+    // Detail endpoint exposes the full SKILL.md body (read-only).
+    const detail = await (await fetch(handle.url + 'api/skills/bug-hunt')).json() as { name: string; body: string; source: string }
+    expect(detail).toMatchObject({ name: 'bug-hunt', source: 'project' })
+    expect(detail.body).toContain('按步骤定位问题。')
+    expect((await fetch(handle.url + 'api/skills/nope')).status).toBe(404)
   })
 })

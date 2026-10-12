@@ -51,6 +51,14 @@ const FORWARD_EVENTS = [
   'compaction/done',
 ] as const
 
+/** Structural type for core-skills so this module doesn't import the plugin. */
+interface SkillMetaLike {
+  name: string
+  description: string
+  whenToUse?: string
+  source: string
+}
+
 /** Structural type for the ask_user interaction service so this module doesn't import the plugin. */
 interface InteractionLike {
   setHandler(handler: ((req: { id: string; question: string; options: string[] }) => Promise<string | null>) | undefined): void
@@ -184,6 +192,8 @@ interface AgentProjection {
   sessionId: string
   description?: string
   error?: string
+  /** Present for members of the built-in expert team (the preset key). */
+  expert?: string
 }
 
 export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServerHandle> {
@@ -576,7 +586,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     sessionId: string
     model: string
     status: string
-    meta: { role?: string; description?: string }
+    meta: { role?: string; description?: string; expert?: string }
     error?: string
   }): AgentProjection => ({
     id: a.id,
@@ -587,6 +597,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     sessionId: a.sessionId,
     description: a.meta.description,
     error: a.error,
+    expert: a.meta.expert,
   })
 
   /**
@@ -1726,6 +1737,22 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     if (pathname === '/api/mcp' && method === 'GET') {
       const mcp = ctx.peek<McpLike>('mcp')
       json(res, 200, { servers: mcp?.status() ?? [] })
+      return
+    }
+
+    const skillMatch = pathname.match(/^\/api\/skills\/([^/]+)$/)
+    if (skillMatch && method === 'GET') {
+      // Read-only skill detail (SKILL.md body); viewers may read it too.
+      const detail = ctx.peek<{ get(name: string): { meta: SkillMetaLike; body: string } | undefined }>('skills')
+        ?.get(decodeURIComponent(skillMatch[1]!))
+      if (!detail) throw new HttpError(404, 'skill not found')
+      json(res, 200, {
+        name: detail.meta.name,
+        description: detail.meta.description,
+        whenToUse: detail.meta.whenToUse,
+        source: detail.meta.source,
+        body: detail.body,
+      })
       return
     }
 

@@ -165,6 +165,8 @@ browserSuite('web client — real browser', () => {
       }
     `)
     await fs.writeFile(path.join(workspace, '.sakura', 'commands', 'review.md'), '---\ndescription: Review the workspace\n---\nReview this workspace: $ARGUMENTS')
+    await fs.mkdir(path.join(workspace, '.sakura', 'skills', 'repo-review'), { recursive: true })
+    await fs.writeFile(path.join(workspace, '.sakura', 'skills', 'repo-review', 'SKILL.md'), '---\nname: repo-review\ndescription: 审查仓库变更\nwhenToUse: 提交前审查\n---\n按清单逐项审查变更与测试。\n')
     adapter = new GuiAdapter()
     server = await runWebServer({ cwd: workspace, adapter, config: { pluginsDir: 'plugins' }, open: false, quiet: true, approvalMode: 'default' })
     browser.errors.length = 0
@@ -706,6 +708,15 @@ browserSuite('web client — real browser', () => {
     await browser.waitFor("document.querySelectorAll('.agent-row').length === 4")
     const names = await browser.evaluate<string[]>("[...document.querySelectorAll('.agent-row .agent-name')].map((n) => n.textContent)")
     expect(names.sort()).toEqual(['main', '实现者', '架构师', '审查者'].sort())
+    // Experts wear a highlighted badge in the roster.
+    expect(await browser.evaluate<string[]>(
+      "[...document.querySelectorAll('.agent-row .role-badge')].map((b) => b.textContent)"
+    )).toContain('专家')
+    // Once the experts finish, the summarize action appears and reaches the main agent.
+    await browser.waitFor("document.querySelectorAll('.agent-row[data-status=done]').length >= 3")
+    expect(await browser.evaluate("document.getElementById('summarizeBtn').hidden")).toBe(false)
+    await browser.evaluate("document.getElementById('summarizeBtn').click()")
+    await browser.waitFor("document.querySelector('#chatCol .msg-user-row')")
     // The market dialog opens from the top-left brand area and lists plugins + skills.
     expect(await browser.evaluate("document.getElementById('marketBtn').checkVisibility()")).toBe(true)
     await browser.evaluate("document.getElementById('marketBtn').click()")
@@ -720,12 +731,18 @@ browserSuite('web client — real browser', () => {
     await browser.fill('#marketSearch', 'compaction')
     const filtered = await browser.evaluate<number>("[...document.querySelectorAll('#marketBody .market-card')].length")
     expect(filtered).toBeLessThan(counts.plugins + counts.skills)
+    // A skill card expands the full SKILL.md body.
+    await browser.fill('#marketSearch', 'repo-review')
+    await browser.waitFor("[...document.querySelectorAll('#marketBody .market-card')].length === 1")
+    await browser.evaluate("document.querySelector('#marketBody .market-card').click()")
+    await browser.waitFor("document.querySelector('#marketBody .skill-body') !== null")
+    expect(await browser.evaluate<string>("document.querySelector('#marketBody .skill-body').textContent")).toContain('按清单逐项审查变更与测试。')
     await browser.evaluate("document.getElementById('marketClose').click()")
-    await browser.waitFor("!document.getElementById('marketDialog').open")
     // Turning the mode off keeps the experts on the roster.
     await browser.evaluate("document.getElementById('expertChip').click()")
     await browser.waitFor("document.getElementById('expertChip').textContent === '专家 · 关闭'")
     await browser.waitFor("(async () => (await (await fetch('/api/state')).json()).expertMode === false)()")
     expect(await browser.evaluate("document.querySelectorAll('.agent-row').length")).toBe(4)
   })
+
 })

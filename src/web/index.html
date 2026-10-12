@@ -400,6 +400,7 @@ a:hover {
   flex: none; padding: 1px 8px; border-radius: 999px; background: var(--surface-soft);
   color: var(--muted); font-size: 11px; line-height: 1.6;
 }
+.role-badge.expert { background: var(--accent-soft); color: var(--accent); }
 .agent-stop {
   flex: none; width: 24px; height: 24px; display: inline-flex; align-items: center;
   justify-content: center; border: 0; border-radius: 8px; background: var(--surface-soft);
@@ -740,6 +741,13 @@ a:hover {
 .market-card .market-desc { flex: 1; min-width: 0; font-size: 12px; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .market-card .extension-badge { flex: none; }
 .market-empty { font-size: 12px; color: var(--muted); padding: 4px 2px; }
+.market-card.market-clickable { cursor: pointer; }
+.market-card.market-clickable:hover { border-color: var(--accent-border); }
+.market-card .skill-body {
+  flex-basis: 100%; margin: 6px 0 0; padding-top: 8px; border-top: 1px dashed var(--border);
+  font-size: 12px; line-height: 1.7; color: var(--text-soft); white-space: pre-wrap; word-break: break-word;
+  max-height: 220px; overflow-y: auto;
+}
 
 .form-field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-soft); }
 .form-field .approval-select { width: 100%; height: 38px; background: var(--page); }
@@ -1576,7 +1584,7 @@ body.history-view .composer-zone { display: none; }
   <div class="panel-scroll" id="teamPanel" role="tabpanel" aria-labelledby="teamTab" tabindex="0">
     <section class="panel-section">
       <div class="team-overview"><div class="team-stat"><strong id="runningAgents">0</strong><span>正在运行</span></div><div class="team-stat"><strong id="totalAgents">0</strong><span>协作成员</span></div></div>
-      <div class="panel-heading"><h3>智能体团队</h3><button class="btn btn-soft compact-btn" id="spawnBtn" type="button">＋ 新建智能体</button></div>
+      <div class="panel-heading"><h3>智能体团队</h3><button class="btn btn-soft compact-btn" id="summarizeBtn" type="button" data-write="1" hidden>汇总专家结论</button><button class="btn btn-soft compact-btn" id="spawnBtn" type="button">＋ 新建智能体</button></div>
       <div id="agentList"></div>
       <p class="panel-note">每个子智能体拥有独立上下文，可并行执行任务。文件修改与命令执行仍遵循当前审批模式。</p>
     </section>
@@ -2586,6 +2594,9 @@ expertChip.addEventListener('click', async function () {
     const result = await api('/api/experts/start', { method: 'POST', body: task ? { task: task } : {} });
     if (result && result.expertMode) {
       if (task) { input.value = ''; autoGrow(); }
+      // Show the team right away — the roster is the mode's control surface.
+      setInspector(true);
+      selectPanel('team');
     } else {
       addNotice({ level: 'error', message: '专家团队生成失败，请查看错误提示。' });
     }
@@ -2637,7 +2648,21 @@ function renderMarket() {
     return marketCard(p.name, p.description, p.source);
   });
   section('技能', skills, function (sk) {
-    return marketCard(sk.name, (sk.description || '') + (sk.whenToUse ? '（' + sk.whenToUse + '）' : ''), sk.source);
+    const card = marketCard(sk.name, (sk.description || '') + (sk.whenToUse ? '（' + sk.whenToUse + '）' : ''), sk.source);
+    // Click expands the full SKILL.md body (read-only); click again to collapse.
+    card.classList.add('market-clickable');
+    card.title = '点击查看技能正文';
+    card.addEventListener('click', async function () {
+      const existing = card.querySelector('.skill-body');
+      if (existing) { existing.remove(); return; }
+      try {
+        const detail = await api('/api/skills/' + encodeURIComponent(sk.name));
+        card.appendChild(el('p', 'skill-body', detail.body || '（技能正文为空）'));
+      } catch (e) {
+        addNotice({ level: 'error', message: '读取技能正文失败：' + (e.message || '') });
+      }
+    });
+    return card;
   });
   section('工具目录', tools, function (t) {
     return marketCard(t.name, t.description, t.source === 'mcp' || t.source === 'computer' ? t.source : 'builtin');
@@ -3941,6 +3966,20 @@ function openAgentMessage(agent) {
 }
 
 document.getElementById('spawnBtn').addEventListener('click', openSpawnModal);
+document.getElementById('summarizeBtn').addEventListener('click', async function () {
+  const btn = $('summarizeBtn');
+  if (!canOperate()) { addNotice({ level: 'error', message: '只读访客不能发送汇总请求' }); return; }
+  const names = (app.state.agents || []).filter(function (a) { return a.expert; }).map(function (a) { return a.name; });
+  if (!names.length) return;
+  btn.disabled = true;
+  try {
+    await api('/api/message', { method: 'POST', body: { text: '请汇总「' + names.join('」「') + '」的分析与结论，综合成统一答复，并给出下一步建议。' } });
+  } catch (e) {
+    addNotice({ level: 'error', message: '汇总请求失败：' + (e.message || '') });
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 input.addEventListener('paste', function (e) {
   const items = e.clipboardData && e.clipboardData.files;
@@ -4355,6 +4394,9 @@ function renderAgents() {
   const agents = (app.state.agents || []).slice().sort(function (a, b) {
     return Number(b.role === 'main') - Number(a.role === 'main');
   });
+  // The summarize action lands once any expert has produced a result.
+  const experts = agents.filter(function (a) { return a.expert; });
+  $('summarizeBtn').hidden = !(app.state.expertMode && experts.some(function (a) { return a.status === 'done' || a.status === 'error'; }));
   const running = agents.filter(function (a) { return a.status === 'running'; }).length;
   $('runningAgents').textContent = String(running);
   $('totalAgents').textContent = String(agents.length);
@@ -4380,7 +4422,7 @@ function renderAgents() {
     head.appendChild(name);
     head.appendChild(el('span', 'agent-status', labels[a.status] || a.status));
     const meta = el('div', 'agent-meta');
-    meta.appendChild(el('span', 'role-badge', a.role === 'main' ? '主智能体' : '子智能体'));
+    meta.appendChild(el('span', 'role-badge' + (a.expert ? ' expert' : ''), a.role === 'main' ? '主智能体' : (a.expert ? '专家' : '子智能体')));
     const model = el('span', 'agent-model', a.model || '默认模型');
     model.title = a.model || '默认模型';
     meta.appendChild(model);
