@@ -15,6 +15,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
+import pkg from '../package.json'
 import { createHarness, type Harness } from '../src/harness.js'
 import {
   framesForText,
@@ -161,7 +162,7 @@ describe('e2e: CLI smoke', () => {
       shell: process.platform === 'win32',
     })
     expect(run.status).toBe(0)
-    expect(run.stdout).toContain('0.7.1')
+    expect(run.stdout).toContain(pkg.version)
   }, CLI_TIMEOUT)
 
   it('dumps the resolved configuration as JSON', () => {

@@ -17,7 +17,7 @@ import type { PluginRegistry } from './tools/plugin-manager.js'
 
 import { DEFAULT_EXPERTS, spawnExperts } from './experts.js'
 import { UpdateChecker } from './updates.js'
-const VERSION = '0.7.1'
+const VERSION = '0.7.2'
 
 interface ParsedArgs {
   print: boolean

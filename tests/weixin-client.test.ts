@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import pkg from '../package.json'
 import { randomUUID } from 'node:crypto'
 import {
   WEIXIN_BASE_URL, WeixinApiError, WeixinClient, validateWeixinBaseUrl, validateWeixinCredentials,
@@ -47,7 +48,7 @@ describe('weixin client — protocol shape', () => {
     const body = JSON.parse(String(calls[0]!.init!.body))
     expect(body.msg).toMatchObject({ to_user_id: 'wx-user-1', client_id: 'client-1', message_type: 2, message_state: 2, context_token: 'ctx-1' })
     expect(body.msg.item_list).toEqual([{ type: 1, text_item: { text: '已完成' } }])
-    expect(body.base_info.bot_agent).toBe('SakuraCode/0.7.1')
+    expect(body.base_info.bot_agent).toBe(`SakuraCode/${pkg.version}`)
   })
 
   it('returns the polling cursor and recognizes business error codes', async () => {
@@ -56,7 +57,7 @@ describe('weixin client — protocol shape', () => {
     const updates = await client.getUpdates(credentials, 'cursor-1', new AbortController().signal)
     expect(updates.get_updates_buf).toBe('cursor-2')
     expect(updates.msgs).toEqual([])
-    expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ get_updates_buf: 'cursor-1', base_info: { channel_version: '2.4.10', bot_agent: 'SakuraCode/0.7.1' } })
+    expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ get_updates_buf: 'cursor-1', base_info: { channel_version: '2.4.10', bot_agent: `SakuraCode/${pkg.version}` } })
   })
 
   it('maps provider failures to expired errors without echoing credentials', async () => {

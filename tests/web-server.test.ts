@@ -8,6 +8,7 @@ import type { Dirent } from 'node:fs'
 import * as crypto from 'node:crypto'
 import * as http from 'node:http'
 import * as os from 'node:os'
+import pkg from '../package.json'
 import * as path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { runWebServer, type DesktopSettingsState, type WebServerHandle, type WebServerOptions } from '../src/web/server.js'
@@ -108,7 +109,7 @@ describe('web server — REST surface', () => {
   it('serves state, rejects unknown routes', async () => {
     const { base } = await boot([text('ok')])
     const state = (await (await fetch(`${base}/api/state`)).json()) as Record<string, unknown>
-    expect(state.version).toBe('0.7.1')
+    expect(state.version).toBe(pkg.version)
     expect(state.approvalMode).toBe('yolo')
     expect(Array.isArray(state.sessions)).toBe(true)
     expect(Array.isArray(state.agents)).toBe(true)
@@ -1158,7 +1159,7 @@ describe('web server — update checks', () => {
     const info = await (await post(`${base}/api/updates/check`)).json() as {
       current: string; latest: string; hasUpdate: boolean; releaseUrl: string
     }
-    expect(info.current).toBe('0.7.1')
+    expect(info.current).toBe(pkg.version)
     expect(info).toMatchObject({ latest: '99.0.0', hasUpdate: true, releaseUrl: 'https://example.com/releases/v99.0.0' })
     // The cached result is mirrored into the state snapshot so reloads keep the badge.
     const state = await (await fetch(`${base}/api/state`)).json() as { update?: { latest?: string } }
@@ -1167,11 +1168,11 @@ describe('web server — update checks', () => {
   })
 
   it('reports "already up to date" for an equal version', async () => {
-    const release = await feed(['v0.7.1'])
+    const release = await feed([`v${pkg.version}`])
     cleanups.push(async () => { await release.close() })
     const { base } = await boot([text('ok')], 'yolo', { updatesBaseUrl: release.url, updatesAutoCheck: false })
     const info = await (await post(`${base}/api/updates/check`)).json() as { hasUpdate: boolean; latest: string }
-    expect(info).toMatchObject({ latest: '0.7.1', hasUpdate: false })
+    expect(info).toMatchObject({ latest: pkg.version, hasUpdate: false })
   })
 
   it('treats a prerelease tag as its base version and older releases as no update', async () => {

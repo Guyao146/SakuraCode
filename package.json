@@ -1,6 +1,6 @@
 {
   "name": "sakuracode",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "SakuraCode — a plugin-first CLI coding agent. Everything is a plugin.",
   "type": "module",
   "bin": {

@@ -236,7 +236,7 @@ REPL 也接受管道喂入（`echo "任务" | sakura`）：stdin 到达 EOF 时�
 - **独立会话可靠读取**：快速切换成员时仅最后一次选择可更新阅读器；访客也可只读查看，不重建主会话或花名册。关闭、退出登录及工作区变化时清理阅读器。复制回答、工具输出和代码块共用真实成功/失败反馈。
 - **验证边界**：配置回归使用本地 HTTP SSE 模型，检查实际请求地址、模型名和认证头；不是对用户真实模型的连通性测试。桌面持久化经私有管道交给启动器，没有新增磁盘写入确认协议；不能把 HTTP 成功等同于所有断电/磁盘失败场景均已覆盖。显式清除跨进程重启的继承语义未在本轮验证。
 
-### 上游站点、格式与会话命名（v0.7.1 增补）
+### 上游站点、格式与会话命名（v0.7.2）
 
 - **多上游站点与格式**：设置页的「上游站点」按已注册提供方列出（`state.providers`，仅含 id / 默认模型 / 是否默认 / 格式，不含密钥），可保存多个站点配置并切换；每站点独立选择**请求格式**——`chat-completions`（`POST {baseURL}/chat/completions`）或 `responses`（`POST {baseURL}/responses`，OpenAI Responses API）。`responses` 格式把消息映射为 `input` 项（assistant 的历史 `tool_calls` 展开为 `function_call` 项、tool 回合展开为 `function_call_output` 项，无正文内容的 assistant 回合不占项），工具声明使用扁平 schema（`{type:'function', name, description, parameters}`），并解析 `response.output_text.delta` / `response.function_call_arguments.delta` / `response.completed` 等事件——文本、思考摘要、工具调用、用量与 done 原因都与 chat-completions 对齐。不含推理事件的兼容服务在 `completed` 时回落解析 `output_text`。
 - **拉取模型列表**：设置页「拉取模型」调用 `POST /api/models/upstream`（仅桌面/操控端可用且与当前工作区一致），GET `{baseURL}/models` 并解析 `{data:[{id}]}`，去重排序后填入模型输入框的候选列表（最多 512 条，15 秒超时）。仅允许 https（loopback http 除外）地址，避免把密钥发到明文端点；该接口只读取列表，不改配置。
@@ -245,7 +245,7 @@ REPL 也接受管道喂入（`echo "任务" | sakura`）：stdin 到达 EOF 时�
 - **主页与侧栏布局**：欢迎页在常见窗口高度下不再垂直滚动（内容区上边距与间距收紧、低高度下压缩欢迎区）；「新建会话」按钮移到「最近会话」标题与搜索框之间，搜索框下方只保留会话列表本身。
 - **检查更新**：设置页「版本与更新」卡的「检查更新」调用 `POST /api/updates/check`，从 GitHub Releases（`api.github.com/repos/Guyao146/SakuraCode/releases/latest`，可用 `updatesBaseUrl` 选项覆盖）读取最新 tag 并与当前版本做 semver 比较（忽略预发布后缀）。服务启动 5 秒后自动检查一次、之后每 6 小时复检；发现新版本时**每个版本只通知一次**——SSE 推送一条 `notice`（聊天气泡）和一个 `update` 帧（驱动设置按钮上的红点徽标，随 `state.update` 持久化到状态快照，刷新页面后仍在）。检查失败只缓存 `error` 字段并显示「检查失败」，不影响任何其他功能；接口对所有已登录角色开放（只读访客也能看到版本提示），`updatesAutoCheck: false` 可完全关闭后台轮询。
 
-## 专家协同模式与插件市场（v0.7.1 增补二）
+## 专家协同模式与插件市场（v0.7.2 增补）
 
 - **专家协同模式**：输入框上方新增「专家 · 关闭」开关（与审批模式 / 思考等级并列为会话模式）。点开后生成内置三人专家组并投递当前草稿作为开场任务；之后**每条用户消息同时发给主智能体与全部专家**（`专家 · 协同中`），各自从专业角度并行处理，成员间可用 `list_agents` / `send_message` 协调，由主智能体汇总。再次点击关闭分发，但专家保留在花名册里，可继续单独对话或删除。
   - 内置专家组定义在 `src/experts.ts`：架构师（只读分析、方案分解与接口约定）、实现者（小步实施并跑测试）、审查者（变更质量与回归风险审查），均用 `core` 工具策略（读写执行全开、不可再嵌套生成子智能体）。`POST /api/experts/start {task?, experts?}` 可选部分成员，未知 key 返回 400；`POST /api/experts/stop` 幂等。

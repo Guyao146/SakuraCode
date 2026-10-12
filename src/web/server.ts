@@ -32,7 +32,7 @@ import type { WeixinTransport } from '../integrations/weixin-client.js'
 import { UpdateChecker, type UpdateInfo } from '../updates.js'
 import { DEFAULT_EXPERTS, resolveExperts, spawnExperts, type ExpertPreset } from '../experts.js'
 
-const VERSION = '0.7.1'
+const VERSION = '0.7.2'
 
 /** Harness events mirrored verbatim to SSE clients ({ type, ...payload }). */
 const FORWARD_EVENTS = [
