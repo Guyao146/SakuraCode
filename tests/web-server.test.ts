@@ -1160,7 +1160,7 @@ describe('web server — update checks', () => {
       current: string; latest: string; hasUpdate: boolean; releaseUrl: string
     }
     expect(info.current).toBe(pkg.version)
-    expect(info).toMatchObject({ latest: '99.0.0', hasUpdate: true, releaseUrl: 'https://example.com/releases/v99.0.0' })
+    expect(info).toMatchObject({ latest: '99.0.0', hasUpdate: true, releaseUrl: 'https://github.com/Guyao146/SakuraCode/releases/tag/v99.0.0' })
     // The cached result is mirrored into the state snapshot so reloads keep the badge.
     const state = await (await fetch(`${base}/api/state`)).json() as { update?: { latest?: string } }
     expect(state.update).toMatchObject({ latest: '99.0.0', hasUpdate: true })
@@ -1175,12 +1175,13 @@ describe('web server — update checks', () => {
     expect(info).toMatchObject({ latest: pkg.version, hasUpdate: false })
   })
 
-  it('treats a prerelease tag as its base version and older releases as no update', async () => {
+  it('rejects prerelease feeds and reports older stable releases as no update', async () => {
     const release = await feed(['v0.7.0-rc1', 'v0.6.2'])
     cleanups.push(async () => { await release.close() })
     const { base } = await boot([text('ok')], 'yolo', { updatesBaseUrl: release.url, updatesAutoCheck: false })
-    const first = await (await post(`${base}/api/updates/check`)).json() as { hasUpdate: boolean }
+    const first = await (await post(`${base}/api/updates/check`)).json() as { hasUpdate: boolean; error?: string }
     expect(first.hasUpdate).toBe(false)
+    expect(first.error).toBeTruthy()
     const second = await (await post(`${base}/api/updates/check`)).json() as { hasUpdate: boolean }
     expect(second.hasUpdate).toBe(false)
   })
@@ -1203,20 +1204,19 @@ describe('web server — update checks', () => {
   it('notifies SSE clients once per release from the background check', async () => {
     const release = await feed(['v99.0.0'])
     cleanups.push(async () => { await release.close() })
-    const { base } = await boot([text('ok')], 'yolo', { updatesBaseUrl: release.url })
+    const { base } = await boot([text('ok')], 'yolo', {
+      updatesBaseUrl: release.url, updatesAutoCheck: true, updatesInitialDelayMs: 100,
+    })
     const sse = sseCollect(base)
     cleanups.push(async () => { await sse.stop() })
-    // The background poll starts ~5s after boot and detects the newer release;
-    // the notice fires exactly once, the 'update' frame drives the settings badge.
     await vi.waitFor(() => {
-      expect(sse.frames.filter((f) => f.type === 'notice' && String(f.message).includes('发现新版本'))).toHaveLength(1)
-      expect(sse.frames.filter((f) => f.type === 'update')).toHaveLength(1)
-    }, { timeout: 15_000 })
-    // A manual re-check refreshes the badge but stays quiet on the notice channel.
+      expect(sse.frames.filter((f) => f.type === 'update' && f.notify === true)).toHaveLength(1)
+    }, { timeout: 5_000 })
     await post(`${base}/api/updates/check`)
-    await vi.waitFor(() => expect(sse.frames.filter((f) => f.type === 'update')).toHaveLength(2), { timeout: 10_000 })
-    expect(sse.frames.filter((f) => f.type === 'notice' && String(f.message).includes('发现新版本'))).toHaveLength(1)
-    expect(release.requests).toBeGreaterThanOrEqual(2)
+    await vi.waitFor(() => expect(sse.frames.filter((f) => f.type === 'update')).toHaveLength(2))
+    expect(sse.frames.filter((f) => f.type === 'update' && f.notify === true)).toHaveLength(1)
+    expect(sse.frames.filter((f) => f.type === 'notice' && String(f.message).includes('发现新版本'))).toHaveLength(0)
+    expect(release.requests).toBe(2)
   })
 })
 
@@ -1229,7 +1229,7 @@ describe('web server — collaborative expert session', () => {
     const received: string[] = []
     const adapter = new MockAdapter([(req) => {
       received.push(String(req.messages.at(-1)?.content ?? ''))
-      return [text('expert reply')]
+      return text('expert reply')
     }])
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-experts-'))
     const handle = await runWebServer({ cwd: tmpDir, sessionDir: 'sessions', jobsDir: 'jobs', adapter, approvalMode: 'yolo', quiet: true, open: false })
@@ -1251,12 +1251,12 @@ describe('web server — collaborative expert session', () => {
       const architect = state.agents.find((a) => a.name === '架构师')
       expect(architect?.expert).toBe('architect')
       expect(architect?.description).toContain('方案分解')
-      // The opening task went to every expert (background turns, async).
-      await vi.waitFor(() => expect(received.filter((m) => m === '重构登录模块').length).toBe(3), { timeout: 10_000 })
+      // The opening task is recorded by main and all three experts.
+      await vi.waitFor(() => expect(received.filter((m) => m === '重构登录模块').length).toBe(4), { timeout: 10_000 })
       // A user message reaches main + all three experts (4 requests).
       await post(handle.url + 'api/message', { text: '补充测试用例' })
       await vi.waitFor(() => expect(received.filter((m) => m === '补充测试用例').length).toBe(4), { timeout: 10_000 })
-      expect(received).toHaveLength(7)
+      expect(received).toHaveLength(8)
     } catch (error) {
       throw error
     }

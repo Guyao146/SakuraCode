@@ -15,7 +15,7 @@ import type { ApprovalMode } from './core/index.js'
 import { APPROVAL_MODES } from './core/index.js'
 import type { PluginRegistry } from './tools/plugin-manager.js'
 
-import { DEFAULT_EXPERTS, spawnExperts } from './experts.js'
+import { spawnExperts } from './experts.js'
 import { UpdateChecker } from './updates.js'
 const VERSION = '0.7.2'
 
@@ -362,16 +362,23 @@ async function main(): Promise<number> {
   })
   rl.prompt()
 
-  // Release notification: checked in the background ~2s after startup so a
-  // reachable update source never delays the first prompt. One line per run.
-  void new UpdateChecker(VERSION)
-    .checkAndDetectChange()
-    .then(({ info, isNew }) => {
-      if (isNew && info.latest) {
-        console.log(`〔更新〕发现新版本 v${info.latest}（当前 v${VERSION}）— https://github.com/Guyao146/SakuraCode/releases/latest`)
-      }
-    })
-    .catch(() => {})
+  const updateChecker = new UpdateChecker(VERSION)
+  let updateTimer: ReturnType<typeof setTimeout> | undefined
+  if (process.stdin.isTTY && process.env.SAKURA_UPDATES_AUTO_CHECK !== '0') {
+    updateTimer = setTimeout(() => {
+      void updateChecker.checkAndDetectChange().then(({ info, isNew }) => {
+        if (isNew && info.latest) {
+          console.log(`\n〔更新〕发现新版本 v${info.latest}（当前 v${VERSION}）— ${info.releaseUrl}`)
+          if (!running && !confirming) rl.prompt(true)
+        }
+      })
+    }, 2_000)
+    updateTimer.unref()
+  }
+  harness.ctx.effect(() => () => {
+    if (updateTimer) clearTimeout(updateTimer)
+    updateChecker.close()
+  })
 
   let running = false
   let confirming = false
@@ -388,9 +395,7 @@ async function main(): Promise<number> {
     }
     return expertHandles.length > 0
   }
-  const deliverToExperts = (text: string) => {
-    for (const handle of expertHandles) void handle.turn(text).catch(() => {})
-  }
+  const deliverToExperts = (text: string) => Promise.all(expertHandles.map((handle) => handle.turn(text)))
   interactiveConfirm = async (req, summary) => {
     confirming = true
     try {
@@ -462,7 +467,7 @@ async function main(): Promise<number> {
   rl.on('line', (line) => {
     const text = line.trim()
     if (confirming) return // the pending confirm question() consumes this line
-    if (running) {
+    if (running || slashInFlight) {
       if (text.startsWith('/') && READ_ONLY_SLASH.has(text.split(/\s+/)[0] ?? '')) {
         void handleSlash(text).catch(() => {})
       } else if (text) {
@@ -496,12 +501,10 @@ async function main(): Promise<number> {
       for (const miss of expansion.missing) console.log(`[mention] ${miss.mention}: ${miss.reason}`)
       return expansion.text
     })()
-      .then((expanded) => {
-        // Same task text goes to every live expert (after @-mention expansion,
-        // matching the web GUI's fan-out).
-        if (expertModeOn()) deliverToExperts(expanded)
-        return harness.run(expanded)
-      })
+      .then((expanded) => Promise.all([
+        harness.run(expanded),
+        expertModeOn() ? deliverToExperts(expanded) : Promise.resolve([]),
+      ]))
       .then(() => {})
       .catch((error) => console.error(`[error] ${(error as Error).message}`))
       .finally(() => {
@@ -525,15 +528,17 @@ async function main(): Promise<number> {
     process.exit(0)
   })
 
-  // Session switching (REPL): abort the running turn if any, clear the agent
-  // roster (subagents included), then spawn a fresh main agent on the target.
+  // Validate the destination before releasing the current roster and history.
   async function switchMainSession(id?: string): Promise<string> {
-    const current = harness.main()
-    if (current.status === 'running') current.interrupt()
-    harness.ctx.agents.disposeAll()
-    // The expert team lived in the old session's roster.
-    expertHandles.length = 0
+    if (harness.ctx.agents.list().some((agent) => agent.status === 'running')) {
+      throw new Error('agents are running; interrupt them or wait before switching sessions')
+    }
     const sessionId = id ? (await harness.ctx.sessions.open(id)).id : (await harness.ctx.sessions.create()).id
+    if (harness.ctx.agents.list().some((agent) => agent.status === 'running')) {
+      throw new Error('agents started work while the session was opening; retry after completion')
+    }
+    harness.ctx.agents.disposeAll()
+    expertHandles.length = 0
     harness.main({ resumeSessionId: sessionId })
     // A fresh main agent is born with the configured default model — carry the
     // `/model` switch over so the selection survives /new and /resume.
@@ -626,24 +631,24 @@ async function main(): Promise<number> {
           break
         }
         const task = rest.slice(1).join(' ').trim()
-        const { spawned, skipped } = spawnExperts(harness.ctx.agents)
-        for (const handle of spawned) expertHandles.push(handle)
-        if (!spawned.length && expertHandles.length) {
-          console.log('专家已在花名册中（复用现有成员），专家协同模式保持开启。')
-        } else if (!spawned.length) {
-          console.log('专家团队生成失败；请用 /agents 查看花名册。')
-        } else {
-          console.log(`专家协同模式已开启：${spawned.map((h) => h.name).join('、')}${skipped.length ? `（${skipped.join('、')}已在花名册中，共用现有成员）` : ''}。`)
-          console.log('之后每条消息同时发给主智能体与全部专家；/experts off 关闭分发。')
-          if (task) {
-            console.log(`开场任务已投递：${task}`)
-            deliverToExperts(task)
-          }
+        const { spawned, reused, skipped } = spawnExperts(harness.ctx.agents)
+        expertHandles.splice(0, expertHandles.length, ...spawned, ...reused)
+        if (!expertHandles.length) {
+          console.log('专家名称与普通成员冲突；请用 /agents 查看花名册。')
+          break
+        }
+        console.log(`专家协同模式已开启：${expertNames().join('、')}${skipped.length ? `（${skipped.join('、')}重名，未加入）` : ''}。`)
+        console.log('之后每条消息同时发给主智能体与全部专家；/experts off 关闭分发。')
+        if (task) {
+          const { expandMentions } = await import('./mentions/index.js')
+          const expansion = expandMentions(task, { cwd: process.cwd() })
+          for (const miss of expansion.missing) console.log(`[mention] ${miss.mention}: ${miss.reason}`)
+          await Promise.all([harness.run(expansion.text), deliverToExperts(expansion.text)])
         }
         break
       }
       case '/update': {
-        const info = await new UpdateChecker(VERSION).check()
+        const { info } = await updateChecker.checkAndDetectChange()
         if (info.error) console.log(`检查更新失败：${info.error}`)
         else if (info.hasUpdate) console.log(`发现新版本 v${info.latest}（当前 v${info.current}）：https://github.com/Guyao146/SakuraCode/releases/latest`)
         else console.log(`已是最新版本 v${info.current}。`)

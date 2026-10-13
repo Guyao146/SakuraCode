@@ -30,7 +30,7 @@ import type { ToolContext } from '../core/types.js'
 import { WeixinBridge, WeixinBridgeError, type WeixinSaved } from '../integrations/weixin.js'
 import type { WeixinTransport } from '../integrations/weixin-client.js'
 import { UpdateChecker, type UpdateInfo } from '../updates.js'
-import { DEFAULT_EXPERTS, resolveExperts, spawnExperts, type ExpertPreset } from '../experts.js'
+import { buildExpertSummary, resolveExperts, spawnExperts } from '../experts.js'
 
 const VERSION = '0.7.2'
 
@@ -123,8 +123,11 @@ export interface WebServerOptions {
   weixinTransport?: WeixinTransport
   /** Override the release URL the update check polls (tests use a local server). */
   updatesBaseUrl?: string
-  /** Run the periodic background update check (default true). */
+  /** Run background update checks; SAKURA_UPDATES_AUTO_CHECK=0 disables the default. */
   updatesAutoCheck?: boolean
+  updatesFetch?: typeof globalThis.fetch
+  updatesInitialDelayMs?: number
+  updatesIntervalMs?: number
 }
 
 export interface WebServerHandle {
@@ -217,6 +220,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   let harness: Harness
   let ctx: HarnessContext
   let switching = false
+  let sessionEpoch = 0
   let deletingSession: string | null = null
   /** True while the whole harness is being remounted on a new workspace —
    *  in-flight requests then see 503 because their context is being dispose()d. */
@@ -268,7 +272,10 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   let expertMode = false
   const expertIds = new Set<string>()
   /** Release feed for the settings "check for updates" card; failures land in `error`, never throw. */
-  const updateChecker = new UpdateChecker(VERSION, opts.updatesBaseUrl)
+  const updateChecker = new UpdateChecker(VERSION, opts.updatesBaseUrl, { fetch: opts.updatesFetch })
+  const autoUpdateCheck = opts.updatesAutoCheck ?? process.env.SAKURA_UPDATES_AUTO_CHECK !== '0'
+  const updateInterval = Math.max(10, opts.updatesIntervalMs ?? 6 * 60 * 60 * 1000)
+  const updateInitialDelay = Math.max(0, opts.updatesInitialDelayMs ?? 5_000)
 
   // ------------------------------------------------------------------
   // SSE fan-out
@@ -308,36 +315,23 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     }
   }
 
-  // ------------------------------------------------------------------
-  // Update checks — the periodic background poll notifies SSE clients exactly
-  // once per release. A failed poll (offline, blocked) only caches `error`.
-  // ------------------------------------------------------------------
   let updateTimer: ReturnType<typeof setTimeout> | undefined
-  const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
-  const runUpdateCheck = async (): Promise<void> => {
-    if (closed) return
-    try {
-      const { info, isNew } = await updateChecker.checkAndDetectChange()
-      if (closed) return
-      if (isNew) {
-        // The notice renders as a chat line; the 'update' frame drives the
-        // settings badge and survives reloads via state.update.
-        broadcast({ type: 'notice', level: 'info', message: `发现新版本 v${info.latest}，可在设置中查看详情。` })
-        broadcast({ type: 'update', update: info })
-      } else {
-        // Keep state.update fresh (checkedAt / recovery after an error).
-        void refreshState()
-      }
-    } catch {
-      /* checkAndDetectChange never throws; defensive only */
-    } finally {
-      if (!closed && updateTimer !== undefined) {
-        updateTimer = setTimeout(() => void runUpdateCheck(), UPDATE_CHECK_INTERVAL_MS)
-      }
-    }
+  let updateInFlight: Promise<UpdateInfo> | undefined
+  function runUpdateCheck(): Promise<UpdateInfo> {
+    if (updateInFlight) return updateInFlight
+    updateInFlight = updateChecker.checkAndDetectChange().then(({ info, isNew }) => {
+      if (!closed) broadcast({ type: 'update', update: info, notify: isNew })
+      return info
+    }).finally(() => { updateInFlight = undefined })
+    return updateInFlight
   }
-  if (opts.updatesAutoCheck !== false) {
-    updateTimer = setTimeout(() => void runUpdateCheck(), 5_000)
+  function scheduleUpdateCheck(delay: number): void {
+    updateTimer = setTimeout(() => {
+      void runUpdateCheck().finally(() => {
+        if (!closed && autoUpdateCheck) scheduleUpdateCheck(updateInterval)
+      })
+    }, delay)
+    updateTimer.unref()
   }
 
   // ------------------------------------------------------------------
@@ -453,28 +447,44 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     return handles
   }
 
-  /**
-   * Start the collaborative expert session: spawn the requested presets as
-   * background sub-agents (existing roster names are skipped) and optionally
-   * deliver the opening task to each of them.
-   */
-  async function startExpertTeam(task?: string, keys?: string[]): Promise<{ started: string[]; skipped: string[] }> {
-    const takenNames = new Set(ctx.agents.list().map((a) => a.name))
-    const { spawned, skipped } = spawnExperts(ctx.agents, keys, takenNames)
-    const started: string[] = []
-    for (const handle of spawned) {
-      expertIds.add(handle.id)
-      started.push(handle.name)
+  function startExpertTeam(keys?: string[]): { started: string[]; reused: string[]; skipped: string[] } {
+    const { spawned, reused, skipped } = spawnExperts(ctx.agents, keys)
+    const members = [...spawned, ...reused]
+    if (!members.length) throw new HttpError(409, 'expert names are occupied by other agents; no expert team was started')
+    expertIds.clear()
+    for (const handle of members) expertIds.add(handle.id)
+    expertMode = true
+    return { started: spawned.map((handle) => handle.name), reused: reused.map((handle) => handle.name), skipped }
+  }
+
+  function prepareUserTask(text: string): string {
+    if (text.startsWith('/')) {
+      const [cmd, ...rest] = text.split(/\s+/)
+      const hit = listSlashCommands(workspaceCwd).find((command) => command.name === (cmd ?? '').slice(1))
+      if (!hit) throw new HttpError(400, `unknown command ${cmd}`)
+      text = expandSlashCommand(hit.file, rest.join(' ')).prompt
     }
-    if (started.length) {
-      expertMode = true
-      if (task && task.trim()) {
-        // The opening task is the user's, not a parent's — deliver it raw so
-        // the mailbox prefix from deliver() does not clutter the prompt.
-        for (const handle of liveExperts()) void handle.turn(task.trim()).catch(() => {})
-      }
+    const expansion = expandMentions(text, { cwd: workspaceCwd })
+    for (const miss of expansion.missing) {
+      broadcast({ type: 'notice', level: 'info', message: `${miss.mention}: ${miss.reason}` })
     }
-    return { started, skipped }
+    return expansion.text
+  }
+
+  function submitUserTask(text: string, images?: string[]): boolean {
+    const main = mainAgent()
+    const queued = main.status === 'running'
+    void main.turn(text, images?.length ? { images } : undefined)
+      .then((result) => {
+        if (result.error) broadcast({ type: 'notice', level: 'error', message: result.error })
+      })
+      .catch((error: unknown) => {
+        broadcast({ type: 'notice', level: 'error', message: error instanceof Error ? error.message : String(error) })
+      })
+    if (expertMode) {
+      for (const handle of liveExperts()) void handle.turn(text, images?.length ? { images } : undefined).catch(() => {})
+    }
+    return queued
   }
 
   function bindHarness(next: Harness): void {
@@ -630,6 +640,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     const tokens = await contextTokens()
     if (closed) throw new HttpError(503, 'server is shutting down')
     const main = mainAgent()
+    const experts = liveExperts()
     // Never stamp an older disk listing with a newer revision (or workspace).
     // Otherwise an in-flight snapshot can resurrect a just-deleted session.
     if (mount !== ctx || snapshotWorkspace !== workspaceId() || snapshotRevision !== revision) return stateSnapshot()
@@ -664,6 +675,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       update: updateChecker.cached(),
       /** Collaborative expert session: user messages also go to the expert team. */
       expertMode,
+      expertIds: experts.map((agent) => agent.id),
+      expertSummaryAvailable: experts.some((agent) => agent.status === 'done' && !!agent.result?.trim()),
       /** Mounted skills (.sakura/skills + user dir + extra dirs), absent without core-skills. */
       skills: skills?.list().map((s) => ({ name: s.name, description: s.description ?? '', whenToUse: s.whenToUse ?? '', source: s.source })) ?? [],
       sessions: sessions.map((s) => ({ id: s.id, title: s.title ?? s.id, updatedAt: s.startedAt, size: s.events, deleteBlocked: sessionDeletionBlock(s.id) })),
@@ -749,6 +762,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       pendingQuestions.cancel()
       pendingPlans.cancel()
       ctx.agents.disposeAll()
+      sessionEpoch++
       // The expert team lived in the old session's roster; switching ends it.
       expertMode = false
       expertIds.clear()
@@ -808,6 +822,9 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
         pendingQuestions.cancel()
         pendingPlans.cancel()
         mount.agents.disposeAll()
+        sessionEpoch++
+        expertMode = false
+        expertIds.clear()
         mount.approval.engine.clearSessionAllows()
         const todos = mount.peek<{ todos: unknown[] }>('todos')
         if (todos) todos.todos = []
@@ -1122,12 +1139,21 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       res.setHeader('www-authenticate', 'Bearer realm="SakuraCode"')
       throw new HttpError(401, 'authentication required')
     }
-    if (principal.role === 'viewer' && method !== 'GET' && method !== 'HEAD') {
+    const checkingUpdate = pathname === '/api/updates/check' && method === 'POST'
+    if (principal.role === 'viewer' && method !== 'GET' && method !== 'HEAD' && !checkingUpdate) {
       throw new HttpError(403, 'read-only viewer cannot modify the workspace')
+    }
+    if (checkingUpdate) {
+      await bodyJson(req, 4096)
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      const info = await runUpdateCheck()
+      json(res, 200, info)
+      return
     }
     // Requests that started on an older workspace must not act on the new one
     // after an await: 503 makes the client retry against the current mount.
     const workspaceEpochAtEntry = workspaceEpoch
+    const sessionEpochAtEntry = sessionEpoch
     const assertWorkspaceSame = (): void => {
       if (settingsUpdating) throw new HttpError(409, 'settings are being saved; retry after completion')
       if (workspaceEpochAtEntry !== workspaceEpoch || switchingWorkspace) {
@@ -1138,6 +1164,14 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       }
       if (deletingSession && method !== 'GET' && method !== 'HEAD') {
         throw new HttpError(409, 'a session deletion is in progress; retry after it completes')
+      }
+    }
+
+    const assertSessionSame = (): void => {
+      assertWorkspaceSame()
+      if (closed) throw new HttpError(503, 'server is shutting down')
+      if (switching || sessionEpochAtEntry !== sessionEpoch) {
+        throw new HttpError(409, 'the session changed while this request was in flight; retry in the current session')
       }
     }
 
@@ -1173,15 +1207,6 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
 
     if (pathname === '/api/state' && method === 'GET') {
       json(res, 200, await stateSnapshot())
-      return
-    }
-
-    if (pathname === '/api/updates/check' && method === 'POST') {
-      // Read-only and workspace-independent: available to viewers too, so a
-      // read-only dashboard still shows the version banner.
-      const info = await updateChecker.check()
-      if (info.hasUpdate) broadcast({ type: 'update', update: info })
-      json(res, 200, info)
       return
     }
 
@@ -1223,7 +1248,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
 
     if (pathname === '/api/message' && method === 'POST') {
       const body = await bodyJson(req)
-      assertWorkspaceSame()
+      assertSessionSame()
       if (typeof body.text !== 'string' || !body.text.trim()) {
         json(res, 400, { error: 'text is required' })
         return
@@ -1240,69 +1265,56 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
         }
         images = ok.length ? ok : undefined
       }
-      // Custom slash commands: "/name args" expands to the markdown prompt.
-      if (text.startsWith('/')) {
-        const [cmd, ...rest] = text.split(/\s+/)
-        const arg = rest.join(' ')
-        const hit = listSlashCommands(workspaceCwd).find((c) => c.name === (cmd ?? '').slice(1))
-        if (!hit) {
-          json(res, 400, { error: `unknown command ${cmd}` })
-          return
-        }
-        text = expandSlashCommand(hit.file, arg).prompt
-      }
-      // @-mentions: @path[:line] tokens expand into appended context blocks.
-      const expansion = expandMentions(text, { cwd: workspaceCwd })
-      text = expansion.text
-      for (const miss of expansion.missing) {
-        broadcast({ type: 'notice', level: 'info', message: `${miss.mention}: ${miss.reason}` })
-      }
-      const main = mainAgent()
-      // The agent's mailbox serializes turns — sending while busy queues
-      // behind the running turn instead of failing.
-      const queued = main.status === 'running'
-      void main
-        .turn(text, images?.length ? { images } : undefined)
-        .then((result) => {
-          if (result.error) broadcast({ type: 'notice', level: 'error', message: result.error })
-        })
-        .catch((error: unknown) => {
-          broadcast({ type: 'notice', level: 'error', message: error instanceof Error ? error.message : String(error) })
-        })
-      // Expert session: the same task goes to every live expert (text only —
-      // pasted images stay with the main agent).
-      if (expertMode) {
-        for (const handle of liveExperts()) void handle.turn(text).catch(() => {})
-      }
+      const queued = submitUserTask(prepareUserTask(text), images)
       json(res, 202, { ok: true, queued })
       return
     }
 
     if (pathname === '/api/experts/start' && method === 'POST') {
       const body = await bodyJson(req) as { task?: unknown; experts?: unknown }
-      assertWorkspaceSame()
+      assertSessionSame()
       if (body.task !== undefined && body.task !== null && (typeof body.task !== 'string' || !body.task.trim())) {
         throw new HttpError(400, 'task must be a non-empty string')
       }
-      let presets: ExpertPreset[]
+      if (body.experts !== undefined && (!Array.isArray(body.experts) || !body.experts.length || body.experts.some((key) => typeof key !== 'string'))) {
+        throw new HttpError(400, 'experts must be a non-empty array of preset keys')
+      }
+      let keys: string[]
       try {
-        presets = resolveExperts(Array.isArray(body.experts) ? body.experts.map(String) : undefined)
+        keys = resolveExperts(body.experts as string[] | undefined).map((preset) => preset.key)
       } catch (error) {
         throw new HttpError(400, error instanceof Error ? error.message : String(error))
       }
-      const result = await startExpertTeam(typeof body.task === 'string' ? body.task : undefined, presets.map((p) => p.key))
+      const task = typeof body.task === 'string' ? prepareUserTask(body.task.trim()) : undefined
+      const result = startExpertTeam(keys)
+      const queued = task ? submitUserTask(task) : false
+      broadcast({ type: 'notice', level: 'info', message: `专家协同模式已开启：${[...result.started, ...result.reused].join('、')}${result.skipped.length ? `（${result.skipped.join('、')}与普通成员重名，未加入团队）` : ''}。` })
       await refreshState()
-      if (result.started.length) {
-        broadcast({ type: 'notice', level: 'info', message: `专家协同模式已开启：${result.started.join('、')}${result.skipped.length ? `（${result.skipped.join('、')}已在花名册中，共用现有成员）` : ''}。` })
-      } else {
-        broadcast({ type: 'notice', level: 'error', message: '专家协同模式开启失败：没有可生成的专家成员。' })
-      }
-      json(res, 200, { expertMode: result.started.length > 0, ...result })
+      json(res, 200, { expertMode: true, queued, ...result })
+      return
+    }
+
+    if (pathname === '/api/experts/summarize' && method === 'POST') {
+      await bodyJson(req, 4096)
+      assertSessionSame()
+      const summary = buildExpertSummary(liveExperts())
+      if (!summary) throw new HttpError(409, 'experts have not produced any completed conclusions yet')
+      const main = mainAgent()
+      const queued = main.status === 'running'
+      // Expert outputs are copied into this one main-agent request; summarizing
+      // must not send a new round of work back to the expert team.
+      void main.turn(summary).then((result) => {
+        if (result.error) broadcast({ type: 'notice', level: 'error', message: result.error })
+      }).catch((error: unknown) => {
+        broadcast({ type: 'notice', level: 'error', message: error instanceof Error ? error.message : String(error) })
+      })
+      json(res, 202, { ok: true, queued })
       return
     }
 
     if (pathname === '/api/experts/stop' && method === 'POST') {
-      assertWorkspaceSame()
+      await bodyJson(req, 4096)
+      assertSessionSame()
       const stopped = expertMode
       expertMode = false
       await refreshState()
@@ -1777,6 +1789,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   const port = await new Promise<number>((resolve, reject) => {
     const failed = (error: Error): void => {
       clearInterval(heartbeat)
+      updateChecker.close()
+      access.dispose()
       harness.dispose()
       reject(error)
     }
@@ -1827,6 +1841,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     weixin.start()
   }
 
+  if (autoUpdateCheck) scheduleUpdateCheck(updateInitialDelay)
   if (opts.open !== false) openBrowser(url)
   if (!opts.quiet) {
     console.log(`SakuraCode Web GUI → ${url}  (cwd: ${workspaceCwd})`)
@@ -1855,6 +1870,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       closed = true
       clearInterval(heartbeat)
       if (updateTimer !== undefined) clearTimeout(updateTimer)
+      updateChecker.close()
+      await updateInFlight
       await weixin?.close()
       ctx.agents.disposeAll()
       pending.cancel()

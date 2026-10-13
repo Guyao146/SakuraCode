@@ -305,6 +305,9 @@ a:hover {
 }
 /* Update-available dot on the settings button. */
 .btn.update-dot { position: relative; }
+.update-notification { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 20px 0; padding: 10px 14px; border: 1px solid var(--accent-border); border-radius: 10px; background: var(--accent-soft); color: var(--text-soft); font-size: 12px; flex-wrap: wrap; }
+#settingsUpdateStatus { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#settingsUpdateLink { align-self: flex-start; }
 .btn.update-dot::after {
   content: ''; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px;
   border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--surface-raised);
@@ -741,10 +744,12 @@ a:hover {
 .market-card .market-desc { flex: 1; min-width: 0; font-size: 12px; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .market-card .extension-badge { flex: none; }
 .market-empty { font-size: 12px; color: var(--muted); padding: 4px 2px; }
-.market-card.market-clickable { cursor: pointer; }
+.market-card.market-clickable { display: block; padding: 0; }
+.market-skill-toggle { display: flex; align-items: baseline; gap: 10px; width: 100%; min-width: 0; padding: 9px 12px; border: 0; background: transparent; text-align: left; cursor: pointer; color: inherit; font: inherit; }
+.market-skill-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 10px; }
 .market-card.market-clickable:hover { border-color: var(--accent-border); }
 .market-card .skill-body {
-  flex-basis: 100%; margin: 6px 0 0; padding-top: 8px; border-top: 1px dashed var(--border);
+  margin: 0 12px 12px; padding-top: 8px; border-top: 1px dashed var(--border);
   font-size: 12px; line-height: 1.7; color: var(--text-soft); white-space: pre-wrap; word-break: break-word;
   max-height: 220px; overflow-y: auto;
 }
@@ -1451,15 +1456,16 @@ body.history-view .composer-zone { display: none; }
             <span class="field-hint">打开该工作区时自动创建这些协作成员；取消勾选的成员在下次切换 / 重挂工作区后不再出现。</span>
           </div>
         </div>
-        <div class="settings-card">
-          <h2>版本与更新</h2>
-          <div class="form-field"><span class="field-label">检查更新</span>
-            <div class="field-row"><span class="field-hint" id="settingsUpdateStatus">尚未检查。</span><button class="btn btn-soft" id="settingsCheckUpdates" type="button" aria-label="检查 SakuraCode 新版本">检查更新</button></div>
-            <span class="field-hint" id="settingsUpdateHint">从 GitHub Releases 读取最新版本；检查失败只提示，不影响其他功能。</span>
-          </div>
-        </div>
         <div class="settings-actions"><button class="btn btn-accent" id="settingsSave" type="button">保存设置</button><span class="settings-message" id="settingsMessage" role="status"></span></div>
       </div>
+      <section class="settings-card" id="updateCard" aria-labelledby="updateTitle">
+        <h2 id="updateTitle">版本与更新</h2>
+        <div class="form-field">
+          <div class="field-row"><span class="field-hint" id="settingsUpdateStatus" role="status">尚未检查。</span><button class="btn btn-soft" id="settingsCheckUpdates" type="button" aria-label="检查 SakuraCode 新版本">检查更新</button></div>
+          <span class="field-hint" id="settingsUpdateHint">从 GitHub Releases 读取最新稳定版本；检查失败不影响其他功能。</span>
+          <a class="btn btn-soft" id="settingsUpdateLink" target="_blank" rel="noopener noreferrer" hidden>查看发行说明与下载</a>
+        </div>
+      </section>
       <section class="settings-card weixin-card" id="weixinCard" aria-labelledby="weixinTitle" hidden>
         <div class="weixin-heading"><div><h2 id="weixinTitle">微信 · 手机连接</h2><p class="panel-note">用手机微信扫码，随时查看主 Agent 和协作成员的工作情况。</p></div><span class="chip" id="weixinPhase">未绑定</span></div>
         <p id="weixinStatus" role="status" aria-live="polite">尚未绑定微信。</p>
@@ -1498,6 +1504,7 @@ body.history-view .composer-zone { display: none; }
   </section>
 
   <div class="chat-scroll view-scroll" id="chatScroll" tabindex="0" aria-label="对话记录">
+    <p class="update-notification" id="updateNotification" role="status" hidden><span id="updateNotificationText"></span><button class="btn btn-soft compact-btn" id="updateNotificationOpen" type="button">查看更新</button></p>
     <div class="connection-note history-notice" id="historyNotice" hidden><span>正在只读查看历史，当前任务仍在后台运行。</span><button class="btn btn-soft compact-btn" id="resumeHistoryBtn" type="button" hidden>继续此会话</button><button class="btn btn-soft compact-btn" id="returnLiveBtn" type="button">返回实时会话</button></div>
     <div class="chat-col view-content" id="chatCol">
       <div class="welcome" id="welcome">
@@ -1555,7 +1562,7 @@ body.history-view .composer-zone { display: none; }
                 <option value="high">思考 · 高</option>
               </select>
             </label>
-            <button class="chip mono" id="expertChip" type="button" data-write="1" aria-pressed="false" title="专家协同模式：生成架构师 / 实现者 / 审查者，之后每条消息同时发给主智能体与各位专家">专家 · 关闭</button>
+            <button class="chip mono" id="expertChip" type="button" data-write="1" aria-pressed="false" title="专家协同模式：开启后保留草稿，点击发送时由主智能体与各位专家并行处理">专家 · 关闭</button>
           </div>
           <div class="composer-actions">
             <button class="icon-btn" id="attachBtn" type="button" title="添加图片" aria-label="添加图片"><svg class="icon" aria-hidden="true"><use href="#i-attach"/></svg></button>
@@ -1934,7 +1941,9 @@ async function api(path, opts) {
   opts = opts || {};
   const init = { method: opts.method || 'GET', headers: {}, credentials: 'same-origin' };
   const workspaceAction = path === '/api/desktop/settings' || (init.method === 'DELETE' && path.startsWith('/api/sessions/'));
-  if (init.method !== 'GET' && !path.startsWith('/api/auth/') && !(workspaceAction ? canOperate() : canControl())) {
+  const updateCheck = path === '/api/updates/check' && init.method === 'POST';
+  const allowed = updateCheck ? app.auth.authenticated && app.connected : workspaceAction ? canOperate() : canControl();
+  if (init.method !== 'GET' && !path.startsWith('/api/auth/') && !allowed) {
     const error = new Error(app.auth.role === 'viewer' ? '只读访客不能修改工作区' : '尚未连接，操作未发送');
     error.status = 403;
     throw error;
@@ -2098,6 +2107,7 @@ const app = {
     providers: [],
     update: null,
     expertMode: false,
+    expertSummaryAvailable: false,
     skills: [],
     thinking: 'off',
     agentTypes: [],
@@ -2277,6 +2287,7 @@ function syncAccess() {
   sendBtn.disabled = !control || !modelConfigured() || app.sending;
   $('stopBtn').disabled = !control || app.stopping;
   settingsSave.disabled = !canOperate() || app.switchingWorkspace || settingsSave.dataset.saving === 'true';
+  settingsCheckUpdates.disabled = !app.auth.authenticated || !app.connected || settingsCheckUpdates.dataset.submitting === 'true';
   document.querySelectorAll('.agent-view').forEach(function (node) {
     node.disabled = !app.auth.authenticated || !app.connected;
   });
@@ -2529,41 +2540,48 @@ async function fetchUpstreamModelList() {
 /** Update-check card: renders the cached check result and runs manual checks. */
 function renderUpdateStatus() {
   const info = app.state.update;
-  settingsViewBtn.classList.toggle('update-dot', !!(info && info.hasUpdate));
+  const available = !!(info && info.hasUpdate);
+  const link = $('settingsUpdateLink');
+  settingsViewBtn.classList.toggle('update-dot', available);
+  settingsViewBtn.setAttribute('aria-label', available ? '设置，有新版本可用' : '设置');
+  $('updateNotification').hidden = !available;
+  $('updateNotificationText').textContent = available ? '发现新版本 v' + info.latest + '（当前 v' + info.current + '）' : '';
+  link.hidden = true;
+  link.removeAttribute('href');
+  if (available && typeof info.releaseUrl === 'string' && /^https:\/\/github\.com\/Guyao146\/SakuraCode\/releases\/tag\/[^/?#]+$/.test(info.releaseUrl)) {
+    link.href = info.releaseUrl;
+    link.hidden = false;
+  }
   if (!info) {
     settingsUpdateStatus.textContent = '尚未检查。';
-    settingsUpdateHint.textContent = '从 GitHub Releases 读取最新版本；检查失败只提示，不影响其他功能。';
+    settingsUpdateHint.textContent = '从 GitHub Releases 读取最新稳定版本；检查失败不影响其他功能。';
     return;
   }
+  settingsUpdateStatus.textContent = '当前 v' + info.current + (info.latest ? ' · ' + (info.error ? '上次发现 v' : '最新 v') + info.latest : '');
   if (info.error) {
-    settingsUpdateStatus.textContent = '当前 v' + info.current + ' · 检查失败：' + info.error;
-    settingsUpdateHint.textContent = '网络不可达或更新源无响应；可稍后重试。';
-    return;
-  }
-  if (info.hasUpdate) {
-    settingsUpdateStatus.textContent = '当前 v' + info.current + ' · 最新 v' + info.latest;
-    settingsUpdateHint.textContent = '有新版本可用。前往 GitHub Releases 页面下载更新。';
+    settingsUpdateHint.textContent = '检查失败：' + info.error + (info.latest ? '。已保留上次检查结果，可稍后重试。' : '。可稍后重试。');
   } else {
-    settingsUpdateStatus.textContent = '当前 v' + info.current + ' · 最新 v' + (info.latest || info.current);
-    settingsUpdateHint.textContent = '已是最新版本。';
+    settingsUpdateHint.textContent = available ? '有新版本可用。打开官方发行页面查看说明并下载；不会自动安装。' : '当前没有可用的更新。';
   }
 }
 
+$('updateNotificationOpen').addEventListener('click', function () { setView('settings'); });
+
 settingsCheckUpdates.addEventListener('click', async function () {
-  settingsCheckUpdates.disabled = true;
+  if (!app.auth.authenticated || !app.connected || settingsCheckUpdates.dataset.submitting === 'true') return;
+  settingsCheckUpdates.dataset.submitting = 'true';
+  syncAccess();
   settingsCheckUpdates.textContent = '检查中…';
   try {
-    const info = await api('/api/updates/check', { method: 'POST' });
+    const info = await api('/api/updates/check', { method: 'POST', body: {} });
     app.state.update = info;
     renderUpdateStatus();
-    if (info && info.hasUpdate) {
-      addNotice({ level: 'info', message: '发现新版本 v' + info.latest + '，可在设置中查看详情。' });
-    }
   } catch (e) {
-    settingsUpdateStatus.textContent = '检查失败：' + (e.message || '无法连接更新源');
+    settingsUpdateHint.textContent = '检查失败：' + (e.message || '无法连接更新源') + '。已保留上次检查结果。';
   } finally {
-    settingsCheckUpdates.disabled = false;
+    delete settingsCheckUpdates.dataset.submitting;
     settingsCheckUpdates.textContent = '检查更新';
+    syncAccess();
   }
 });
 
@@ -2580,30 +2598,25 @@ function renderExpertChip() {
 }
 
 expertChip.addEventListener('click', async function () {
-  if (!canOperate()) { addNotice({ level: 'error', message: '只读访客不能开启专家协同模式' }); return; }
-  if (app.state.expertMode) {
-    try {
-      await api('/api/experts/stop', { method: 'POST' });
-    } catch (e) { addNotice({ level: 'error', message: '关闭专家模式失败：' + (e.message || '') }); }
-    return;
-  }
-  // The current draft becomes the team's opening task (same as sending it to main).
-  const task = input.value.trim();
-  expertChip.disabled = true;
+  if (!canControl() || expertChip.dataset.submitting === 'true') return;
+  const wasOn = !!app.state.expertMode;
+  const workspace = app.state.workspaceId;
+  expertChip.dataset.submitting = 'true';
+  syncAccess();
   try {
-    const result = await api('/api/experts/start', { method: 'POST', body: task ? { task: task } : {} });
-    if (result && result.expertMode) {
-      if (task) { input.value = ''; autoGrow(); }
-      // Show the team right away — the roster is the mode's control surface.
+    const result = await api(wasOn ? '/api/experts/stop' : '/api/experts/start', { method: 'POST', body: {} });
+    if (workspace !== app.state.workspaceId) return;
+    app.state.expertMode = !wasOn && !!result.expertMode;
+    renderExpertChip();
+    if (!wasOn && result.expertMode) {
       setInspector(true);
       selectPanel('team');
-    } else {
-      addNotice({ level: 'error', message: '专家团队生成失败，请查看错误提示。' });
     }
   } catch (e) {
-    addNotice({ level: 'error', message: '开启专家模式失败：' + (e.message || '') });
+    addNotice({ level: 'error', message: (wasOn ? '关闭' : '开启') + '专家模式失败：' + (e.message || '') });
   } finally {
-    expertChip.disabled = false;
+    delete expertChip.dataset.submitting;
+    syncAccess();
   }
 });
 
@@ -2649,17 +2662,37 @@ function renderMarket() {
   });
   section('技能', skills, function (sk) {
     const card = marketCard(sk.name, (sk.description || '') + (sk.whenToUse ? '（' + sk.whenToUse + '）' : ''), sk.source);
-    // Click expands the full SKILL.md body (read-only); click again to collapse.
     card.classList.add('market-clickable');
-    card.title = '点击查看技能正文';
-    card.addEventListener('click', async function () {
-      const existing = card.querySelector('.skill-body');
-      if (existing) { existing.remove(); return; }
+    const toggle = el('button', 'market-skill-toggle');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-label', '查看技能：' + sk.name);
+    toggle.setAttribute('aria-expanded', 'false');
+    while (card.firstChild) toggle.appendChild(card.firstChild);
+    const body = el('div', 'skill-body');
+    body.hidden = true;
+    card.append(toggle, body);
+    let loaded = false;
+    let pending = false;
+    toggle.addEventListener('click', async function () {
+      if (pending) return;
+      if (!body.hidden) { body.hidden = true; toggle.setAttribute('aria-expanded', 'false'); return; }
+      body.hidden = false;
+      toggle.setAttribute('aria-expanded', 'true');
+      if (loaded) return;
+      const workspace = app.state.workspaceId;
+      pending = true;
+      toggle.setAttribute('aria-busy', 'true');
+      body.textContent = '正在读取…';
       try {
         const detail = await api('/api/skills/' + encodeURIComponent(sk.name));
-        card.appendChild(el('p', 'skill-body', detail.body || '（技能正文为空）'));
+        if (!card.isConnected || workspace !== app.state.workspaceId) return;
+        body.textContent = detail.body || '（技能正文为空）';
+        loaded = true;
       } catch (e) {
-        addNotice({ level: 'error', message: '读取技能正文失败：' + (e.message || '') });
+        body.textContent = '读取失败：' + (e.message || '') + '。收起后可再次重试。';
+      } finally {
+        pending = false;
+        toggle.removeAttribute('aria-busy');
       }
     });
     return card;
@@ -3968,16 +4001,17 @@ function openAgentMessage(agent) {
 document.getElementById('spawnBtn').addEventListener('click', openSpawnModal);
 document.getElementById('summarizeBtn').addEventListener('click', async function () {
   const btn = $('summarizeBtn');
-  if (!canOperate()) { addNotice({ level: 'error', message: '只读访客不能发送汇总请求' }); return; }
-  const names = (app.state.agents || []).filter(function (a) { return a.expert; }).map(function (a) { return a.name; });
-  if (!names.length) return;
-  btn.disabled = true;
+  if (!canControl() || btn.dataset.submitting === 'true' || !app.state.expertSummaryAvailable) return;
+  btn.dataset.submitting = 'true';
+  syncAccess();
   try {
-    await api('/api/message', { method: 'POST', body: { text: '请汇总「' + names.join('」「') + '」的分析与结论，综合成统一答复，并给出下一步建议。' } });
+    await api('/api/experts/summarize', { method: 'POST', body: {} });
+    setView('chat');
   } catch (e) {
     addNotice({ level: 'error', message: '汇总请求失败：' + (e.message || '') });
   } finally {
-    btn.disabled = false;
+    delete btn.dataset.submitting;
+    syncAccess();
   }
 });
 
@@ -4394,9 +4428,7 @@ function renderAgents() {
   const agents = (app.state.agents || []).slice().sort(function (a, b) {
     return Number(b.role === 'main') - Number(a.role === 'main');
   });
-  // The summarize action lands once any expert has produced a result.
-  const experts = agents.filter(function (a) { return a.expert; });
-  $('summarizeBtn').hidden = !(app.state.expertMode && experts.some(function (a) { return a.status === 'done' || a.status === 'error'; }));
+  $('summarizeBtn').hidden = !app.state.expertSummaryAvailable;
   const running = agents.filter(function (a) { return a.status === 'running'; }).length;
   $('runningAgents').textContent = String(running);
   $('totalAgents').textContent = String(agents.length);
@@ -4751,8 +4783,9 @@ function applyState(st) {
   if (Array.isArray(st.mcp)) app.state.mcp = st.mcp;
   if (Array.isArray(st.models)) app.state.models = st.models;
   if (Array.isArray(st.providers)) app.state.providers = st.providers;
-  if (st.update) app.state.update = st.update;
+  app.state.update = st.update || null;
   app.state.expertMode = !!st.expertMode;
+  app.state.expertSummaryAvailable = !!st.expertSummaryAvailable;
   if (Array.isArray(st.skills)) app.state.skills = st.skills;
   if (st.modelStatus) app.state.modelStatus = st.modelStatus;
   if (st.contextBudget) app.state.contextBudget = st.contextBudget;
