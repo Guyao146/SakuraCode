@@ -254,6 +254,13 @@ REPL 也接受管道喂入（`echo "任务" | sakura`）：stdin 到达 EOF 时�
 - **专家协同的收尾动作**：团队成员卡中专家带「专家」徽标；开启专家模式后自动展开协作面板；任意专家产出结果后，团队标题栏出现「汇总专家结论」按钮，一点即让主智能体综合各专家结论给出统一答复与下一步建议（走正常消息通道）。按钮显隐跟随状态帧实时更新，只读访客不可用。
 - **CLI 对齐**：两个新能力在 REPL 里同样可用。`/experts` 查看状态，`/experts on [开场任务]` 生成专家组（生成逻辑与 Web GUI 共用 `spawnExperts`，`/experts off` 关闭分发但保留成员），之后每条输入同时发给主智能体与全部专家；`/new`、`/resume` 切换会话时随花名册一并结束。交互式 REPL 启动 2 秒后在后台检查更新，发现新版本只打印一行提示（不阻塞首个提示符、失败静默）；`/update` 手动检查。one-shot（`-p`）与 `--web` 不触发专家模式与启动检查。
 
+## 专家协同与更新检查的可靠性修复（v0.7.2 修订）
+
+- **专家复用**：`spawnExperts(agents, keys?, takenNames?)` 按 `meta.expert` 预设 key 识别已有专家——`/experts off` 再 `/experts on`（或 GUI 关闭再开启）时**复用原成员及其会话历史**，不会重复生成同名专家；名字被其他智能体占用而无法生成时整组启动失败并返回 409，不留半残团队。开场任务只投递一次：复用场景下不重发。
+- **汇总真实结论**：「汇总专家结论」只收集状态为 `done` 且结果非空的成员（`buildExpertSummary`），出错 / 取消 / 仍在运行的成员只列状态、**绝不带出过期结果**；每成员上限 12_000 字符、总计 40_000 字符。汇总作为一条普通消息发给主智能体，不再 echo 回专家（`POST /api/experts/summarize`，无可用结论时返回 409）。
+- **会话切换隔离**：服务器维护单调递增的 `sessionEpoch`，切换 / 删除会话时自增并关闭专家分发；进行中的旧请求在写回结果前会先校验 epoch，若会话已变则返回 409 让前端按当前会话重试，避免把旧会话的回复落到新会话上（影响 `/api/message`、`/api/experts/*`、`/api/settings`、`/api/sessions/:id` 等写接口）。
+- **更新检查的健壮性**：`UpdateChecker`（src/updates.ts）单飞行合并并发的手动与自动检查；每个版本只通知一次（`checkAndDetectChange` 在 await 之后认领版本 key，防止并发双发）；请求强制 `credentials: 'omit'` + `redirect: 'error'`、响应体上限 1 MiB；只接受稳定版 feed（draft / prerelease 一律视为错误）；release URL 固定为 `github.com/Guyao146/SakuraCode/releases/tag/<tag>`（保留前导 v），不信任 feed 里的 `html_url`。临时失败保留上一次已知的版本字段并附加 `error`，恢复后同一版本不会重复通知。`close()` 幂等并中止进行中的检查，服务器关闭后不再有任何轮询。
+
 
 ## 健壮性（Windows 及其他）
 

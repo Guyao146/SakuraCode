@@ -181,7 +181,9 @@ export class BrowserClient {
     const codes: Record<string, number> = { Enter: 13, Escape: 27, Tab: 9, ArrowRight: 39, ArrowLeft: 37, ArrowDown: 40, ArrowUp: 38 }
     const code = codes[key]
     const event = { key, code: key, windowsVirtualKeyCode: code, modifiers }
-    await this.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...event })
+    await this.send('Input.dispatchKeyEvent', key === 'Enter'
+      ? { type: 'keyDown', ...event, text: '\r', unmodifiedText: '\r' }
+      : { type: 'rawKeyDown', ...event })
     await this.send('Input.dispatchKeyEvent', { type: 'keyUp', ...event })
   }
 
