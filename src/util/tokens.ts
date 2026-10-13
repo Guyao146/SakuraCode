@@ -11,7 +11,7 @@
  * thresholds, never for billing.
  */
 
-import type { ChatMessage } from '../core/types.js'
+import type { ChatMessage, SessionEventRecord, UsageStats } from '../core/types.js'
 
 const CJK_RANGES: Array<[number, number]> = [
   [0x4e00, 0x9fff], // CJK Unified Ideographs
@@ -88,4 +88,37 @@ export function estimateMessagesTokens(messages: ChatMessage[]): number {
     }
   }
   return total
+}
+
+
+/**
+ * Session token accounting — real usage logged on each assistant/message
+ * (stream.usage), not an estimate. Counts every model request the session
+ * made, so a multi-step turn contributes one row per step.
+ */
+export interface SessionTokenStats {
+  /** assistant/message events carrying usage (≈ model requests answered). */
+  requests: number
+  inputTokens: number
+  outputTokens: number
+  /** Tokens served from the provider's prompt cache, when the provider reports them. */
+  cachedTokens: number
+  /** Reasoning tokens inside outputTokens, when the provider reports them. */
+  reasoningTokens: number
+}
+
+/** Sum the usage rows of a session log; events without usage are skipped. */
+export function summarizeUsage(events: ReadonlyArray<SessionEventRecord>): SessionTokenStats {
+  const stats: SessionTokenStats = { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }
+  for (const event of events) {
+    if (event.type !== 'assistant/message') continue
+    const usage = (event.payload as { stream?: { usage?: UsageStats } }).stream?.usage
+    if (!usage) continue
+    stats.requests++
+    stats.inputTokens += usage.inputTokens ?? 0
+    stats.outputTokens += usage.outputTokens ?? 0
+    stats.cachedTokens += usage.cachedTokens ?? 0
+    stats.reasoningTokens += usage.reasoningTokens ?? 0
+  }
+  return stats
 }

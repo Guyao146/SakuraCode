@@ -18,7 +18,7 @@ import type { Context } from '../kernel/index.js'
 import type { HarnessContext } from './context.js'
 import { SessionService } from './session.js'
 import type { LLMService } from './llm.js'
-import type { AssistantMessage, ChatMessage, StreamSummary, ToolCallId } from './types.js'
+import type { AssistantMessage, ChatMessage, StreamSummary, ToolCallId, UsageStats } from './types.js'
 
 export interface TurnResult {
   output: string
@@ -102,6 +102,21 @@ export interface AgentRuntime {
 
 const SUBAGENT_FAMILY = new Set(['subagent', 'list_subagent_models'])
 
+/**
+ * Sum usage across the steps of one turn. A field stays undefined only when
+ * no step reported it; reported values add, even across optional gaps.
+ */
+function mergeUsage(total: UsageStats | undefined, add: UsageStats): UsageStats {
+  const sum = (a: number | undefined, b: number | undefined): number | undefined =>
+    a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0)
+  return {
+    inputTokens: sum(total?.inputTokens, add.inputTokens),
+    outputTokens: sum(total?.outputTokens, add.outputTokens),
+    cachedTokens: sum(total?.cachedTokens, add.cachedTokens),
+    reasoningTokens: sum(total?.reasoningTokens, add.reasoningTokens),
+  }
+}
+
 export class DefaultAgentLoop implements AgentLoop {
   constructor(private ctx: HarnessContext) {}
 
@@ -128,6 +143,8 @@ export class DefaultAgentLoop implements AgentLoop {
     let lastText = ''
     let turnError: string | undefined
     let summary: StreamSummary | undefined
+    /** Aggregated usage across every step of this turn (summary holds only the last step). */
+    let turnUsage: UsageStats | undefined
     const answered = new Set<string>()
 
     try {
@@ -197,7 +214,13 @@ export class DefaultAgentLoop implements AgentLoop {
             if (chunk.argsDelta) existing.function.arguments += chunk.argsDelta
             calls.set(chunk.index, existing)
           } else if (chunk.type === 'usage') {
-            summary.usage = { inputTokens: chunk.inputTokens, outputTokens: chunk.outputTokens }
+            summary.usage = {
+              inputTokens: chunk.inputTokens,
+              outputTokens: chunk.outputTokens,
+              cachedTokens: chunk.cachedTokens,
+              reasoningTokens: chunk.reasoningTokens,
+            }
+            turnUsage = mergeUsage(turnUsage, summary.usage)
           } else if (chunk.type === 'error') {
             throw new Error(chunk.error)
           } else if (chunk.type === 'done') {
@@ -294,14 +317,14 @@ export class DefaultAgentLoop implements AgentLoop {
         await session.append({ type: 'assistant/attempt', payload: { error: 'cancelled' } })
         await this.serialStopping(agent, session)
         this.ctx.emit('turn/end', { agentId: agent.id, sessionId: session.id, cancelled: true })
-        this.ctx.emit('ui/turn/end', { agentId: agent.id, sessionId: session.id, cancelled: true, main: isMain })
+        this.ctx.emit('ui/turn/end', { agentId: agent.id, sessionId: session.id, cancelled: true, ...(turnUsage ? { usage: turnUsage } : {}), main: isMain })
         return { output: lastText, steps, cancelled: true }
       }
       turnError = error instanceof Error ? error.message : String(error)
       await session.append({ type: 'assistant/attempt', payload: { error: turnError } })
       await this.serialStopping(agent, session)
       this.ctx.emit('turn/end', { agentId: agent.id, sessionId: session.id, error: turnError })
-      this.ctx.emit('ui/turn/end', { agentId: agent.id, sessionId: session.id, error: turnError, main: isMain })
+      this.ctx.emit('ui/turn/end', { agentId: agent.id, sessionId: session.id, error: turnError, ...(turnUsage ? { usage: turnUsage } : {}), main: isMain })
       return { output: lastText, steps, error: turnError }
     }
 
@@ -315,7 +338,7 @@ export class DefaultAgentLoop implements AgentLoop {
       agentId: agent.id,
       sessionId: session.id,
       ...result,
-      ...(summary?.usage ? { usage: summary.usage } : {}),
+      ...(turnUsage ? { usage: turnUsage } : {}),
       main: isMain,
     })
     return result

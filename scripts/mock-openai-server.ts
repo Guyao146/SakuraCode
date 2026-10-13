@@ -31,8 +31,20 @@ export interface SSEEvent {
     }
     finish_reason: 'stop' | 'tool_calls' | null
   }>
-  /** Optional usage frame (adapter maps it to the `usage` StreamChunk). */
-  usage?: { prompt_tokens: number; completion_tokens: number }
+  /**
+   * Optional usage frame (adapter maps it to the `usage` StreamChunk). The
+   * fields mirror what OpenAI-compatible providers really send, including
+   * cache-hit details, so tests can script caching behavior end to end.
+   */
+  usage?: {
+    prompt_tokens: number
+    completion_tokens: number
+    prompt_tokens_details?: { cached_tokens?: number }
+    completion_tokens_details?: { reasoning_tokens?: number }
+    /** DeepSeek-style alias. */
+    prompt_cache_hits?: number
+    reasoning_tokens?: number
+  }
 }
 
 /** Loose shape of a chat-completions request body (we only read messages). */

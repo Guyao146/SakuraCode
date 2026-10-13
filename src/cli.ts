@@ -14,7 +14,9 @@ import { resolveModelName } from './core/llm.js'
 import type { ApprovalMode } from './core/index.js'
 import { APPROVAL_MODES } from './core/index.js'
 import type { PluginRegistry } from './tools/plugin-manager.js'
+import { isSessionId } from './core/session.js'
 
+import { estimateMessagesTokens, summarizeUsage } from './util/tokens.js'
 import { spawnExperts } from './experts.js'
 import { UpdateChecker } from './updates.js'
 const VERSION = '0.7.2'
@@ -71,7 +73,7 @@ function usage(): string {
     '  -h, --help           show this help',
     '  --version            show version',
     '',
-    'REPL commands: /help /exit /agents /experts /update /mode /model /thinking /tools /plugins /sessions /resume /skills /compact /memory /export /hooks /permissions',
+    'REPL commands: /help /exit /agents /experts /update /mode /model /thinking /tools /plugins /sessions /resume /skills /compact /memory /export /hooks /permissions /usage',
     'Custom commands: .sakura/commands/<name>.md (project) or ~/.sakura/commands/<name>.md → /<name> [args]',
     '',
     `API: set SAKURA_API_KEY, optional SAKURA_BASE_URL, SAKURA_MODEL.`,
@@ -726,6 +728,23 @@ async function main(): Promise<number> {
             ? 'compaction deferred — a step is still running; retry once the turn finishes (the marker must not land mid-step)'
             : `compacted: ${summary.length} chars of summary now stand in for the older turns`,
         )
+        break
+      }
+      case '/usage': {
+        // Sum the real usage rows logged on assistant/message events.
+        const sessionId = harness.main().sessionId
+        if (!isSessionId(sessionId)) {
+          console.log('no session yet — send a message first')
+          break
+        }
+        const session = await harness.ctx.sessions.open(sessionId)
+        const stats = summarizeUsage(session.events)
+        const inT = stats.inputTokens, outT = stats.outputTokens, cached = stats.cachedTokens
+        const rate = inT ? Math.round((cached * 100) / inT) : 0
+        console.log(`session ${sessionId} — ${stats.requests} model request(s)`)
+        console.log(`input  ${inT.toLocaleString()} tokens (cache hits ${cached.toLocaleString()} · ${rate}%)`)
+        console.log(`output ${outT.toLocaleString()} tokens${stats.reasoningTokens ? ` (reasoning ${stats.reasoningTokens.toLocaleString()})` : ''}`)
+        console.log(`context estimate ${estimateMessagesTokens(session.deriveMessages()).toLocaleString()} tokens (heuristic, not for billing)`)
         break
       }
       case '/memory': {

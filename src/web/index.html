@@ -2011,7 +2011,17 @@ function paintCtxChip() {
   const threshold = budget && Number(budget.autoTokensThreshold) > 0 ? Number(budget.autoTokensThreshold) : 0;
   ctxChip.hidden = !t;
   ctxChip.textContent = '上下文 ≈ ' + (t >= 1000 ? (t / 1000).toFixed(1) + 'k' : t);
-  ctxChip.title = '启发式估算，不用于计费。' + (threshold ? '达到约 ' + threshold.toLocaleString() + ' tokens 后自动压缩。' : '未启用按 token 自动压缩。');
+  // Cumulative real usage lives in the tooltip: input / output / cache hits.
+  var ts = app.state.tokenStats;
+  var tip = '启发式估算，不用于计费。' + (threshold ? '达到约 ' + threshold.toLocaleString() + ' tokens 后自动压缩。' : '未启用按 token 自动压缩。');
+  if (ts && (ts.inputTokens || ts.outputTokens)) {
+    var hits = ts.cachedTokens || 0;
+    var rate = ts.inputTokens ? Math.round((hits * 100) / ts.inputTokens) : 0;
+    tip += '\\n累计 ' + ts.requests + ' 次请求 · 输入 ' + ts.inputTokens.toLocaleString() + ' / 输出 ' + ts.outputTokens.toLocaleString()
+      + ' tokens · 缓存命中 ' + hits.toLocaleString() + '（' + rate + '%）';
+    if (ts.reasoningTokens) tip += '\\n推理 tokens ' + ts.reasoningTokens.toLocaleString();
+  }
+  ctxChip.title = tip;
   $('contextMeter').hidden = !t || !threshold;
   $('contextMeter').max = threshold || 1;
   $('contextMeter').value = Math.min(t, threshold || 1);
@@ -4376,6 +4386,7 @@ function onSessionDeleted(result) {
   if (current) {
     app.state.sessionId = result.sessionId || null;
     app.state.contextTokens = 0;
+    app.state.tokenStats = null;
     app.state.todos = [];
     setBusy(false);
     paintCtxChip();
@@ -4784,6 +4795,7 @@ function applyState(st) {
   if (Array.isArray(st.models)) app.state.models = st.models;
   if (Array.isArray(st.providers)) app.state.providers = st.providers;
   app.state.update = st.update || null;
+  app.state.tokenStats = st.tokenStats || null;
   app.state.expertMode = !!st.expertMode;
   app.state.expertSummaryAvailable = !!st.expertSummaryAvailable;
   if (Array.isArray(st.skills)) app.state.skills = st.skills;
@@ -5676,10 +5688,13 @@ function onTurnEnd(f) {
   // 主回合结束
   collapseThinkBlock();
   if (f.usage) {
-    const total = (f.usage.inputTokens || 0) + (f.usage.outputTokens || 0);
+    const inn = f.usage.inputTokens || 0, out = f.usage.outputTokens || 0;
+    const total = inn + out;
     usageChip.hidden = !total;
-    usageChip.textContent = '本轮 ' + (total >= 1000 ? (total / 1000).toFixed(1) + 'k' : total) + ' tokens';
-    usageChip.title = `tokens — in ${f.usage.inputTokens ?? 0} / out ${f.usage.outputTokens ?? 0}`;
+    const cached = f.usage.cachedTokens || 0;
+    const rate = inn ? Math.round((cached * 100) / inn) : 0;
+    usageChip.textContent = '本轮 ' + (total >= 1000 ? (total / 1000).toFixed(1) + 'k' : total) + ' tokens' + (cached ? `（缓存 ${rate}%）` : '');
+    usageChip.title = `tokens — in ${inn} / out ${out}` + (cached ? ` / 缓存命中 ${cached}` : '') + (f.usage.reasoningTokens ? ` / 推理 ${f.usage.reasoningTokens}` : '');
   }
   if (app.textBlock) {
     app.textBlock.body.classList.remove('streaming');

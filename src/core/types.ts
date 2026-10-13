@@ -107,11 +107,24 @@ export interface LLMRequest {
   thinking?: ThinkingLevel
 }
 
+/**
+ * Token usage reported by the model for one streaming step. Every field is
+ * optional — providers differ in what they report.
+ */
+export interface UsageStats {
+  inputTokens?: number
+  outputTokens?: number
+  /** Tokens served from the provider's prompt cache (prefix/kv-cache hits). */
+  cachedTokens?: number
+  /** Reasoning tokens included in completion_tokens (thinking models). */
+  reasoningTokens?: number
+}
+
 export type StreamChunk =
   | { type: 'text'; delta: string }
   | { type: 'thinking'; delta: string }
   | { type: 'tool_call'; index: number; id?: string; name?: string; argsDelta?: string }
-  | { type: 'usage'; inputTokens?: number; outputTokens?: number }
+  | ({ type: 'usage' } & UsageStats)
   | { type: 'done'; reason: 'stop' | 'tool_calls' | 'length' | 'cancelled' }
   | { type: 'error'; error: string }
 
@@ -136,7 +149,7 @@ export interface StreamSummary {
   /** Reasoning content streamed by thinking models (not replayed to the API). */
   thinking?: string
   toolCalls: ToolCallId[]
-  usage?: { inputTokens?: number; outputTokens?: number }
+  usage?: UsageStats
   durationMs: number
 }
 

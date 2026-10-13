@@ -6,7 +6,7 @@
  */
 
 import type { Context } from '../kernel/index.js'
-import type { ChatMessage, LLMRequest, ModelAdapter, StreamChunk, ThinkingLevel } from './types.js'
+import type { ChatMessage, LLMRequest, ModelAdapter, StreamChunk, ThinkingLevel, UsageStats } from './types.js'
 
 /** A configuration assessment, never a connectivity probe or a credentials dump. */
 export interface ModelStatus {
@@ -374,6 +374,31 @@ interface SSEChoiceDelta {
   finish_reason?: string | null
 }
 
+/**
+ * Usage objects as OpenAI-compatible providers send them: OpenAI spells the
+ * details `prompt_tokens_details.cached_tokens`, DeepSeek reports top-level
+ * `prompt_cache_hits`, and the Responses API uses `input_tokens_details`.
+ */
+interface SSEUsage {
+  prompt_tokens?: number
+  completion_tokens?: number
+  prompt_tokens_details?: { cached_tokens?: number }
+  completion_tokens_details?: { reasoning_tokens?: number }
+  /** DeepSeek-style aliases. */
+  prompt_cache_hits?: number
+  reasoning_tokens?: number
+}
+
+/** Project the union of provider usage spellings onto UsageStats. */
+function usageChunk(usage: SSEUsage): UsageStats {
+  return {
+    inputTokens: usage.prompt_tokens,
+    outputTokens: usage.completion_tokens,
+    cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hits,
+    reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? usage.reasoning_tokens,
+  }
+}
+
 export class OpenAICompatAdapter implements ModelAdapter {
   readonly id: string
   readonly defaultModel: string
@@ -444,7 +469,7 @@ export class OpenAICompatAdapter implements ModelAdapter {
       if (!event || event === '[DONE]') break
       let parsed: {
         choices?: Array<{ delta?: SSEChoiceDelta; finish_reason?: string | null }>
-        usage?: { prompt_tokens?: number; completion_tokens?: number }
+        usage?: SSEUsage
       }
       try {
         parsed = JSON.parse(event)
@@ -471,9 +496,7 @@ export class OpenAICompatAdapter implements ModelAdapter {
       const fr = choice?.finish_reason
       if (fr === 'tool_calls') finishReason = 'tool_calls'
       else if (fr === 'length') finishReason = 'length'
-      if (parsed.usage) {
-        yield { type: 'usage', inputTokens: parsed.usage.prompt_tokens, outputTokens: parsed.usage.completion_tokens }
-      }
+      if (parsed.usage) yield { type: 'usage', ...usageChunk(parsed.usage) }
     }
     yield { type: 'done', reason: finishReason }
   }
@@ -508,7 +531,7 @@ export class OpenAICompatAdapter implements ModelAdapter {
     let nextIndex = 0
     let anyText = false
     let finishReason: 'stop' | 'tool_calls' | 'length' = 'stop'
-    const pendingUsage: { inputTokens?: number; outputTokens?: number } = {}
+    const pendingUsage: UsageStats = {}
 
     const emitCall = (item: { itemId?: string; callId?: string; name?: string; arguments?: string; argsDelta?: string }) => {
       const id = item.itemId ?? item.callId ?? ''
@@ -569,8 +592,20 @@ export class OpenAICompatAdapter implements ModelAdapter {
       }
       if (type === 'response.completed' || type === 'response.incomplete') {
         const responsePayload = parsed.response as Record<string, unknown> | undefined
-        const usage = responsePayload?.usage as { input_tokens?: number; output_tokens?: number } | undefined
-        if (usage) { pendingUsage.inputTokens = usage.input_tokens; pendingUsage.outputTokens = usage.output_tokens }
+        const usage = responsePayload?.usage as
+          | {
+              input_tokens?: number
+              output_tokens?: number
+              input_tokens_details?: { cached_tokens?: number }
+              output_tokens_details?: { reasoning_tokens?: number }
+            }
+          | undefined
+        if (usage) {
+          pendingUsage.inputTokens = usage.input_tokens
+          pendingUsage.outputTokens = usage.output_tokens
+          pendingUsage.cachedTokens = usage.input_tokens_details?.cached_tokens
+          pendingUsage.reasoningTokens = usage.output_tokens_details?.reasoning_tokens
+        }
         // Fallback for providers that complete without streaming deltas.
         if (type === 'response.completed' && !anyText) {
           const text = responsePayload?.output_text as string | undefined
@@ -587,7 +622,7 @@ export class OpenAICompatAdapter implements ModelAdapter {
       }
     }
     if (pendingUsage.inputTokens !== undefined || pendingUsage.outputTokens !== undefined) {
-      yield { type: 'usage', inputTokens: pendingUsage.inputTokens, outputTokens: pendingUsage.outputTokens }
+      yield { type: 'usage', ...pendingUsage }
     }
     yield { type: 'done', reason: calls.size ? 'tool_calls' : finishReason }
   }

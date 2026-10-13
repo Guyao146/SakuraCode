@@ -134,7 +134,7 @@ class GuiAdapter implements ModelAdapter {
     }
     yield { type: 'thinking', delta: '先梳理上下文，再验证结论。' }
     yield { type: 'text', delta: '已完成：' + message }
-    yield { type: 'usage', inputTokens: 120, outputTokens: 32 }
+    yield { type: 'usage', inputTokens: 120, outputTokens: 32, cachedTokens: 90, reasoningTokens: 8 }
     yield { type: 'done', reason: 'stop' }
   }
 }
@@ -391,6 +391,12 @@ browserSuite('web client — real browser', () => {
     expect(await browser.evaluate("document.querySelector('.msg-think').classList.contains('collapsed')")).toBe(true)
     expect(await browser.evaluate("document.querySelector('.think-head').textContent")).toContain('字')
     expect(await browser.evaluate("document.getElementById('usageChip').hidden")).toBe(false)
+    expect(await browser.evaluate("document.getElementById('usageChip').textContent")).toContain('缓存 75%')
+    expect(await browser.evaluate("document.getElementById('usageChip').title")).toContain('缓存命中 90')
+    expect(await browser.evaluate("document.getElementById('usageChip').title")).toContain('推理 8')
+    // Cumulative session stats ride on the context chip's tooltip.
+    expect(await browser.evaluate("document.getElementById('ctxChip').title")).toContain('累计 1 次请求')
+    expect(await browser.evaluate("document.getElementById('ctxChip').title")).toContain('缓存命中 90')
     expect(await browser.evaluate("document.getElementById('sessionHeading').textContent")).toContain('检查这个项目')
     await browser.fill('#sessionSearch', '检查这个项目')
     expect(await browser.evaluate("document.querySelectorAll('.session-open').length")).toBe(1)

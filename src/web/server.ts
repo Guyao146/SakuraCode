@@ -22,7 +22,7 @@ import { fetchUpstreamModels, type UpstreamFormat } from '../core/llm.js'
 import { loadConfig, type SakuraConfig } from '../config.js'
 import { listCommands as listSlashCommands, expandCommand as expandSlashCommand } from '../skills/commands.js'
 import { expandMentions } from '../mentions/index.js'
-import { estimateMessagesTokens } from '../util/tokens.js'
+import { estimateMessagesTokens, summarizeUsage, type SessionTokenStats } from '../util/tokens.js'
 import { isLoopbackHost, WebAccess, type WebPrincipal } from './access.js'
 import { HttpError, json, readJson } from './http.js'
 import { PendingRequests } from './pending.js'
@@ -264,6 +264,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   /** The approval mode follows the user's live choice across workspace switches. */
   let liveApprovalMode = opts.approvalMode
   let contextCache: { key: string; tokens: number } | null = null
+  /** Real per-session usage (provider-reported), memoized like contextCache. */
+  let statsCache: { key: string; stats: SessionTokenStats } | null = null
   const persistSettings = opts.onPersistSettings
   /**
    * Collaborative expert session: when on, every user message is delivered to
@@ -489,6 +491,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
 
   function bindHarness(next: Harness): void {
     contextCache = null
+    statsCache = null
     // The roster is rebuilt on remount, so the expert team cannot survive one.
     expertMode = false
     expertIds.clear()
@@ -617,6 +620,29 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   }
 
   /**
+   * Real provider-reported usage summed over the main session's log — the
+   * input/output/cache totals the GUI footer shows next to the estimate.
+   * Memoized by event count alongside contextTokens().
+   */
+  async function tokenStats(): Promise<SessionTokenStats> {
+    const mount = ctx
+    const epoch = workspaceEpoch
+    const main = mainAgent()
+    const sessionId = main.sessionId
+    if (!sessionId) return { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }
+    try {
+      const session = await mount.sessions.open(sessionId)
+      const key = `${epoch}:${sessionId}:${session.events.length}`
+      if (statsCache?.key === key) return statsCache.stats
+      const stats = summarizeUsage(session.events)
+      if (mount === ctx) statsCache = { key, stats }
+      return stats
+    } catch {
+      return { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }
+    }
+  }
+
+  /**
    * Auto-compaction thresholds for the GUI's context meter; null when the
    * compaction plugin is not mounted (the meter then hides the threshold).
    */
@@ -638,6 +664,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     const snapshotWorkspace = workspaceId()
     const sessions = await mount.sessions.list()
     const tokens = await contextTokens()
+    const stats = await tokenStats()
     if (closed) throw new HttpError(503, 'server is shutting down')
     const main = mainAgent()
     const experts = liveExperts()
@@ -668,6 +695,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       busy: main.status === 'running',
       sessionId: isSessionId(main.sessionId) ? main.sessionId : null,
       contextTokens: tokens,
+      /** Real provider-reported usage for the main session (empty before the first answer). */
+      tokenStats: stats,
       contextBudget: contextBudget(),
       /** Present only when the compaction plugin is mounted; a value is a dedicated summary model. */
       compactModel: compactionModel(),
@@ -831,6 +860,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
         harness.main() // New blank conversation; no directory until the next turn.
         applySelectedModel()
         contextCache = null
+    statsCache = null
       }
       const sessionId = isSessionId(mainAgent().sessionId) ? mainAgent().sessionId : null
       const result = { deletedId: id, sessionId, workspaceId: workspaceId() }

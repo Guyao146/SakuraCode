@@ -261,6 +261,13 @@ REPL 也接受管道喂入（`echo "任务" | sakura`）：stdin 到达 EOF 时�
 - **会话切换隔离**：服务器维护单调递增的 `sessionEpoch`，切换 / 删除会话时自增并关闭专家分发；进行中的旧请求在写回结果前会先校验 epoch，若会话已变则返回 409 让前端按当前会话重试，避免把旧会话的回复落到新会话上（影响 `/api/message`、`/api/experts/*`、`/api/settings`、`/api/sessions/:id` 等写接口）。
 - **更新检查的健壮性**：`UpdateChecker`（src/updates.ts）单飞行合并并发的手动与自动检查；每个版本只通知一次（`checkAndDetectChange` 在 await 之后认领版本 key，防止并发双发）；请求强制 `credentials: 'omit'` + `redirect: 'error'`、响应体上限 1 MiB；只接受稳定版 feed（draft / prerelease 一律视为错误）；release URL 固定为 `github.com/Guyao146/SakuraCode/releases/tag/<tag>`（保留前导 v），不信任 feed 里的 `html_url`。临时失败保留上一次已知的版本字段并附加 `error`，恢复后同一版本不会重复通知。`close()` 幂等并中止进行中的检查，服务器关闭后不再有任何轮询。
 
+## Token 计量与缓存命中率（v0.7.2 增补）
+
+- **解析上游真实用量**：OpenAI 兼容适配器现在读取用量帧里的缓存与推理明细——OpenAI 风格的 `prompt_tokens_details.cached_tokens` / `completion_tokens_details.reasoning_tokens`、DeepSeek 风格的顶层 `prompt_cache_hits` / `reasoning_tokens`，以及 Responses API 的 `input_tokens_details` / `output_tokens_details`。不报告这些字段的服务商不受影响（字段保持 undefined，不计零）。
+- **回合级聚合**：`ui/turn/end` 的 `usage` 是**整回合所有步的累加**（此前只保留最后一步，多步工具回合的用量被丢弃）；每步的用量仍随 `assistant/message.stream.usage` 落盘，会话重放后可复算。
+- **会话级统计**：`state.tokenStats`（`{requests, inputTokens, outputTokens, cachedTokens, reasoningTokens}`）从会话日志派生，刷新页面/重连后不丢失；GUI 输入框上方的「本轮 N tokens」在有缓存命中时显示占比（如「本轮 1.5k tokens（缓存 62%）」），把鼠标悬停在「上下文 ≈」上可看累计输入/输出/缓存命中率与推理 token；REPL 新增 `/usage` 打印同样的汇总（含上下文估算）。
+- **缓存友性的请求结构**：提高缓存命中率是结构问题，SakuraCode 已经按前缀稳定原则构造请求——系统提示始终是 `messages[0]` 且只在内容变化时追加；历史严格按日志顺序追加、从不重写旧消息；工具声明按插件挂载顺序稳定导出；旧截图只保留最近一组（更早的降级为文本），大输出工具统一 30k 字符截断。会话级实测：**不要中途手工编辑历史、保持系统提示稳定、别在长会话里频繁切换模型**（换模型不改变历史前缀，但工具/温度等请求字段变化仍可能让服务商视为不同请求）。多数上游（OpenAI、DeepSeek、Moonshot、GLM 等）对 ≥1k token 的重复前缀自动启用缓存，无需任何请求参数。
+
 
 ## 健壮性（Windows 及其他）
 
