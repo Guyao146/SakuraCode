@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { WeixinBridge, WeixinBridgeError, parseWeixinSaved, type WeixinSaved } from '../src/integrations/weixin.js'
 import type { WeixinCredentials, WeixinMessage, WeixinQr, WeixinQrStatus, WeixinTransport, WeixinUpdates } from '../src/integrations/weixin-client.js'
@@ -104,18 +104,16 @@ describe('weixin bridge — binding lifecycle', () => {
   it('rejects phone task control until the workspace is confirmed', async () => {
     const transport = new FakeTransport()
     const { bridge, workspace } = await bind(transport)
-    bridge.start()
-    transport.incoming.push(incoming('任务 修好它'))
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    const request = transport.sent.at(-1)?.text ?? ''
-    expect(request).toContain('只读连接')
-    await bridge.configure({ allowControl: true })
-    transport.incoming.push(incoming(`连接 ${code(workspace.id)}`))
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    transport.incoming.push(incoming('任务 修好它'))
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(transport.sent.at(-1)?.text).toContain('已发送')
-    await bridge.close()
+    try {
+      bridge.start()
+      transport.incoming.push(incoming('任务 修好它'))
+      await vi.waitFor(() => { expect(transport.sent.at(-1)?.text).toContain('只读连接') }, { timeout: 1000, interval: 5 })
+      await bridge.configure({ allowControl: true })
+      transport.incoming.push(incoming(`连接 ${code(workspace.id)}`))
+      await vi.waitFor(() => { expect(transport.sent.at(-1)?.text).toContain('手机控制已确认') }, { timeout: 1000, interval: 5 })
+      transport.incoming.push(incoming('任务 修好它'))
+      await vi.waitFor(() => { expect(transport.sent.at(-1)?.text).toContain('已发送') }, { timeout: 1000, interval: 5 })
+    } finally { await bridge.close() }
   })
 
   it('disconnect wipes credentials and stops notifications', async () => {
