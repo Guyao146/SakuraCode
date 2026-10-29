@@ -189,7 +189,11 @@ browserSuite('remote dashboard — real browser', () => {
     await login(browser, VIEWER)
     await browser.click('#chatViewBtn')
     await browser.click('#inspectorBtn')
-    const selector = `[data-agent-id="${child.id}"] .agent-view`
+    // Opening the workbench loads workspace history above the agent list.
+    // Wait for that layout-changing read before dispatching pointer coordinates.
+    await browser.waitFor("document.getElementById('inspectorBtn').getAttribute('aria-expanded') === 'true' && document.querySelector('#collaborationWorkspaces .collaboration-workspace') && !document.getElementById('collaborationRefresh').disabled")
+    await browser.waitFor("document.getElementById('chatCol').textContent.includes('MAIN_SESSION_UNCHANGED')")
+    const selector = `#agentList [data-agent-id="${child.id}"] .agent-view`
     expect(await browser.evaluate(`document.querySelector(${JSON.stringify(selector)}).disabled`)).toBe(false)
     await browser.click(selector)
     await browser.waitFor("document.getElementById('agentReaderBody').textContent.includes('READ_ONLY_CHILD_RECORDS')")
