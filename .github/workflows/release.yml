@@ -41,6 +41,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Use an isolated long-path validation directory
+        shell: pwsh
+        run: |
+          # Vite percent-encodes the runner's RUNNER~1 TEMP path, so dynamic
+          # fixture imports must use a normal absolute path, not an 8.3 alias.
+          $scratch = Join-Path $env:GITHUB_WORKSPACE 'tmp/release-validation/scratch'
+          New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+          "TEMP=$scratch" >> $env:GITHUB_ENV
+          "TMP=$scratch" >> $env:GITHUB_ENV
+
       - name: Typecheck source, tests and scripts
         shell: pwsh
         run: |
