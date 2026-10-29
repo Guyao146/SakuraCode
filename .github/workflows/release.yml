@@ -9,10 +9,18 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
+      - name: Preserve source line endings
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -20,30 +28,91 @@ jobs:
           node-version: '24'
           cache: 'npm'
 
+      - name: Verify version and release notes
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Release tag must match package.json: v$version"
+          }
+          if (!(Test-Path "docs/releases/v$version.md")) { throw 'Release notes are missing' }
+          "SAKURA_VERSION=$version" >> $env:GITHUB_ENV
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Typecheck source, tests and scripts
+        shell: pwsh
+        run: |
+          npm run typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $files = @(Get-ChildItem tests, scripts -Recurse -File -Filter '*.ts' | ForEach-Object { $_.FullName })
+          node node_modules/typescript/bin/tsc --noEmit --strict --skipLibCheck --target ES2022 --lib ES2022 `
+            --module Node16 --moduleResolution Node16 --resolveJsonModule --types node $files
+
+      - name: Run complete regression suite without skips
+        shell: pwsh
+        run: |
+          node --import tsx --input-type=module -e "import { resolveChromePath } from './src/tools/browser.ts'; if (!resolveChromePath() || typeof WebSocket !== 'function') throw new Error('Real browser regressions require Chrome/Edge and native WebSocket');"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path tmp/release-validation -Force | Out-Null
+          npm test -- --maxWorkers=1 --minWorkers=1 --fileParallelism=false --reporter=default --reporter=json --outputFile=tmp/release-validation/tests.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node -e "const r=require('./tmp/release-validation/tests.json'); if (!r.success || r.numFailedTests || r.numPendingTests || r.numTodoTests || r.numPassedTests !== r.numTotalTests) throw new Error('All release tests must pass without skips');"
 
       - name: Build TypeScript + web assets
         run: npm run build
 
-      - name: Build standalone client (Node SEA)
-        run: npm run client
-
-      - name: Build desktop launcher (C# / .NET Framework)
+      - name: Build embedded engine and desktop launcher
         run: npm run desktop
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Package artifacts
+      - name: Package artifacts and checksums
         shell: pwsh
         run: |
-          $version = (Get-Content package.json | ConvertFrom-Json).version
-          Compress-Archive -Path "build/SakuraCode.exe", "build/SakuraCode Desktop.exe" `
-            -DestinationPath "build/SakuraCode-$version-win-x64.zip" -Force
-          Write-Host "Packaged build/SakuraCode-$version-win-x64.zip"
+          $version = $env:SAKURA_VERSION
+          $metadata = Get-Content build/desktop-build.json | ConvertFrom-Json
+          if ($metadata.version -ne $version) { throw 'Desktop build version mismatch' }
+          $engineHash = (Get-FileHash -Algorithm SHA256 -LiteralPath 'build/SakuraCode.exe').Hash.ToLowerInvariant()
+          if ($metadata.engineSha256 -ne $engineHash) { throw 'Embedded engine checksum mismatch' }
+          $desktopHash = (Get-FileHash -Algorithm SHA256 -LiteralPath 'build/SakuraCode Desktop.exe').Hash.ToLowerInvariant()
+          if ((Get-Content -LiteralPath 'build/SakuraCode Desktop.sha256' -Raw).Trim() -ne "$desktopHash  SakuraCode Desktop.exe") {
+            throw 'Desktop checksum mismatch'
+          }
+          "$engineHash  SakuraCode.exe" | Set-Content -LiteralPath 'build/SakuraCode.sha256' -Encoding utf8NoBOM
+          $archive = "build/SakuraCode-$version-win-x64.zip"
+          Compress-Archive -Path 'build/SakuraCode.exe', 'build/SakuraCode.sha256', `
+            'build/SakuraCode Desktop.exe', 'build/SakuraCode Desktop.sha256', `
+            'build/SakuraCode Desktop-使用说明.txt' -DestinationPath $archive
+          $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          "$archiveHash  SakuraCode-$version-win-x64.zip" | Set-Content -LiteralPath "$archive.sha256" -Encoding utf8NoBOM
+          Write-Host "Packaged $archive"
 
-      - name: Create GitHub release
+      - name: Preserve packaged build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SakuraCode-${{ env.SAKURA_VERSION }}-win-x64
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            build/SakuraCode.exe
+            build/SakuraCode.sha256
+            build/SakuraCode Desktop.exe
+            build/SakuraCode Desktop.sha256
+            build/SakuraCode Desktop-使用说明.txt
+            build/SakuraCode-*-win-x64.zip
+            build/SakuraCode-*-win-x64.zip.sha256
+            build/desktop-build.json
+
+      - name: Preserve regression report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-regression-report
+          if-no-files-found: warn
+          retention-days: 14
+          path: tmp/release-validation/tests.json
+
+      - name: Create draft GitHub release for artifact verification
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         env:
@@ -53,8 +122,13 @@ jobs:
           $version = (Get-Content package.json | ConvertFrom-Json).version
           gh release create $tag `
             "build/SakuraCode.exe" `
+            "build/SakuraCode.sha256" `
             "build/SakuraCode Desktop.exe" `
+            "build/SakuraCode Desktop.sha256" `
+            "build/SakuraCode Desktop-使用说明.txt" `
             "build/SakuraCode-$version-win-x64.zip" `
+            "build/SakuraCode-$version-win-x64.zip.sha256" `
+            "build/desktop-build.json" `
             --title "SakuraCode $tag" `
-            --notes "Windows x64 桌面包。SakuraCode.exe 是内置引擎的独立可执行文件； SakuraCode Desktop.exe 是系统 Chrome / Edge 应用模式的启动器。双击运行需要系统 .NET Framework 4.8 与 Chrome 或 Edge；无需 Node/npm。" `
-            --verify-tag
+            --notes-file "docs/releases/$tag.md" `
+            --verify-tag --draft

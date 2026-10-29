@@ -1,6 +1,8 @@
 /** Barrel of core services. */
 
 export { Session, SessionService, sessionPlugin, type SessionMeta } from './session.js'
+export { CheckpointService, CheckpointError, checkpointsPlugin, type CheckpointPlan } from './checkpoints.js'
+export { ConversationHistoryService, messageText, type HistoryMode, type HistoryPreview } from './conversation-history.js'
 export { LLMService, OpenAICompatAdapter, llmPlugin, type OpenAICompatOptions } from './llm.js'
 export { ToolsService, toolsPlugin, params, type ToolsExecutePayload } from './tools.js'
 export { SystemPromptService, systemPromptPlugin, type PromptSection } from './system-prompt.js'
@@ -39,10 +41,15 @@ export {
   type AgentStatus,
   type ToolPolicy,
   type TurnResult,
+  type TurnOptions,
 } from './agent.js'
+export { CHAT_FILE_LIMITS, parseChatFiles, storeChatFiles, ChatAttachmentError, type ChatAttachment, type ChatUploadFile } from './attachments.js'
 export { HarnessContext } from './context.js'
+export { RetryService, RetryLimitError, retryPlugin, type RetryRequest, type RetryStatus, type RetryConfirmHandler } from './retry.js'
+export { DEFAULT_RETRY_POLICY, validateRetryPolicy, LLMRequestError, type RetryPolicy } from '../util/retry.js'
 export type {
   ChatMessage,
+  CheckpointTarget,
   JsonSchemaObject,
   LLMRequest,
   ModelAdapter,

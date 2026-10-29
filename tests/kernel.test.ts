@@ -396,7 +396,7 @@ describe('Context — plugin()', () => {
 
     const scope = await ctx.plugin({
       name: 'greeter',
-      apply(c, cfg) {
+      apply(c: Context, cfg: typeof config) {
         sawCtx = c
         sawConfig = cfg
       },
@@ -643,7 +643,7 @@ describe('Context — subclassing via createContext()', () => {
     const root = new SubContext()
     const child = root.fork()
     expect(child).toBeInstanceOf(SubContext)
-    expect(child.kind).toBe('sub')
+    expect(child).toHaveProperty('kind', 'sub')
     expect(child.parent).toBe(root)
   })
 
@@ -654,7 +654,7 @@ describe('Context — subclassing via createContext()', () => {
 
     const scope = await root.plugin({ name: 'p', apply() {} })
     expect(scope).toBeInstanceOf(SubContext)
-    expect(scope.kind).toBe('sub')
+    expect(scope).toHaveProperty('kind', 'sub')
     expect(scope.parent).toBe(root)
     expect(scope.get<number>('svc')).toBe(7)
 

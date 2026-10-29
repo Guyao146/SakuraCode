@@ -291,6 +291,7 @@ describe('compactionPlugin', () => {
     await paused.started
     const manual = compaction.compact(session.id)
     const anotherManual = compaction.compact(session.id)
+    expect(compaction.isCompacting(session.id)).toBe(true)
     let autoFinished = false
     const auto = compaction.maybeAutoCompact(session.id).then(() => { autoFinished = true })
     try {
@@ -302,6 +303,7 @@ describe('compactionPlugin', () => {
     }
 
     expect(paused.requests).toHaveLength(1)
+    expect(compaction.isCompacting(session.id)).toBe(false)
     expect(await manual).toEqual(await anotherManual)
     expect(session.events.filter(isCompactionNote)).toHaveLength(1)
   })
@@ -407,7 +409,11 @@ describe('compactionPlugin', () => {
     await harness.run('do things')
     const sessionId = main.sessionId
 
+    const status: boolean[] = []
+    ctx.on('compaction/status', (payload: { active: boolean }) => status.push(payload.active))
     await expect(compaction.compact(sessionId)).rejects.toThrow(/boom/)
+    expect(compaction.isCompacting(sessionId)).toBe(false)
+    expect(status).toEqual([true, false])
 
     const session = await ctx.sessions.open(sessionId)
     expect(session.events.filter(isCompactionNote)).toHaveLength(0)
@@ -512,5 +518,63 @@ describe('compactionPlugin — summary model choice', () => {
     // absent, leaving the adapter default in charge.
     await compaction.compact(main.sessionId!)
     expect(requests.at(-1)!.model).toBeUndefined()
+  })
+})
+
+describe('compactionPlugin — context budget and clear boundaries', () => {
+  it('updates both independent triggers atomically and includes tool definitions in auto token accounting', async () => {
+    const { ctx, adapter } = await tmpHarness({ steps: [text('SUMMARY: tool schema trigger')], config: { plugins: { 'core-compaction': { config: { auto: 0, autoTokens: 0 } } } } })
+    const compaction = ctx.get<CompactionService>('compaction'), stream = vi.spyOn(adapter, 'stream')
+    compaction.setContextBudget({ contextWindowTokens: 64000, thresholdPercent: 1, autoThreshold: 0 })
+    expect(compaction.autoTokensThreshold).toBe(640)
+    expect(compaction.contextWindowTokens).toBe(64000)
+    const session = await ctx.sessions.create()
+    await session.append({ type: 'user/message', payload: { content: 'tiny message' } })
+    await compaction.maybeAutoCompact(session.id)
+    expect(stream).toHaveBeenCalledTimes(1)
+    expect(session.events.some(isCompactionNote)).toBe(true)
+    compaction.setContextBudget({ contextWindowTokens: 128000, thresholdPercent: 0, autoThreshold: 0 })
+    expect(compaction.autoTokensThreshold).toBe(0)
+    expect(() => compaction.setContextBudget({ contextWindowTokens: 1, thresholdPercent: 75, autoThreshold: 120 })).toThrow()
+    expect(compaction.contextWindowTokens).toBe(128000)
+    expect(compaction.autoThreshold).toBe(0)
+  })
+
+  it('never resurrects an old summary after a clear and makes no request for an unchanged cleared context', async () => {
+    const { ctx, adapter } = await tmpHarness({ steps: [text('SUMMARY: new context only')], config: { plugins: { 'core-compaction': { config: { auto: 0, autoTokens: 0 } } } } })
+    const compaction = ctx.get<CompactionService>('compaction'), stream = vi.spyOn(adapter, 'stream')
+    const session = await ctx.sessions.create()
+    await session.append({ type: 'session/note', payload: { note: 'compaction', summary: 'MUST_NOT_RESURRECT' } })
+    await session.clearContext()
+    await compaction.compact(session.id)
+    expect(stream).not.toHaveBeenCalled()
+    await session.append({ type: 'user/message', payload: { content: 'FRESH_CONTEXT' } })
+    await compaction.compact(session.id)
+    const request = stream.mock.calls[0]![0]
+    expect(JSON.stringify(request.messages)).toContain('FRESH_CONTEXT')
+    expect(JSON.stringify(request.messages)).not.toContain('MUST_NOT_RESURRECT')
+    expect(session.events.filter(isCompactionNote)).toHaveLength(2)
+  })
+
+  it('honors cancellation and disposal instead of appending a late summary', async () => {
+    const paused = pausedSummary(), { ctx } = await tmpHarness({ adapter: paused.adapter })
+    const compaction = ctx.get<CompactionService>('compaction'), session = await ctx.sessions.create()
+    await session.append({ type: 'user/message', payload: { content: 'cancel this summary' } })
+    const controller = new AbortController()
+    const attempt = compaction.compact(session.id, { signal: controller.signal })
+    await paused.started
+    expect(paused.requests[0]?.signal).toBeDefined()
+    controller.abort(); ctx.dispose(); paused.release()
+    expect(await attempt).toMatchObject({ deferred: true, compactedEvents: 0 })
+    expect(session.events.some(isCompactionNote)).toBe(false)
+    expect(compaction.isCompacting(session.id)).toBe(false)
+  })
+
+  it('accepts config percentages without changing legacy absolute thresholds unless explicitly requested', async () => {
+    const { ctx } = await tmpHarness({ config: { plugins: { 'core-compaction': { config: { contextWindowTokens: 128000, thresholdPercent: 70, autoTokens: 1, auto: 0 } } } } })
+    const compaction = ctx.get<CompactionService>('compaction')
+    expect(compaction.autoTokensThreshold).toBe(89600)
+    expect(compaction.autoThreshold).toBe(0)
+    expect(compaction.contextWindowTokens).toBe(128000)
   })
 })

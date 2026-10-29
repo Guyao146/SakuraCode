@@ -74,9 +74,18 @@ plugins:
     config:
       maxSteps: 40
       allowNestedSubagents: false
+  core-retry:
+    config:
+      enabled: true
+      windowMs: 60000 # first failure starts this fixed time budget; it never silently renews
+      maxRetries: 3 # automatic retries only, not counting the initial request
+      delayMs: 2000 # Retry-After can increase the delay
   core-compaction:
     config:
-      auto: 120 # auto-compact when the session log passes this many events (0 = off)
+      auto: 120 # events since the last compaction/clear (0 disables only this trigger)
+      autoTokens: 48000 # estimated messages + tool definitions (0 disables only this trigger)
+      contextWindowTokens: 64000 # local planning budget, NOT the provider's declared limit
+      # thresholdPercent: 75 # when present, overrides autoTokens; 0 disables the token trigger
       # compactModel: glm-4.7 # sumarize with a fixed model instead of the current one; omitted/empty follows the selection
   core-hooks:
     config:

@@ -311,7 +311,7 @@ describe('OpenAICompatAdapter — responses format', () => {
     })
     const address = server.address() as { port: number }
     const adapter = new OpenAICompatAdapter({ baseURL: `http://127.0.0.1:${address.port}`, model: 'm', format: 'responses' })
-    await expect(adapter.stream({ messages: [{ role: 'user', content: 'hi' }] }).next())
+    await expect(adapter.stream({ messages: [{ role: 'user', content: 'hi' }] })[Symbol.asyncIterator]().next())
       .rejects.toThrow(/quota exhausted/)
   })
 })

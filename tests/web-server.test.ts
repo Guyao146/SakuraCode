@@ -12,6 +12,7 @@ import pkg from '../package.json'
 import * as path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { runWebServer, type DesktopSettingsState, type WebServerHandle, type WebServerOptions } from '../src/web/server.js'
+import { BLOCKED_WEB_PORTS } from '../src/web/http.js'
 import { MockAdapter, text, toolCall, type MockStep } from './helpers.js'
 
 const cleanups: Array<() => Promise<void>> = []
@@ -485,7 +486,7 @@ describe('web server — sessions and agents', () => {
   })
 
   it('spawns an agent, delivers a message, and lists it in state', async () => {
-    const { base } = await boot([text('sub says hi'), text('done')])
+    const { base, handle } = await boot([text('sub says hi'), text('done')])
     const spawned = (await (
       await fetch(`${base}/api/agents`, {
         method: 'POST',
@@ -501,7 +502,12 @@ describe('web server — sessions and agents', () => {
     })
     expect(delivered.status).toBe(202)
 
-    const state = (await (await fetch(`${base}/api/state`)).json()) as { agents: Array<{ id: string }> }
+    // 202 acknowledges delivery, not completion. This assertion concerns the
+    // resulting roster, not the explicitly transient 503 snapshot-churn case.
+    await handle.harness.ctx.agents.get(spawned.agent.id)!.wait()
+    const response = await fetch(`${base}/api/state`)
+    expect(response.status).toBe(200)
+    const state = (await response.json()) as { agents: Array<{ id: string }> }
     expect(state.agents.some((a) => a.id === spawned.agent.id)).toBe(true)
 
     const missing = await fetch(`${base}/api/agents/agent-999/message`, {
@@ -575,7 +581,7 @@ describe('web server — sessions and agents', () => {
 
 describe('web server — local hardening', () => {
   it('rejects a cross-origin POST and keeps Origin-less clients working', async () => {
-    const { base } = await boot([text('ok')])
+    const { base, handle } = await boot([text('ok')])
     const evil = await fetch(`${base}/api/message`, {
       method: 'POST',
       headers: { origin: 'http://evil.test' },
@@ -598,6 +604,11 @@ describe('web server — local hardening', () => {
       body: JSON.stringify({ text: 'hi' }),
     })
     expect(localhost.status).toBe(202)
+    // A 202 only accepts the turn; state may legitimately return 503 while
+    // these queued turns keep changing its revision. Test Origin after settling.
+    const completed = await handle.harness.main().wait()
+    expect(completed.error).toBeUndefined()
+    expect(completed.output).toBe('ok')
     expect((await fetch(`${base}/api/state`)).status).toBe(200)
   })
 
@@ -841,8 +852,16 @@ describe('web server — workspace switch keeps tools on the new workspace', () 
       res.write('data: [DONE]\n\n')
       res.end()
     })
-    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve))
-    const port = (probe.address() as { port: number }).port
+    let port: number
+    do {
+      await new Promise<void>((resolve, reject) => {
+        const failed = (error: Error) => reject(error)
+        probe.once('error', failed)
+        probe.listen(0, '127.0.0.1', () => { probe.off('error', failed); resolve() })
+      })
+      port = (probe.address() as { port: number }).port
+      if (BLOCKED_WEB_PORTS.has(port)) await new Promise<void>(resolve => probe.close(() => resolve()))
+    } while (BLOCKED_WEB_PORTS.has(port))
     // No custom adapter: the built-in OpenAI-compatible adapter is the
     // registered "chat-pro" model, so the patch must reconfigure it
     // rather than taking the registered-model shortcut.
@@ -868,7 +887,7 @@ describe('web server — workspace switch keeps tools on the new workspace', () 
       })).json() as { hasApiKey: boolean; model: string }
       expect(applied.hasApiKey).toBe(true)
       expect(applied.model).toBe('chat-pro')
-      await post(handle.url + 'api/message', { text: 'probe' })
+      expect((await post(handle.url + 'api/message', { text: 'probe' })).status).toBe(202)
       await vi.waitFor(() => expect(requests.some((r) => r.url === '/chat/completions')).toBe(true), { timeout: 5000 })
       expect(requests.find((r) => r.url === '/chat/completions')?.auth).toBe('Bearer patched-key')
     } finally {
@@ -930,6 +949,39 @@ describe('web server — desktop workspace prefs', () => {
     } finally {
       await fs.rm(storage, { recursive: true, force: true }).catch(() => {})
     }
+  })
+
+  it('rolls back staged workspace prefs and the default parent when persistence fails', async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-pref-rollback-'))
+    const other = path.join(workspace, 'other'), originalStorage = path.join(workspace, 'original-sessions')
+    const candidateStorage = path.join(workspace, 'rejected-sessions')
+    await fs.mkdir(other)
+    const persisted: DesktopSettingsState[] = []
+    let failSave = true
+    const handle = await runWebServer({ cwd: workspace, adapter: new MockAdapter([text('ok')]), approvalMode: 'yolo', quiet: true, open: false,
+      newWorkspaceDir: workspace, workspacePrefs: { [workspace]: { sessionDir: originalStorage } },
+      onPersistSettings: settings => { persisted.push(structuredClone(settings)); if (failSave) throw new Error('synthetic disk failure') } })
+    cleanups.push(async () => { await handle.close(); await fs.rm(workspace, { recursive: true, force: true }) })
+    const base = handle.url.replace(/\/$/, ''), initialHarness = handle.harness
+    const read = async () => await (await fetch(`${base}/api/state`)).json() as { cwd: string; desktop: DesktopSettingsState }
+    for (const patch of [
+      { sessionDir: candidateStorage, newWorkspaceDir: other },
+      { workspace: other, sessionDir: candidateStorage, newWorkspaceDir: other },
+    ]) {
+      expect((await post(`${base}/api/desktop/settings`, patch)).status).toBe(500)
+      expect(handle.harness).toBe(initialHarness)
+      expect(handle.harness.ctx.sessions.root).toBe(originalStorage)
+      expect(await read()).toMatchObject({ cwd: workspace, desktop: { workspace, recentWorkspaces: [workspace],
+        sessionDir: originalStorage, newWorkspaceDir: workspace } })
+    }
+    failSave = false
+    expect((await post(`${base}/api/desktop/settings`, { workspace: other })).status).toBe(200)
+    expect(handle.harness.ctx.sessions.root).toBe(path.join(other, '.sakura', 'sessions'))
+    expect(await read()).toMatchObject({ cwd: other, desktop: { sessionDir: '', newWorkspaceDir: workspace } })
+    expect(persisted.at(-1)?.workspacePrefs).toEqual({ [workspace]: { sessionDir: originalStorage }, [other]: {} })
+    expect((await post(`${base}/api/desktop/settings`, { workspace })).status).toBe(200)
+    expect(handle.harness.ctx.sessions.root).toBe(originalStorage)
+    expect(persisted[0]?.workspacePrefs?.[workspace]?.sessionDir).toBe(candidateStorage)
   })
 
   it('clearing the session dir restores the workspace default location', async () => {
@@ -1026,7 +1078,8 @@ describe('web server — weixin integration endpoints', () => {
     expect(state.phase).toBe('qr')
     const bad = await post(`${base}/api/weixin/settings`, { allowControl: 'yes' })
     expect(bad.status).toBe(400)
-    await post(`${base}/api/weixin/cancel`, { loginId: (await (await fetch(`${base}/api/state`)).json()).weixin?.login?.id })
+    const latest = await (await fetch(`${base}/api/state`)).json() as { weixin?: { login?: { id: string } } }
+    await post(`${base}/api/weixin/cancel`, { loginId: latest.weixin?.login?.id })
       .then((res) => expect(res.status).toBe(200))
   })
 
@@ -1228,7 +1281,9 @@ describe('web server — collaborative expert session', () => {
   it('spawns the expert team, delivers the opening task and fans out later messages', async () => {
     const received: string[] = []
     const adapter = new MockAdapter([(req) => {
-      received.push(String(req.messages.at(-1)?.content ?? ''))
+      // Shared context may end in already committed peer evidence, not the
+      // task itself. Locate the canonical user message instead of the tail.
+      received.push(String([...req.messages].reverse().find(message => message.role === 'user')?.content ?? ''))
       return text('expert reply')
     }])
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-experts-'))
@@ -1238,10 +1293,19 @@ describe('web server — collaborative expert session', () => {
       await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {})
     })
     try {
-      const started = await (await post(handle.url + 'api/experts/start', { task: '重构登录模块' })).json() as { expertMode: boolean; started: string[] }
+      const response = await post(handle.url + 'api/experts/start', { task: '重构登录模块' })
+      expect(response.status).toBe(200)
+      const started = await response.json() as { expertMode: boolean; started: string[] }
       expect(started.expertMode).toBe(true)
       expect(started.started).toEqual(['架构师', '实现者', '审查者'])
-      const state = await (await fetch(handle.url + 'api/state')).json() as {
+      // Four opening turns update the revision concurrently. State snapshots
+      // deliberately return 503 rather than stamp stale disk data as current.
+      // Settle the actual turns before asserting the completed team projection.
+      await vi.waitFor(() => expect(received.filter((m) => m === '重构登录模块').length).toBe(4), { timeout: 10_000 })
+      await Promise.all(handle.harness.ctx.agents.list().map(agent => agent.wait()))
+      const snapshot = await fetch(handle.url + 'api/state')
+      expect(snapshot.status).toBe(200)
+      const state = await snapshot.json() as {
         expertMode: boolean
         agents: Array<{ name: string; expert?: string; description?: string }>
       }
@@ -1251,11 +1315,10 @@ describe('web server — collaborative expert session', () => {
       const architect = state.agents.find((a) => a.name === '架构师')
       expect(architect?.expert).toBe('architect')
       expect(architect?.description).toContain('方案分解')
-      // The opening task is recorded by main and all three experts.
-      await vi.waitFor(() => expect(received.filter((m) => m === '重构登录模块').length).toBe(4), { timeout: 10_000 })
       // A user message reaches main + all three experts (4 requests).
-      await post(handle.url + 'api/message', { text: '补充测试用例' })
+      expect((await post(handle.url + 'api/message', { text: '补充测试用例' })).status).toBe(202)
       await vi.waitFor(() => expect(received.filter((m) => m === '补充测试用例').length).toBe(4), { timeout: 10_000 })
+      await Promise.all(handle.harness.ctx.agents.list().map(agent => agent.wait()))
       expect(received).toHaveLength(8)
     } catch (error) {
       throw error

@@ -77,6 +77,19 @@ export const sessionExportPlugin: Plugin = {
             lines.push('**输出**', '', '```', output.replace(/```/g, '``\u200b`'), '```', '', '</details>', '')
           } else if (record.type === 'session/note' && (record.payload as { note?: string }).note === 'compaction') {
             lines.push('> [上下文已压缩]', '')
+          } else if (record.type === 'session/note' && record.payload.note === 'context-clear') {
+            lines.push('> [上下文已清空，历史记录保留]', '')
+          } else if (record.type === 'collaboration/message' && record.payload.messages.length) {
+            openSection('assistant')
+            lines.push(`<details><summary>专家 ${escapeLt(record.payload.agentName)}（成员记录，非用户指令）</summary>`, '')
+            for (const message of record.payload.messages) {
+              const content = message.role === 'assistant' || message.role === 'tool' ? message.content : ''
+              if (content) lines.push(escapeLt(content), '')
+            }
+            lines.push('</details>', '')
+          } else if (record.type === 'session/note' && record.payload.note === 'turn-summary') {
+            const metrics = record.payload.metrics as import('../core/types.js').TurnMetrics | undefined
+            if (metrics) lines.push(`> ${metrics.scope === 'team' ? '整轮（含专家）' : '本轮'} ${metrics.usageSource === 'reported' ? '接口报告' : '估算'} ${metrics.totalTokens} tokens · ${metrics.elapsedMs / 1000} 秒`, '')
           }
           // system/message, agent/meta, tool/call, other notes: observability only.
         }

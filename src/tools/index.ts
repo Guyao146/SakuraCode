@@ -1,6 +1,7 @@
 /** Barrel of the shipped tool plugins (mounted by the base bundle). */
 
 export { fsToolsPlugin } from './fs.js'
+export { workspaceMemoryToolsPlugin } from './memory.js'
 export { fsSearchPlugin } from './search.js'
 export { shellToolsPlugin } from './shell.js'
 export { jobToolsPlugin } from './jobs.js'

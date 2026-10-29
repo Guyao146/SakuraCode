@@ -58,6 +58,8 @@ export function expandMentions(input: string, opts?: { cwd?: string; maxTotalCha
   for (const m of input.matchAll(MENTION_RE)) {
     const mention = m[0]!
     const rawPath = m[1]!
+    // Typed resources belong to the explicit resolver, not the file-path grammar.
+    if (/^\[(?:skill|session|agent|agent-type|memory)$/.test(rawPath) || /^(?:skill|session|agent|memory)$/.test(rawPath) && input.slice(m.index! + mention.length).startsWith(':')) continue
     const startLine = m[2] !== undefined ? Number(m[2]) : undefined
     const endLine = m[3] !== undefined ? Number(m[3]) : undefined
 

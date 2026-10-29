@@ -17,22 +17,43 @@ import { fileURLToPath } from 'node:url'
 import * as path from 'node:path'
 import { createHarness, type Harness, type HarnessOptions } from '../harness.js'
 import { APPROVAL_MODES, type ApprovalMode, type AgentHandle, type ConfirmHandler, type HarnessContext } from '../core/index.js'
-import { isSessionId, SessionError } from '../core/session.js'
+import { isSessionId, SessionError, SessionService, type SessionActivity } from '../core/session.js'
+import { CheckpointError } from '../core/checkpoints.js'
+import { ConversationHistoryService, type HistoryMode } from '../core/conversation-history.js'
 import { fetchUpstreamModels, type UpstreamFormat } from '../core/llm.js'
-import { loadConfig, type SakuraConfig } from '../config.js'
+import { loadConfig, resolveProfile, type SakuraConfig } from '../config.js'
 import { listCommands as listSlashCommands, expandCommand as expandSlashCommand } from '../skills/commands.js'
 import { expandMentions } from '../mentions/index.js'
-import { estimateMessagesTokens, summarizeUsage, type SessionTokenStats } from '../util/tokens.js'
+import { summarizeUsage, type SessionTokenStats } from '../util/tokens.js'
+import { DEFAULT_CONTEXT_WINDOW_TOKENS, inspectContext, validateContextBudget, type ContextBreakdown, type ContextBudgetSettings } from '../util/context.js'
+import { parseQuotaDisplay, type DesktopAppearance } from '../util/appearance.js'
+import { DEFAULT_RETRY_POLICY, validateRetryPolicy, type RetryPolicy } from '../util/retry.js'
+import type { RetryService } from '../core/retry.js'
+import { importSkill, SkillImportError, SKILL_IMPORT_MAX_BYTES } from '../skills/import.js'
+import type { SkillsService } from '../skills/index.js'
+import type { AgentDefsService } from '../agents/index.js'
+import { expandResourceReferences, resourceToken, type ResourceReference, type ResourceCandidate } from '../mentions/resources.js'
+import type { CompactionService } from '../plugins/compaction.js'
 import { isLoopbackHost, WebAccess, type WebPrincipal } from './access.js'
-import { HttpError, json, readJson } from './http.js'
+import { BLOCKED_WEB_PORTS, HttpError, json, readJson } from './http.js'
 import { PendingRequests } from './pending.js'
-import type { ToolContext } from '../core/types.js'
+import type { ToolContext, TurnMetrics } from '../core/types.js'
+import type { TurnResult } from '../core/agent.js'
 import { WeixinBridge, WeixinBridgeError, type WeixinSaved } from '../integrations/weixin.js'
 import type { WeixinTransport } from '../integrations/weixin-client.js'
-import { UpdateChecker, type UpdateInfo } from '../updates.js'
+import { DEFAULT_UPDATES_URL, parseUpdateSettings, UpdateChecker, type UpdateInfo, type UpdateSettings } from '../updates.js'
 import { buildExpertSummary, resolveExperts, spawnExperts } from '../experts.js'
+import { WorkspaceMemoryError, WorkspaceMemoryStore, validateMemoryProcessing, WORKSPACE_MEMORY_MAX_CHARS, type WorkspaceMemoryService } from '../plugins/workspace-memory.js'
+import type { MemoryProcessingService } from '../plugins/memory-processing.js'
+import { activeMemoryContent, type MemoryEntryOperation } from '../plugins/memory-entries.js'
+import { SakuraApiAccount, SakuraApiError, type SakuraApiSaved } from '../integrations/sakuraapi.js'
+import { openSakuraApiPage, SAKURA_MODEL_BASE_URL, type SakuraOfficialPage, type SiteAuthorizationWindow } from '../integrations/sakuraapi-authorization.js'
+import { PluginMarketplace } from './plugin-marketplace.js'
+import { CHAT_FILE_LIMITS, parseChatFiles, parseChatImages, ChatAttachmentError, type ChatUploadFile, type StoredChatFiles } from '../core/attachments.js'
+import { recordedTurnSummaries, teamMetrics } from '../util/turn-metrics.js'
+import { parseDesktopViewport, type DesktopViewport } from '../util/viewport.js'
 
-const VERSION = '0.7.2'
+const VERSION = '1.0.0'
 
 /** Harness events mirrored verbatim to SSE clients ({ type, ...payload }). */
 const FORWARD_EVENTS = [
@@ -44,11 +65,16 @@ const FORWARD_EVENTS = [
   'ui/tool/call',
   'ui/tool/result',
   'ui/turn/end',
+  'ui/turn/summary',
+  'ui/stream/reset',
+  'retry/status',
+  'retry/finished',
   'ui/todos',
   'agent/spawned',
   'agent/status',
   'mcp/status',
   'compaction/done',
+  'compaction/status',
 ] as const
 
 /** Structural type for core-skills so this module doesn't import the plugin. */
@@ -116,9 +142,26 @@ export interface WebServerOptions {
    * Remote servers keep a fixed workspace and never expose these routes.
    */
   onPersistSettings?: (settings: DesktopSettingsState) => void
+  /** Threshold edits wait for the launcher's disk-save acknowledgement. */
+  onPersistContextBudget?: (settings: DesktopSettingsState) => Promise<void>
+  /** Non-secret desktop display preferences, restored independently of the HTTP port. */
+  appearance?: DesktopAppearance
+  onPersistAppearance?: (settings: DesktopAppearance) => Promise<void>
+  retry?: RetryPolicy
+  onPersistRetry?: (settings: RetryPolicy) => Promise<void>
+  /** Private launcher bridge; absent on ordinary Web servers. */
+  onWindowAction?: (action: 'minimize' | 'maximize' | 'close' | 'drag' | 'reflow') => void
   /** Private desktop channel; credentials are never included in public snapshots. */
   weixin?: WeixinSaved
   onPersistWeixin?: (settings: WeixinSaved) => Promise<void>
+  /** Account credentials stay on the private launcher pipe, never in state/SSE. */
+  sakuraApi?: SakuraApiSaved
+  onPersistSakuraApi?: (settings: SakuraApiSaved | null) => Promise<void>
+  sakuraApiFetch?: typeof globalThis.fetch
+  sakuraApiOpenLogin?: () => Promise<SiteAuthorizationWindow>
+  sakuraApiOpenPage?: (page: SakuraOfficialPage) => Promise<void>
+  /** Desktop product policy, supplied by its private host, never by HTTP/YAML. */
+  sakuraApiOnly?: boolean
   /** Injected transport for offline integration tests or a compatible provider. */
   weixinTransport?: WeixinTransport
   /** Override the release URL the update check polls (tests use a local server). */
@@ -126,6 +169,12 @@ export interface WebServerOptions {
   /** Run background update checks; SAKURA_UPDATES_AUTO_CHECK=0 disables the default. */
   updatesAutoCheck?: boolean
   updatesFetch?: typeof globalThis.fetch
+  /** Global update preferences, separate from workspace/model credentials. */
+  updates?: UpdateSettings
+  onPersistUpdates?: (settings: UpdateSettings) => Promise<void>
+  /** Injected public-metadata transport; origin/scope remain fixed in product code. */
+  pluginMarketplaceFetch?: typeof globalThis.fetch
+  pluginMarketplaceTimeoutMs?: number
   updatesInitialDelayMs?: number
   updatesIntervalMs?: number
 }
@@ -136,6 +185,7 @@ export interface WebServerHandle {
   url: string
   /** The live harness — replaced whenever the desktop settings view switches the workspace. */
   harness: Harness
+  updateDesktopViewport(viewport: DesktopViewport): void
   close(): Promise<void>
 }
 
@@ -157,6 +207,10 @@ export interface DesktopSettingsState {
   agents?: string[]
   /** Full per-workspace pref map; only populated in persist frames. */
   workspacePrefs?: Record<string, WorkspacePrefs>
+  /** Global display preferences, not a workspace/model configuration. */
+  appearance?: DesktopAppearance
+  retry?: RetryPolicy
+  updates?: UpdateSettings
 }
 
 /** Per-workspace prefs: where sessions live and which agents open with it. */
@@ -165,6 +219,8 @@ export interface WorkspacePrefs {
   sessionDir?: string
   /** Agent types (core-agent-defs) spawned when the workspace is mounted. */
   agents?: string[]
+  /** Persisted desktop planning budget and independent auto-compaction triggers. */
+  contextBudget?: ContextBudgetSettings
 }
 
 /** Case-insensitive-free dedupe for workspace paths, first occurrence wins. */
@@ -199,7 +255,24 @@ interface AgentProjection {
   expert?: string
 }
 
+interface CollaborationWorkspace {
+  path: string
+  name: string
+  active: boolean
+  live: boolean
+  running: number
+  pending: number
+  agents: AgentProjection[]
+  todos: unknown[]
+  sessions: Array<{
+    id: string; title: string; updatedAt: string; size: number
+    activity?: SessionActivity; agents: AgentProjection[]; status: string
+  }>
+  error?: string
+}
+
 export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServerHandle> {
+  let desktopViewport: DesktopViewport | null = null
   const web = opts.config?.web
   const access = new WebAccess({
     host: opts.host ?? web?.host ?? '127.0.0.1',
@@ -209,6 +282,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     sessionTtlMs: opts.authSessionTtlMs,
   })
   const host = access.host
+  const sakuraApiOnly = opts.sakuraApiOnly === true
+  if (sakuraApiOnly && access.remote) throw new Error('SakuraAPI desktop authorization requires a local workspace')
   const requestedPort = opts.port ?? web?.port ?? 0
   if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65535) {
     throw new Error('web port must be an integer in 0-65535')
@@ -226,11 +301,15 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
    *  in-flight requests then see 503 because their context is being dispose()d. */
   let switchingWorkspace = false
   let settingsUpdating = false
+  let appearanceUpdating = false
+  let appearance: DesktopAppearance = { quotaDisplay: parseQuotaDisplay(opts.appearance?.quotaDisplay ?? 'always') }
+  let retryPolicy: RetryPolicy = validateRetryPolicy(opts.retry ?? { ...DEFAULT_RETRY_POLICY, ...resolveProfile(opts.config ?? {}).plugins['core-retry']?.config })
+  let retryUpdating = false
   /** Bumped on every successful workspace remount; identifies stale client actions. */
   let workspaceEpoch = 0
   const workspaceId = (): string => `${startedAt}:${workspaceEpoch}`
   /** Current workspace; desktop mode can switch it at runtime. */
-  let workspaceCwd = opts.cwd ?? process.cwd()
+  let workspaceCwd = path.resolve(opts.cwd ?? process.cwd())
   const recentWorkspaces = dedupeWorkspaces([workspaceCwd, ...(opts.recentWorkspaces ?? [])])
   /** Default parent directory for newly created workspaces (desktop mode). */
   let newWorkspaceDir = opts.newWorkspaceDir ?? ''
@@ -249,21 +328,56 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     if (!prefs) { prefs = {}; workspacePrefs.set(key, prefs) }
     return prefs
   }
+
+  function knownMemoryWorkspace(value: string): string {
+    const targets = persistSettings ? dedupeWorkspaces([workspaceCwd, ...recentWorkspaces, ...workspacePrefs.keys()]) : [workspaceCwd]
+    const target = targets.find(cwd => cwd === value || (process.platform === 'win32' && cwd.toLowerCase() === value.toLowerCase()))
+    if (!target) throw new HttpError(404, '只允许访问已知工作区的记忆，请先在桌面中打开该工作区。')
+    return target
+  }
+
+  async function memoryCatalog() {
+    const targets = persistSettings ? dedupeWorkspaces([workspaceCwd, ...recentWorkspaces, ...workspacePrefs.keys()]) : [workspaceCwd]
+    const workspaces = []
+    for (const cwd of targets) {
+      const active = cwd === workspaceCwd
+      const store = active ? ctx.peek<WorkspaceMemoryService>('workspaceMemory') : new WorkspaceMemoryStore(cwd)
+      if (!store) continue
+      await store.reload()
+      workspaces.push({ workspace: cwd, name: path.basename(cwd), active, path: path.join(cwd, '.sakura', 'workspace-memory.md'), ...store.status() })
+    }
+    return workspaces
+  }
+
+  async function mentionCandidates(): Promise<ResourceCandidate[]> {
+    const rows: ResourceCandidate[] = []
+    const add = (kind: ResourceReference['kind'], id: string, label: string, description: string): void => {
+      rows.push({ kind, id, token: resourceToken(kind, id), label, description })
+    }
+    for (const skill of ctx.peek<SkillsService>('skills')?.list() ?? []) add('skill', skill.name, skill.name, skill.description)
+    for (const session of await ctx.sessions.list()) if (!isExpertHistory(session)) add('session', session.id, session.title ?? session.id, `会话 · ${session.updatedAt ?? session.startedAt}`)
+    for (const agent of ctx.agents.list().filter(agent => agent.meta.role !== 'main')) add('agent', agent.id, agent.name, agent.meta.description ?? agent.status)
+    for (const def of ctx.peek<AgentDefsService>('agentDefs')?.list() ?? []) add('agent-type', def.name, def.name, def.description)
+    if (!access.remote) for (const memory of await memoryCatalog()) if (memory.enabled && !memory.error) add('memory', memory.workspace, memory.name, `${memory.chars} 字长期记忆 · ${memory.workspace}`)
+    return rows.slice(0, 1_024)
+  }
   /** User-level overrides carried into every harness (re)mount. */
   const overrides: { model?: string; baseURL?: string; apiKey?: string } = {
-    model: opts.model,
-    baseURL: opts.baseURL,
-    apiKey: opts.apiKey,
+    model: sakuraApiOnly ? undefined : opts.model,
+    baseURL: sakuraApiOnly ? SAKURA_MODEL_BASE_URL : opts.baseURL,
+    apiKey: sakuraApiOnly ? undefined : opts.apiKey,
   }
   const providerOverrides = new Map<string, { baseURL?: string; apiKey?: string }>()
-  if (opts.baseURL !== undefined || opts.apiKey !== undefined) {
+  if (!sakuraApiOnly && (opts.baseURL !== undefined || opts.apiKey !== undefined)) {
     providerOverrides.set('default', { baseURL: opts.baseURL, apiKey: opts.apiKey })
   }
-  let currentApiKey = opts.apiKey ?? ''
-  let desktopRememberKey = !!opts.desktopRememberKey
+  let currentApiKey = sakuraApiOnly ? '' : opts.apiKey ?? ''
+  let desktopRememberKey = !sakuraApiOnly && !!opts.desktopRememberKey
   /** The approval mode follows the user's live choice across workspace switches. */
   let liveApprovalMode = opts.approvalMode
-  let contextCache: { key: string; tokens: number } | null = null
+  let contextCache: { key: string; breakdown: ContextBreakdown; contextRevision: number } | null = null
+  /** Manual operations own a write gate until the summary/reset is committed. */
+  let contextOperation: { action: 'compact' | 'clear' | 'edit' | 'rewind'; sessionId: string } | null = null
   /** Real per-session usage (provider-reported), memoized like contextCache. */
   let statsCache: { key: string; stats: SessionTokenStats } | null = null
   const persistSettings = opts.onPersistSettings
@@ -272,10 +386,16 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
    * the main agent and each live expert. Cleared on workspace remount.
    */
   let expertMode = false
+  let expertEpoch = 0
   const expertIds = new Set<string>()
+  const teamTurns = new Map<string, { mount: Harness['ctx']; epoch: number; mainId: string; sessionId?: string; userSeq?: number;
+    pending: Set<string>; rows: TurnMetrics[]; members: Set<string>; initializing: boolean }>()
   /** Release feed for the settings "check for updates" card; failures land in `error`, never throw. */
-  const updateChecker = new UpdateChecker(VERSION, opts.updatesBaseUrl, { fetch: opts.updatesFetch })
-  const autoUpdateCheck = opts.updatesAutoCheck ?? process.env.SAKURA_UPDATES_AUTO_CHECK !== '0'
+  let updateSettings = parseUpdateSettings(opts.updates ?? { feedUrl: opts.updatesBaseUrl ?? process.env.SAKURA_UPDATES_URL ?? '', autoCheck: true })
+  let updateChecker = new UpdateChecker(VERSION, updateSettings.feedUrl || DEFAULT_UPDATES_URL, { fetch: opts.updatesFetch })
+  let updatesUpdating = false
+  const pluginMarketplace = new PluginMarketplace({ fetch: opts.pluginMarketplaceFetch, timeoutMs: opts.pluginMarketplaceTimeoutMs })
+  const autoUpdateCheck = (): boolean => opts.updatesAutoCheck ?? (process.env.SAKURA_UPDATES_AUTO_CHECK !== '0' && updateSettings.autoCheck)
   const updateInterval = Math.max(10, opts.updatesIntervalMs ?? 6 * 60 * 60 * 1000)
   const updateInitialDelay = Math.max(0, opts.updatesInitialDelayMs ?? 5_000)
 
@@ -286,6 +406,9 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   let revision = 0
   /** Set once close() begins; listeners must not touch the harness afterwards. */
   let closed = false
+  const shutdownController = new AbortController()
+  const sakuraAccount = access.remote ? undefined : new SakuraApiAccount({ saved: opts.sakuraApi,
+    persist: opts.onPersistSakuraApi, fetch: opts.sakuraApiFetch, openLogin: opts.sakuraApiOpenLogin })
   let weixin: WeixinBridge | undefined
   const broadcast = (event: Record<string, unknown>): void => {
     if (closed) return
@@ -308,13 +431,44 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     }
   }
 
-  const refreshState = async (): Promise<void> => {
-    if (closed) return
-    try {
-      broadcast({ type: 'state', state: await stateSnapshot() })
-    } catch {
-      /* harness already torn down — nothing to report */
-    }
+  let stateRefresh: Promise<void> | undefined
+  let stateRefreshTimer: ReturnType<typeof setTimeout> | undefined
+  let stateRefreshDelay = 25
+  const refreshState = (): Promise<void> => {
+    // Events already carry their own revision. With no listeners, a full disk
+    // listing has no consumer; the next REST/SSE read builds a fresh snapshot.
+    if (closed || !clients.size) return Promise.resolve()
+    if (stateRefresh) return stateRefresh
+    if (stateRefreshTimer !== undefined) return Promise.resolve()
+    // Spawn/status/turn events commonly arrive together. A single snapshot
+    // rechecks the final revision instead of parsing the same histories once
+    // per event. Explicit REST reads remain independent (no deletion deadlock).
+    let deliveredRevision = -1, changing = false
+    const work = Promise.resolve().then(async () => {
+      try {
+        const state = await stateSnapshot()
+        deliveredRevision = state.revision
+        broadcast({ type: 'state', state })
+      } catch (error) {
+        changing = error instanceof HttpError && error.status === 503 && error.message.startsWith('state is changing')
+      }
+    }).finally(() => {
+      if (stateRefresh === work) stateRefresh = undefined
+      // If the bounded snapshot pass exhausted its revision retries (or an
+      // event arrived after its final check), the last state still needs a
+      // consumer. Retry with capped backoff, not another concurrent full scan
+      // or a busy loop, and stop when there are no subscribers/shutdown begins.
+      if (!closed && clients.size && (changing || deliveredRevision >= 0 && deliveredRevision < revision)) {
+        stateRefreshTimer = setTimeout(() => {
+          stateRefreshTimer = undefined
+          void refreshState()
+        }, stateRefreshDelay)
+        stateRefreshTimer.unref()
+        stateRefreshDelay = Math.min(1000, stateRefreshDelay * 2)
+      } else stateRefreshDelay = 25
+    })
+    stateRefresh = work
+    return work
   }
 
   let updateTimer: ReturnType<typeof setTimeout> | undefined
@@ -329,8 +483,9 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   }
   function scheduleUpdateCheck(delay: number): void {
     updateTimer = setTimeout(() => {
+      if (updatesUpdating) { if (!closed && autoUpdateCheck()) scheduleUpdateCheck(updateInterval); return }
       void runUpdateCheck().finally(() => {
-        if (!closed && autoUpdateCheck) scheduleUpdateCheck(updateInterval)
+        if (!closed && autoUpdateCheck()) scheduleUpdateCheck(updateInterval)
       })
     }, delay)
     updateTimer.unref()
@@ -359,6 +514,10 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   function configureWorkspaceHarness(next: Harness, selectedModel: string | undefined,
     providers: ReadonlyMap<string, { baseURL?: string; apiKey?: string }>): void {
     const llm = next.ctx.llm
+    if (sakuraApiOnly) {
+      llm.replaceAdapters(sakuraAccount!.adapter())
+      return
+    }
     const baseline = llm.modelStatus().adapter
     for (const [adapter, config] of providers) {
       if (!llm.listModels().some(row => row.adapter === adapter)) continue
@@ -380,7 +539,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     const next = await createWorkspaceHarness(mountOpts.cwd, mountOpts.config, prefsFor(mountOpts.cwd))
     try {
       const providers = new Map(providerOverrides)
-      if (overrides.model && (overrides.baseURL !== undefined || overrides.apiKey !== undefined)) {
+      if (!sakuraApiOnly && overrides.model && (overrides.baseURL !== undefined || overrides.apiKey !== undefined)) {
         const tx = next.ctx.llm.prepareConfiguration({ model: overrides.model })
         tx.commit()
         providers.clear()
@@ -443,10 +602,15 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       if (handle) handles.push(handle)
     }
     if (handles.length !== expertIds.size) {
+      expertEpoch++
       for (const id of [...expertIds]) if (!ctx.agents.get(id)) expertIds.delete(id)
       if (expertIds.size === 0) expertMode = false
     }
     return handles
+  }
+
+  function isExpertHistory(session: { id: string; expert?: string }): boolean {
+    return !!session.expert || ctx.agents.list().some(agent => agent.meta.role === 'sub' && agent.meta.expert && sameSession(agent.sessionId, session.id))
   }
 
   function startExpertTeam(keys?: string[]): { started: string[]; reused: string[]; skipped: string[] } {
@@ -456,35 +620,91 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     expertIds.clear()
     for (const handle of members) expertIds.add(handle.id)
     expertMode = true
+    expertEpoch++
     return { started: spawned.map((handle) => handle.name), reused: reused.map((handle) => handle.name), skipped }
   }
 
-  function prepareUserTask(text: string): string {
+  async function prepareUserTask(text: string): Promise<string> {
+    const mount = ctx
+    const epoch = sessionEpoch
+    const cwdAtEntry = workspaceCwd
     if (text.startsWith('/')) {
       const [cmd, ...rest] = text.split(/\s+/)
       const hit = listSlashCommands(workspaceCwd).find((command) => command.name === (cmd ?? '').slice(1))
       if (!hit) throw new HttpError(400, `unknown command ${cmd}`)
       text = expandSlashCommand(hit.file, rest.join(' ')).prompt
     }
+    const expanded = await expandResourceReferences(text, async ref => {
+      if (ref.kind === 'skill') {
+        const detail = ctx.peek<SkillsService>('skills')?.get(ref.id)
+        if (!detail) throw new HttpError(400, '引用的 Skill 已不存在，请重新选择。')
+        return { label: detail.meta.name, content: `Skill directory (resolve referenced files here): ${detail.meta.dir}\n\n${detail.body}` }
+      }
+      if (ref.kind === 'session') {
+        if (!isSessionId(ref.id)) throw new HttpError(400, '会话引用无效。')
+        const session = await ctx.sessions.open(ref.id)
+        const lines = session.events.filter(event => event.type === 'user/message' || event.type === 'assistant/message')
+          .map(event => event.type === 'user/message' ? `用户：${event.payload.content}` : event.type === 'assistant/message' ? `助手：${event.payload.content ?? ''}` : '')
+        let content = lines.join('\n\n')
+        if (content.length > 24_000) content = '[较早记录已省略；此引用不是完整会话]\n' + content.slice(-24_000)
+        return { label: `会话 ${ref.id}`, content }
+      }
+      if (ref.kind === 'memory') {
+        if (access.remote) throw new HttpError(404, '跨工作区记忆只在本机可用。')
+        const cwd = knownMemoryWorkspace(ref.id)
+        const store = cwd === workspaceCwd ? ctx.peek<WorkspaceMemoryService>('workspaceMemory') : new WorkspaceMemoryStore(cwd)
+        if (!store) throw new HttpError(404, '记忆服务不可用。')
+        const snapshot = await store.reload()
+        if (!snapshot.enabled || snapshot.error) throw new HttpError(409, '该工作区记忆已关闭或不可读，未加入本次请求。')
+        return { label: `记忆 · ${path.basename(cwd)}`, content: activeMemoryContent(snapshot) || '(尚无已启用长期记忆)' }
+      }
+      if (ref.kind === 'agent-type') {
+        const def = ctx.peek<AgentDefsService>('agentDefs')?.get(ref.id)
+        if (!def) throw new HttpError(400, '引用的智能体类型已不存在。')
+        return { label: `智能体类型 ${def.name}`, content: `用户明确选择 ${def.name} 参与当前任务。使用 subagent 工具并指定 agent=${JSON.stringify(def.name)} 进行委派；仍须遵循审批模式。\n职责：${def.description}` }
+      }
+      const agent = ctx.agents.get(ref.id) ?? ctx.agents.list().find(agent => agent.name === ref.id)
+      if (!agent) throw new HttpError(400, '引用的智能体已不存在，请重新选择。')
+      return { label: `智能体 ${agent.name}`, content: `用户明确选择现有智能体 ${agent.name}（id=${agent.id}）参与任务。使用 send_message 工具明确投递相关子任务；不要把提及当作已完成委派。仍须遵循审批模式。\n职责：${agent.meta.description ?? '(未说明)'}` }
+    }).catch(error => { if (error instanceof HttpError) throw error; throw new HttpError(400, error instanceof Error ? error.message : '引用内容无法读取。') })
+    // Only scan the original text for files: referenced Skill/history cannot request extra file reads.
     const expansion = expandMentions(text, { cwd: workspaceCwd })
     for (const miss of expansion.missing) {
       broadcast({ type: 'notice', level: 'info', message: `${miss.mention}: ${miss.reason}` })
     }
-    return expansion.text
+    if (mount !== ctx || epoch !== sessionEpoch || cwdAtEntry !== workspaceCwd) throw new HttpError(409, '会话或工作区已改变，引用未提交。')
+    return expanded.text + expansion.text.slice(text.length)
   }
 
-  function submitUserTask(text: string, images?: string[]): boolean {
+  function submitUserTask(text: string, images?: string[], preparedFiles?: ReadonlyMap<string, StoredChatFiles>, originalText?: string): boolean {
     const main = mainAgent()
+    const mount = ctx, epoch = sessionEpoch
+    const experts = expertMode ? liveExperts() : []
     const queued = main.status === 'running'
-    void main.turn(text, images?.length ? { images } : undefined)
+    let canonical: { sessionId: string; userSeq: number } | undefined
+    let resolveUser!: (record: typeof canonical) => void
+    const sharedUser = new Promise<typeof canonical>(resolve => { resolveUser = resolve })
+    const turnGroup = experts.length ? randomUUID() : undefined
+    if (turnGroup) teamTurns.set(turnGroup, { mount, epoch, mainId: main.id, pending: new Set(), rows: [], members: new Set(), initializing: true })
+    const extras = (agent: AgentHandle) => ({ originalText, images, expertMode: experts.length > 0, turnGroup,
+      preparedFiles: preparedFiles?.get(agent.id), ...(agent.id !== main.id ? { sharedUser } : {}) })
+    const mainTurn = main.turn(text, { ...extras(main), ...(experts.length ? { teamSize: experts.length + 1 } : {}),
+      onUserMessage: record => {
+        canonical = record; resolveUser(record)
+        const team = turnGroup && teamTurns.get(turnGroup)
+        if (team) { team.sessionId = record.sessionId; team.userSeq = record.userSeq }
+      } })
+    void mainTurn
       .then((result) => {
         if (result.error) broadcast({ type: 'notice', level: 'error', message: result.error })
       })
       .catch((error: unknown) => {
         broadcast({ type: 'notice', level: 'error', message: error instanceof Error ? error.message : String(error) })
       })
-    if (expertMode) {
-      for (const handle of liveExperts()) void handle.turn(text, images?.length ? { images } : undefined).catch(() => {})
+    void mainTurn.finally(() => resolveUser(canonical)).catch(() => {})
+    if (experts.length) {
+      for (const handle of experts) void handle.turn(text, extras(handle)).catch(() => {})
+      teamTurns.get(turnGroup!)!.initializing = false
     }
     return queued
   }
@@ -495,10 +715,45 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     // The roster is rebuilt on remount, so the expert team cannot survive one.
     expertMode = false
     expertIds.clear()
+    teamTurns.clear()
     const previous: Harness | undefined = harness
     previous?.dispose()
     harness = next
     ctx = next.ctx
+    ctx.on('agent/turn-queued', (payload: { turnGroup: string; turnId: string; agentId: string }) => {
+      const team = teamTurns.get(payload.turnGroup)
+      if (team) { team.pending.add(payload.turnId); team.members.add(payload.agentId) }
+    })
+    ctx.on('agent/turn-settled', (payload: { turnGroup: string; turnId: string; result: TurnResult }) => {
+      const team = teamTurns.get(payload.turnGroup)
+      if (!team || !team.pending.delete(payload.turnId)) return
+      if (payload.result.metrics) team.rows.push(payload.result.metrics)
+      if (team.initializing || team.pending.size) return
+      team.mount.agents.releaseTurnGroup(payload.turnGroup)
+      if (!team.sessionId || !team.userSeq || team.mount !== ctx || team.epoch !== sessionEpoch || closed || !team.rows.length) {
+        teamTurns.delete(payload.turnGroup); return
+      }
+      const metrics = { ...teamMetrics(team.rows), members: team.members.size }
+      void (async () => {
+        const session = await team.mount.sessions.open(team.sessionId!)
+        if (team.mount !== ctx || team.epoch !== sessionEpoch || closed) return
+        await session.append({ type: 'session/note', payload: { note: 'turn-summary', userSeq: team.userSeq, metrics } })
+        team.mount.emit('ui/turn/summary', { agentId: team.mainId, sessionId: session.id, userSeq: team.userSeq, metrics, main: true })
+        void refreshState()
+      })().catch(error => { if (!closed && team.mount === ctx) broadcast({ type: 'notice', level: 'error', message: '团队回合统计未保存：' + team.mount.llm.redactError(String(error)) }) })
+        .finally(() => { if (teamTurns.get(payload.turnGroup) === team) teamTurns.delete(payload.turnGroup) })
+    })
+    ctx.peek<MemoryProcessingService>('memoryProcessing')?.setBusyChecker(() =>
+      settingsUpdating || !!contextOperation || switching || switchingWorkspace || !!deletingSession || closed)
+    ctx.peek<RetryService>('retry')?.configure(retryPolicy)
+    ctx.peek<RetryService>('retry')?.setConfirmHandler(async request => {
+      if (closed) return false
+      return pendingRetries.wait({ type: 'retry/request', id: randomUUID(), agentId: request.agentId,
+        sessionId: request.sessionId, error: request.error, retries: request.retries,
+        elapsedMs: request.elapsedMs, windowMs: request.windowMs, maxRetries: request.maxRetries }, request.signal)
+    })
+    const savedBudget = prefsFor(workspaceCwd).contextBudget
+    if (savedBudget) ctx.peek<CompactionService>('compaction')?.setContextBudget(savedBudget)
     // Carry caller/signal into interactive services without changing any plugin interface.
     ctx.on('tools/execute', (payload, next) => toolContext.run(payload.tc, () => next(payload)))
     for (const event of FORWARD_EVENTS) {
@@ -529,9 +784,17 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     })
     ctx.on('agent/spawned', () => void refreshState())
     ctx.on('agent/status', () => void refreshState())
+    ctx.on('ui/turn/start', () => void refreshState())
     ctx.on('ui/turn/end', () => void refreshState())
     ctx.on('compaction/done', () => void refreshState())
+    ctx.on('compaction/status', () => void refreshState())
+    ctx.on('workspace-memory/changed', () => {
+      broadcast({ type: 'workspace-memory/changed', memory: ctx.peek<WorkspaceMemoryService>('workspaceMemory')?.status() })
+      void refreshState()
+    })
     ctx.on('mcp/status', () => void refreshState())
+    ctx.on('memory-processing/status', () => void refreshState())
+    ctx.on('memory-processing/done', () => void refreshState())
     ctx.approval.setConfirmHandler(confirmHandler)
     const interaction = ctx.peek<InteractionLike>('interaction')
     if (interaction) {
@@ -562,7 +825,11 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   // State
   // ------------------------------------------------------------------
   /** The main agent as it currently stands — never re-passes the startup resume id (see above). */
-  const mainAgent = (): import('../core/index.js').AgentHandle => harness.main()
+  const mainAgent = (): import('../core/index.js').AgentHandle => {
+    const main = harness.main()
+    applySelectedModel() // The initial lazy spawn also inherits the live model selection.
+    return main
+  }
 
   /**
    * The loop reads `agent.model` when each turn starts, so a model selected
@@ -601,21 +868,28 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
    * Estimated context size of the main session, memoized by event count so
    * every state snapshot doesn't rebuild the whole transcript.
    */
-  async function contextTokens(): Promise<number> {
+  async function contextSnapshot(): Promise<{ breakdown: ContextBreakdown; contextRevision: number }> {
     const mount = ctx
     const epoch = workspaceEpoch
     const main = mainAgent()
     const sessionId = main.sessionId
-    if (!sessionId) return 0
+    if (!isSessionId(sessionId)) return { breakdown: inspectContext([]), contextRevision: 0 }
     try {
       const session = await mount.sessions.open(sessionId)
-      const key = `${epoch}:${sessionId}:${session.events.length}`
-      if (contextCache?.key === key) return contextCache.tokens
-      const tokens = estimateMessagesTokens(session.deriveMessages())
-      if (mount === ctx) contextCache = { key, tokens }
-      return tokens
+      const system = mount.systemPrompt.assemble()
+      const tools = mount.tools.schemas()
+      const signature = createHash('sha256').update(system).update(JSON.stringify(tools)).digest('hex')
+      const key = `${epoch}:${sessionId}:${session.events.length}:${signature}`
+      if (contextCache?.key === key) return contextCache
+      const messages = session.deriveMessages()
+      if (messages[0]?.role === 'system') messages[0].content = system
+      else messages.unshift({ role: 'system', content: system })
+      const breakdown = inspectContext(messages, tools, session.events)
+      const contextRevision = session.events.at(-1)?.seq ?? 0
+      if (mount === ctx) contextCache = { key, breakdown, contextRevision }
+      return { breakdown, contextRevision }
     } catch {
-      return 0
+      return { breakdown: inspectContext([]), contextRevision: 0 }
     }
   }
 
@@ -629,7 +903,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     const epoch = workspaceEpoch
     const main = mainAgent()
     const sessionId = main.sessionId
-    if (!sessionId) return { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }
+    if (!isSessionId(sessionId)) return { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }
     try {
       const session = await mount.sessions.open(sessionId)
       const key = `${epoch}:${sessionId}:${session.events.length}`
@@ -646,10 +920,13 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
    * Auto-compaction thresholds for the GUI's context meter; null when the
    * compaction plugin is not mounted (the meter then hides the threshold).
    */
-  function contextBudget(): { autoThreshold: number; autoTokensThreshold: number } | null {
-    const compaction = ctx.peek<{ autoThreshold: number; autoTokensThreshold: number }>('compaction')
+  function contextBudget() {
+    const compaction = ctx.peek<CompactionService>('compaction')
     if (!compaction) return null
-    return { autoThreshold: compaction.autoThreshold, autoTokensThreshold: compaction.autoTokensThreshold }
+    const window = compaction.contextWindowTokens || DEFAULT_CONTEXT_WINDOW_TOKENS
+    return { autoThreshold: compaction.autoThreshold, autoTokensThreshold: compaction.autoTokensThreshold,
+      contextWindowTokens: window, thresholdPercent: compaction.autoTokensThreshold * 100 / window,
+      source: 'local' as const, persisted: !!persistSettings }
   }
 
   /** Dedicated summary model when set; the client shows it next to the model picker. */
@@ -658,19 +935,33 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     return compaction?.compactModel || undefined
   }
 
-  async function stateSnapshot() {
+  async function stateSnapshot(attempt = 0) {
     const mount = ctx
+    // A lazy initial spawn is itself a revisioned event. Do it before taking
+    // the stamp, not halfway through an otherwise unchanged disk listing.
+    mainAgent()
     const snapshotRevision = revision
     const snapshotWorkspace = workspaceId()
     const sessions = await mount.sessions.list()
-    const tokens = await contextTokens()
+    const context = await contextSnapshot()
     const stats = await tokenStats()
     if (closed) throw new HttpError(503, 'server is shutting down')
     const main = mainAgent()
     const experts = liveExperts()
+    let historyGenerationReady = false
+    if (isSessionId(main.sessionId)) {
+      try {
+        const session = await mount.sessions.open(main.sessionId)
+        historyGenerationReady = session.events.at(-1)?.type === 'user/message' &&
+          session.events.some(record => record.type === 'agent/meta' && record.payload.action === 'edit')
+      } catch { /* a concurrent delete/remount is reconciled by the revision check */ }
+    }
     // Never stamp an older disk listing with a newer revision (or workspace).
     // Otherwise an in-flight snapshot can resurrect a just-deleted session.
-    if (mount !== ctx || snapshotWorkspace !== workspaceId() || snapshotRevision !== revision) return stateSnapshot()
+    if (mount !== ctx || snapshotWorkspace !== workspaceId() || snapshotRevision !== revision) {
+      if (attempt >= 4) throw new HttpError(503, 'state is changing too quickly; retry in a moment')
+      return stateSnapshot(attempt + 1)
+    }
     const plugins = ctx.peek<{ list(): Array<{ name: string; description?: string; source: string }> }>('plugins')
     const skills = ctx.peek<{
       list(): Array<{ name: string; description?: string; whenToUse?: string; source: string }>
@@ -680,11 +971,18 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       version: VERSION,
       revision,
       server: { startedAt, remote: access.remote, authenticated: access.required },
-      pendingRequests: [...pending.snapshot(), ...pendingQuestions.snapshot(), ...pendingPlans.snapshot()],
+      pendingRequests: [...pending.snapshot(), ...pendingQuestions.snapshot(), ...pendingPlans.snapshot(), ...pendingRetries.snapshot()],
       cwd: workspaceCwd,
       workspaceId: snapshotWorkspace,
       /** Desktop mode: the settings view and workspace switching are mounted; absent on remote servers. */
-      desktop: persistSettings ? currentDesktopState() : undefined,
+      desktop: persistSettings && !access.remote ? currentDesktopState() : undefined,
+      desktopWindow: !!opts.onWindowAction && !access.remote,
+      desktopViewport: !access.remote ? desktopViewport : null,
+      sakuraApiOnly,
+      workspaceMemory: ctx.peek<WorkspaceMemoryService>('workspaceMemory')?.status(),
+      memoryProcessing: ctx.peek<MemoryProcessingService>('memoryProcessing')?.status(),
+      retryPolicy: { ...retryPolicy },
+      retries: ctx.peek<RetryService>('retry')?.status() ?? [],
       weixin: weixin?.status(),
       model: main.model || 'default',
       models: ctx.llm.listModels(),
@@ -694,7 +992,12 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       approvalMode: ctx.approval.mode as ApprovalMode,
       busy: main.status === 'running',
       sessionId: isSessionId(main.sessionId) ? main.sessionId : null,
-      contextTokens: tokens,
+      contextTokens: context.breakdown.totalTokens,
+      contextBreakdown: context.breakdown,
+      contextRevision: context.contextRevision,
+      contextCompacting: ctx.peek<CompactionService>('compaction')?.isCompacting(main.sessionId) ?? false,
+      contextOperation,
+      historyGenerationReady,
       /** Real provider-reported usage for the main session (empty before the first answer). */
       tokenStats: stats,
       contextBudget: contextBudget(),
@@ -702,13 +1005,26 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       compactModel: compactionModel(),
       /** Cached update-check result; absent until the first check completes. */
       update: updateChecker.cached(),
+      updateSettings: !access.remote ? { ...updateSettings } : undefined,
+      updateAutomatic: autoUpdateCheck(),
       /** Collaborative expert session: user messages also go to the expert team. */
       expertMode,
+      attachmentLimits: CHAT_FILE_LIMITS,
       expertIds: experts.map((agent) => agent.id),
       expertSummaryAvailable: experts.some((agent) => agent.status === 'done' && !!agent.result?.trim()),
       /** Mounted skills (.sakura/skills + user dir + extra dirs), absent without core-skills. */
       skills: skills?.list().map((s) => ({ name: s.name, description: s.description ?? '', whenToUse: s.whenToUse ?? '', source: s.source })) ?? [],
-      sessions: sessions.map((s) => ({ id: s.id, title: s.title ?? s.id, updatedAt: s.startedAt, size: s.events, deleteBlocked: sessionDeletionBlock(s.id) })),
+      sessions: sessions.filter(s => !isExpertHistory(s)).map((s) => {
+        const members = ctx.agents.list().filter(agent => sameSession(agent.sessionId, s.id) ||
+          sameSession(main.sessionId, s.id) && agent.meta.role === 'sub' && !!agent.meta.expert)
+        const waiting = [...pending.snapshot(), ...pendingQuestions.snapshot(), ...pendingPlans.snapshot(), ...pendingRetries.snapshot()]
+          .some(request => members.some(agent => agent.id === request.agentId))
+        return { id: s.id, title: s.title ?? s.id, updatedAt: s.updatedAt ?? s.startedAt, size: s.events,
+          activity: s.activity, status: waiting ? 'waiting' : members.some(agent => agent.status === 'running') ? 'running' : s.activity?.status ?? 'empty',
+          deleteBlocked: sessionDeletionBlock(s.id) }
+      }),
+      expertSessions: sessions.filter(isExpertHistory).map(s => ({ id: s.id, title: s.title ?? s.id,
+        expert: s.expert, updatedAt: s.updatedAt ?? s.startedAt, activity: s.activity })),
       agents: ctx.agents.list().map(projectAgent),
       tools: ctx.tools.list().map((t) => ({
         name: t.name,
@@ -759,13 +1075,16 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   // with an approval card; POST /api/plans/:id resolves them.
   // ------------------------------------------------------------------
   const pendingPlans = new PendingRequests<'approve' | 'reject' | null>(broadcast, 'plan/resolved', 'decision', null, 10 * 60_000)
+  const pendingRetries = new PendingRequests<boolean>(broadcast, 'retry/resolved', 'allow', false, 10 * 60_000)
 
   // ------------------------------------------------------------------
   // Session switching: the roster is cleared (subagents included) and a
   // fresh main agent adopts the target session.
   // ------------------------------------------------------------------
   function assertAgentsIdle(): void {
-    if (ctx.agents.list().some((agent) => agent.status === 'running')) {
+    if (ctx.peek<MemoryProcessingService>('memoryProcessing')?.status().active) throw new HttpError(409, '长期记忆正在整理，请等待完成。')
+    if (teamTurns.size) throw new HttpError(409, '专家协作回合正在收尾，请等待统计保存完成。')
+    if (ctx.agents.hasPendingTurns() || ctx.agents.list().some((agent) => agent.status === 'running')) {
       throw new HttpError(409, 'agents are running; interrupt them or wait before switching sessions')
     }
   }
@@ -774,15 +1093,15 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     if (id !== undefined && !isSessionId(id)) {
       throw new HttpError(400, 'invalid session id')
     }
-    if (settingsUpdating || deletingSession) throw new HttpError(409, 'a settings or session change is in progress; retry after it completes')
+    if (settingsUpdating || deletingSession || contextOperation) throw new HttpError(409, 'a settings or context change is in progress; retry after it completes')
     if (switchingWorkspace) throw new HttpError(503, 'a workspace switch is in progress; retry')
     if (switching) throw new HttpError(409, 'a session switch is already in progress; retry after it completes')
     assertAgentsIdle()
     switching = true
     try {
-      const sessionId = id
-        ? (await ctx.sessions.open(id)).id // throws ENOENT → 404 upstream
-        : (await ctx.sessions.create(title ? { title } : undefined)).id
+      const target = id ? await ctx.sessions.open(id) : await ctx.sessions.create(title ? { title } : undefined)
+      if (target.archived) throw new HttpError(409, '此对话已归档，请先在设置中恢复。')
+      const sessionId = target.id
       if (closed) throw new HttpError(503, 'server is shutting down')
       // Disk I/O yielded: another device may have started work in the meantime.
       // Never dispose its active agent just because this request arrived first.
@@ -790,6 +1109,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       pending.cancel()
       pendingQuestions.cancel()
       pendingPlans.cancel()
+      pendingRetries.cancel()
       ctx.agents.disposeAll()
       sessionEpoch++
       // The expert team lived in the old session's roster; switching ends it.
@@ -818,12 +1138,12 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       (current || sameSession(agent.sessionId, id) || sameSession(agent.meta.parentSession, id)))) return 'running'
     if (agents.some((agent) => agent.meta.role !== 'main' && sameSession(agent.sessionId, id))) return 'bound'
     if (ctx.peek<{ isCompacting(id: string): boolean }>('compaction')?.isCompacting(id)) return 'compacting'
-    if (current && (pending.snapshot().length || pendingQuestions.snapshot().length || pendingPlans.snapshot().length)) return 'pending'
+    if (current && (pending.snapshot().length || pendingQuestions.snapshot().length || pendingPlans.snapshot().length || pendingRetries.snapshot().length)) return 'pending'
     return null
   }
 
   async function deleteSession(id: string) {
-    if (settingsUpdating || switching || deletingSession) throw new HttpError(409, 'a settings or session change is in progress; retry after it completes')
+    if (settingsUpdating || switching || deletingSession || contextOperation) throw new HttpError(409, 'a settings or context change is in progress; retry after it completes')
     if (switchingWorkspace) throw new HttpError(503, 'a workspace switch is in progress; retry')
     const mount = ctx
     const epoch = workspaceEpoch
@@ -850,6 +1170,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
         pending.cancel()
         pendingQuestions.cancel()
         pendingPlans.cancel()
+        pendingRetries.cancel()
         mount.agents.disposeAll()
         sessionEpoch++
         expertMode = false
@@ -860,16 +1181,150 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
         harness.main() // New blank conversation; no directory until the next turn.
         applySelectedModel()
         contextCache = null
-    statsCache = null
+        statsCache = null
       }
       const sessionId = isSessionId(mainAgent().sessionId) ? mainAgent().sessionId : null
       const result = { deletedId: id, sessionId, workspaceId: workspaceId() }
       broadcast({ type: 'session/deleted', ...result })
+      const deletedRevision = revision
       await refreshState()
-      return { ok: true, ...result }
+      return { ok: true, ...result, revision: deletedRevision }
     } finally {
       deletingSession = null
     }
+  }
+
+  async function archiveSession(id: string, archived: boolean) {
+    if (settingsUpdating || switching || deletingSession || contextOperation) throw new HttpError(409, '会话或设置正在变更，请稍后重试。')
+    if (switchingWorkspace) throw new HttpError(503, '工作区正在切换，请稍后重试。')
+    const mount = ctx, epoch = workspaceEpoch
+    const assertIdle = (): void => {
+      if (closed || mount !== ctx || epoch !== workspaceEpoch || switchingWorkspace) throw new HttpError(503, '工作区已改变，请刷新后重试。')
+      if (ctx.peek<MemoryProcessingService>('memoryProcessing')?.status().active) throw new HttpError(409, '请等待长期记忆整理完成。')
+      const reason = sessionDeletionBlock(id)
+      if (reason) throw new HttpError(409, `此对话正在使用 (${reason})，请先结束相关任务或确认。`)
+    }
+    deletingSession = 'archive'
+    try {
+      assertIdle()
+      await mount.sessions.setArchived(id, archived, assertIdle)
+      const current = archived && sameSession(mainAgent().sessionId, id)
+      if (current) {
+        pending.cancel(); pendingQuestions.cancel(); pendingPlans.cancel(); pendingRetries.cancel()
+        mount.agents.disposeAll()
+        sessionEpoch++
+        expertMode = false; expertIds.clear()
+        mount.approval.engine.clearSessionAllows()
+        const todos = mount.peek<{ todos: unknown[] }>('todos')
+        if (todos) todos.todos = []
+        harness.main(); applySelectedModel()
+        contextCache = null; statsCache = null
+      }
+      const sessionId = isSessionId(mainAgent().sessionId) ? mainAgent().sessionId : null
+      const result = { id, archived, sessionId, workspaceId: workspaceId() }
+      broadcast({ type: 'session/archived', ...result })
+      const archiveRevision = revision
+      await refreshState()
+      return { ok: true, ...result, revision: archiveRevision }
+    } finally { deletingSession = null }
+  }
+
+  /** One write gate for the entire batch. Preflight every target before removal;
+   * disk failures are reported explicitly instead of pretending the batch was atomic. */
+  async function deleteSessions(ids: string[]) {
+    if (settingsUpdating || switching || deletingSession || contextOperation) throw new HttpError(409, 'a settings or context change is in progress; retry after it completes')
+    if (switchingWorkspace) throw new HttpError(503, 'a workspace switch is in progress; retry')
+    const mount = ctx
+    const epoch = workspaceEpoch
+    const assertDeletable = (): void => {
+      if (closed || mount !== ctx || epoch !== workspaceEpoch || switchingWorkspace) throw new HttpError(503, 'the workspace is changing or shutting down; retry')
+      for (const id of ids) {
+        const reason = sessionDeletionBlock(id)
+        if (reason) throw new HttpError(409, `session "${id}" cannot be deleted (${reason}); resolve it before deleting this selection`)
+      }
+    }
+    deletingSession = 'batch'
+    const deletedIds: string[] = []
+    const failed: Array<{ id: string; error: string }> = []
+    try {
+      assertDeletable()
+      for (const id of ids) await mount.sessions.validateDeletion(id)
+      assertDeletable()
+      for (const id of ids) {
+        try {
+          await mount.sessions.delete(id, assertDeletable)
+          deletedIds.push(id)
+        } catch (error) {
+          failed.push({ id, error: error instanceof SessionError ? error.message : '无法删除会话目录，请检查权限或文件占用。' })
+        }
+      }
+      if (closed || mount !== ctx || epoch !== workspaceEpoch) throw new HttpError(503, 'workspace is shutting down or changed; refresh before retrying')
+      if (deletedIds.some(id => sameSession(mainAgent().sessionId, id))) {
+        pending.cancel(); pendingQuestions.cancel(); pendingPlans.cancel(); pendingRetries.cancel()
+        mount.agents.disposeAll()
+        sessionEpoch++
+        expertMode = false
+        expertIds.clear()
+        mount.approval.engine.clearSessionAllows()
+        const todos = mount.peek<{ todos: unknown[] }>('todos')
+        if (todos) todos.todos = []
+        harness.main()
+        applySelectedModel()
+        contextCache = null
+        statsCache = null
+      }
+      const sessionId = isSessionId(mainAgent().sessionId) ? mainAgent().sessionId : null
+      for (const deletedId of deletedIds) broadcast({ type: 'session/deleted', deletedId, sessionId, workspaceId: workspaceId() })
+      const result = { ok: failed.length === 0, deletedIds, failed, sessionId, workspaceId: workspaceId(), revision }
+      await refreshState()
+      return result
+    } finally { deletingSession = null }
+  }
+
+  /** Read unopened workspaces without mounting plugins, starting agents or changing
+   * the current session. Only the current harness has a truthful live status. */
+  async function collaborationSnapshot(attempt = 0): Promise<{
+    workspaceId: string; revision: number; updatedAt: string; workspaces: CollaborationWorkspace[]
+  }> {
+    const mount = ctx
+    const epoch = workspaceEpoch
+    const snapshotRevision = revision
+    const paths = persistSettings ? [...recentWorkspaces] : [workspaceCwd]
+    const workspaces: CollaborationWorkspace[] = []
+    for (const cwd of paths) {
+      const active = cwd === workspaceCwd
+      try {
+        if (!(await stat(cwd)).isDirectory()) throw new Error('not a directory')
+        let service = mount.sessions
+        if (!active) {
+          const config = await loadConfig({ cwd })
+          const configured = resolveProfile(config).plugins['core-session']?.config?.dir
+          const directory = prefsFor(cwd).sessionDir || opts.sessionDir || (typeof configured === 'string' ? configured : '.sakura/sessions')
+          service = new SessionService(path.resolve(cwd, directory))
+        }
+        const sessions = await service.list()
+        const agents = active ? mount.agents.list().map(projectAgent) : []
+        const requests = active ? [...pending.snapshot(), ...pendingQuestions.snapshot(), ...pendingPlans.snapshot(), ...pendingRetries.snapshot()] : []
+        workspaces.push({ path: cwd, name: path.basename(cwd) || cwd, active, live: active,
+          running: agents.filter(a => a.status === 'running').length, pending: requests.length,
+          agents, todos: active ? mount.peek<{ todos: unknown[] }>('todos')?.todos ?? [] : [],
+          sessions: sessions.filter(s => !s.expert && (!active || !isExpertHistory(s))).map(s => ({ id: s.id, title: s.title ?? s.id, updatedAt: s.updatedAt ?? s.startedAt,
+            size: s.events, activity: s.activity, agents: agents.filter(a => sameSession(a.sessionId, s.id)),
+            status: requests.some(r => agents.some(a => a.id === r.agentId && sameSession(a.sessionId, s.id))) ? 'waiting'
+              : agents.find(a => sameSession(a.sessionId, s.id) && a.status === 'running') ? 'running'
+                : agents.find(a => sameSession(a.sessionId, s.id))?.status ?? s.activity?.status ?? 'empty' })),
+        })
+      } catch {
+        workspaces.push({ path: cwd, name: path.basename(cwd) || cwd, active, live: active,
+          running: 0, pending: 0, agents: [], todos: [], sessions: [], error: '工作区目录或会话记录无法读取。' })
+      }
+    }
+    if (closed || mount !== ctx || epoch !== workspaceEpoch) throw new HttpError(503, 'workspace changed; refresh collaboration')
+    if (snapshotRevision !== revision) {
+      if (attempt >= 4) throw new HttpError(503, 'collaboration is changing too quickly; retry in a moment')
+      return collaborationSnapshot(attempt + 1)
+    }
+    return { workspaceId: workspaceId(), revision, updatedAt: new Date().toISOString(), workspaces }
   }
 
   // Desktop workspace and provider edits share one transaction gate. A rejected
@@ -910,13 +1365,16 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       workspace: workspaceCwd,
       recentWorkspaces: [...recentWorkspaces],
       baseURL: overrides.baseURL ?? '',
-      model: overrides.model ?? '',
+      model: sakuraApiOnly ? sakuraAccount?.status().model ?? '' : overrides.model ?? '',
       rememberKey: desktopRememberKey,
-      hasApiKey: Boolean(currentApiKey),
+      hasApiKey: sakuraApiOnly ? sakuraAccount?.status().phase === 'connected' : Boolean(currentApiKey),
       newWorkspaceDir,
       sessionDir: prefs.sessionDir ?? '',
       agents: prefs.agents ?? [],
-      ...(full ? { workspacePrefs: Object.fromEntries(workspacePrefs) } : {}),
+      appearance: { ...appearance },
+      retry: { ...retryPolicy },
+      updates: { ...updateSettings },
+      ...(full ? { workspacePrefs: Object.fromEntries(workspacePrefs), ...(desktopRememberKey ? { apiKey: currentApiKey } : {}) } : {}),
     }
   }
 
@@ -940,7 +1398,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     agents?: string[] | null
   }): Promise<void> {
     if (closed) throw new HttpError(503, 'server is shutting down')
-    if (settingsUpdating || switching || deletingSession || switchingWorkspace) {
+    if (settingsUpdating || switching || deletingSession || switchingWorkspace || contextOperation) {
       throw new HttpError(409, 'a workspace or settings change is in progress; retry')
     }
     assertAgentsIdle()
@@ -968,19 +1426,21 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       const sessionDirChanged = !willSwitch && patch.sessionDir !== undefined &&
         (patch.sessionDir || '') !== (prefsFor(workspaceCwd).sessionDir ?? '')
       const needsRemount = willSwitch || sessionDirChanged
-      // Per-workspace prefs and the global new-workspace default apply to the
-      // target workspace before the remount and before persistence, so both
-      // the candidate harness and the persist frame carry them.
-      const targetPrefs = prefsFor(target)
+      // Stage preferences for the candidate mount and persistence frame.
+      // A rejected disk write must not leak a new directory into the live
+      // state or a later workspace switch, even without a harness remount.
+      const targetPrefs: WorkspacePrefs = { ...workspacePrefs.get(path.resolve(target)) }
       if (patch.sessionDir !== undefined) targetPrefs.sessionDir = patch.sessionDir || undefined
       if (patch.agents !== undefined) targetPrefs.agents = patch.agents?.length ? [...new Set(patch.agents)] : undefined
-      if (patch.newWorkspaceDir !== undefined) newWorkspaceDir = patch.newWorkspaceDir || ''
+      const nextNewWorkspaceDir = patch.newWorkspaceDir === undefined ? newWorkspaceDir : patch.newWorkspaceDir || ''
+      const nextWorkspacePrefs = new Map(workspacePrefs)
+      nextWorkspacePrefs.set(path.resolve(target), targetPrefs)
       if (needsRemount) {
         let config: SakuraConfig
         try { config = await loadConfig({ cwd: target }) }
         catch { throw new HttpError(400, 'cannot load the target workspace configuration') }
         liveApprovalMode = ctx.approval.mode
-        candidate = await createWorkspaceHarness(target, config, prefsFor(target))
+        candidate = await createWorkspaceHarness(target, config, targetPrefs)
         configureWorkspaceHarness(candidate, overrides.model, nextProviders)
         candidate.ctx.llm.setThinking(ctx.llm.thinking)
       }
@@ -1014,19 +1474,25 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
         rememberKey: nextRemember,
         hasApiKey: Boolean(nextKey),
         ...(nextRemember ? { apiKey: nextKey } : {}),
-        newWorkspaceDir,
+        newWorkspaceDir: nextNewWorkspaceDir,
         sessionDir: targetPrefs.sessionDir ?? '',
         agents: targetPrefs.agents ?? [],
-        workspacePrefs: Object.fromEntries(workspacePrefs),
+        appearance: { ...appearance },
+        retry: { ...retryPolicy },
+        updates: { ...updateSettings },
+        workspacePrefs: Object.fromEntries(nextWorkspacePrefs),
       }
       try { await persistSettings?.(persisted) }
       catch { throw new HttpError(500, 'cannot persist desktop settings; previous configuration is unchanged') }
       if (closed) throw new HttpError(503, 'server is shutting down')
+      workspacePrefs.set(path.resolve(target), targetPrefs)
+      newWorkspaceDir = nextNewWorkspaceDir
       if (candidate) {
         switchingWorkspace = true
         pending.cancel()
         pendingQuestions.cancel()
         pendingPlans.cancel()
+        pendingRetries.cancel()
         workspaceCwd = target
         workspaceEpoch++
         bindHarness(candidate)
@@ -1086,6 +1552,19 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     return readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html'), 'utf8')
   }
 
+  const vipAssets = new Map<string, Buffer>()
+  async function getVipAsset(name: string): Promise<Buffer> {
+    const cached = vipAssets.get(name)
+    if (cached) return cached
+    try {
+      // @ts-expect-error virtual module — embedded by the existing SEA builder
+      const mod = await import('sakura-web-vip-embed') as { default?: Record<string, string> }
+      const encoded = mod.default?.[name]
+      if (typeof encoded === 'string') { const image = Buffer.from(encoded, 'base64'); vipAssets.set(name, image); return image }
+    } catch { /* Node/dev builds serve only the fixed, bundled PNG files. */ }
+    return readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'assets', 'vip', name))
+  }
+
   function decodeSessionId(value: string): string {
     let id: string
     try { id = decodeURIComponent(value) } catch { throw new HttpError(400, 'invalid session id') }
@@ -1101,7 +1580,10 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     void route(req, res).catch((error) => {
       const status = error instanceof HttpError ? error.status : error instanceof SessionError
         ? ({ EINVAL: 400, ENOENT: 404, EBUSY: 409 } as const)[error.code]
-        : (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? 404 : 500
+        : error instanceof CheckpointError ? ({ EINVAL: 400, ECONFLICT: 409, EIO: 500 } as const)[error.code]
+        : error instanceof WorkspaceMemoryError
+          ? ({ EINVAL: 400, ECONFLICT: 409, EBUSY: 409, EDISABLED: 409, ECLOSED: 503, EIO: 500 } as const)[error.code]
+        : error instanceof SkillImportError ? error.status : (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? 404 : 500
       try {
         if (status === 408 || status === 413) {
           res.setHeader('connection', 'close')
@@ -1124,6 +1606,14 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     const url = new URL(req.url ?? '/', 'http://local')
     const { pathname } = url
     const method = req.method ?? 'GET'
+
+    const vipAsset = pathname.match(/^\/assets\/vip\/(vip-(?:[1-9]|10)\.png)$/)
+    if (vipAsset && method === 'GET') {
+      const image = await getVipAsset(vipAsset[1]!)
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': image.length, 'cache-control': 'public, max-age=86400' })
+      res.end(image)
+      return
+    }
 
     if (['/', '/index.html', '/dashboard'].includes(pathname) && method === 'GET') {
       const html = await getIndexHtml()
@@ -1173,11 +1663,166 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     if (principal.role === 'viewer' && method !== 'GET' && method !== 'HEAD' && !checkingUpdate) {
       throw new HttpError(403, 'read-only viewer cannot modify the workspace')
     }
+    // Display preferences do not touch the harness or credentials. They remain
+    // editable during a turn, but only a local operator can persist desktop data.
+    if (pathname === '/api/desktop/appearance' && (method === 'GET' || method === 'POST')) {
+      if (!persistSettings || access.remote || principal.role !== 'operator') {
+        throw new HttpError(404, 'desktop appearance is available only to a local operator')
+      }
+      if (method === 'GET') { json(res, 200, { ...appearance }); return }
+      const body = await bodyJson(req, 4096)
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      if (Object.keys(body).some(key => key !== 'quotaDisplay')) throw new HttpError(400, 'invalid desktop appearance fields')
+      let candidate: DesktopAppearance
+      try { candidate = { quotaDisplay: parseQuotaDisplay(body.quotaDisplay) } }
+      catch (error) { throw new HttpError(400, (error as Error).message) }
+      if (appearanceUpdating) throw new HttpError(409, '正在保存显示方式，请等待完成。')
+      if (closed) throw new HttpError(503, 'server is shutting down')
+      appearanceUpdating = true
+      try {
+        try {
+          if (opts.onPersistAppearance) await opts.onPersistAppearance(candidate)
+          else await persistSettings({ ...currentDesktopState(true), appearance: candidate })
+        } catch { throw new HttpError(500, '无法保存额度显示方式，原设置未改变。') }
+        if (closed) throw new HttpError(503, 'server is shutting down')
+        appearance = candidate
+        revision++
+        await refreshState()
+        json(res, 200, { ...appearance })
+      } finally { appearanceUpdating = false }
+      return
+    }
+    if (pathname === '/api/updates/settings' && (method === 'GET' || method === 'POST')) {
+      if (access.remote || principal.role !== 'operator') throw new HttpError(404, '更新源设置仅供本机操作员使用。')
+      if (method === 'GET') { json(res, 200, { ...updateSettings }); return }
+      const body = await bodyJson(req, 4096)
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      let candidate: UpdateSettings
+      try { candidate = parseUpdateSettings(body) } catch (error) { throw new HttpError(400, (error as Error).message) }
+      if (updatesUpdating || updateInFlight) throw new HttpError(409, '更新检查或保存正在进行，请稍后重试。')
+      if (closed) throw new HttpError(503, 'server is shutting down')
+      updatesUpdating = true
+      try {
+        try {
+          if (opts.onPersistUpdates) await opts.onPersistUpdates(candidate)
+          else if (persistSettings) await persistSettings({ ...currentDesktopState(true), updates: candidate })
+        } catch { throw new HttpError(500, '无法保存更新设置，原更新源与结果保持不变。') }
+        if (closed) throw new HttpError(503, 'server is shutting down')
+        if (candidate.feedUrl !== updateSettings.feedUrl) {
+          updateChecker.close()
+          updateChecker = new UpdateChecker(VERSION, candidate.feedUrl || DEFAULT_UPDATES_URL, { fetch: opts.updatesFetch })
+        }
+        updateSettings = candidate
+        if (updateTimer !== undefined) clearTimeout(updateTimer)
+        if (autoUpdateCheck()) scheduleUpdateCheck(updateInitialDelay)
+        revision++
+        await refreshState()
+        json(res, 200, { ...updateSettings })
+      } finally { updatesUpdating = false }
+      return
+    }
     if (checkingUpdate) {
       await bodyJson(req, 4096)
       if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      if (updatesUpdating) throw new HttpError(409, '正在保存更新设置，请稍后重试。')
       const info = await runUpdateCheck()
       json(res, 200, info)
+      return
+    }
+    if (pathname === '/api/desktop/window' && method === 'POST') {
+      if (!opts.onWindowAction || access.remote || principal.role !== 'operator') {
+        throw new HttpError(404, 'window controls are available only in the local desktop app')
+      }
+      const body = await bodyJson(req, 1024)
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      if (typeof body.action !== 'string' || !['minimize', 'maximize', 'close', 'drag', 'reflow'].includes(body.action)) throw new HttpError(400, 'invalid window action')
+      // Window controls are app-scoped, not workspace/session-scoped. Keep
+      // them before write locks so users can close during a save or switch.
+      opts.onWindowAction(body.action as 'minimize' | 'maximize' | 'close' | 'drag' | 'reflow')
+      json(res, 200, { ok: true })
+      return
+    }
+
+    // Account access is app-scoped and local-operator only, not shared with remote viewers.
+    if (pathname === '/api/account/sakura' && method === 'GET') {
+      if (!sakuraAccount || principal.role !== 'operator') throw new HttpError(404, 'SakuraAPI account is available only to a local operator')
+      json(res, 200, { ...sakuraAccount.status(), secureStorage: !!opts.onPersistSakuraApi, exclusiveUpstream: sakuraApiOnly })
+      return
+    }
+    const accountAction = pathname.match(/^\/api\/account\/sakura\/(login|poll|retry|cancel|refresh|logout|remember|page|keys|key-select|key-prepare|key-create|key-cancel|activity)$/)
+    if (accountAction && method === 'POST') {
+      if (!sakuraAccount || principal.role !== 'operator') throw new HttpError(404, 'SakuraAPI account is available only to a local operator')
+      const body = await bodyJson(req, 4096)
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      const action = accountAction[1]
+      if (action === 'activity') {
+        if (settingsUpdating || switchingWorkspace) throw new HttpError(409, '账号或工作区正在变更。')
+        try { await sakuraAccount.foregroundActivity() }
+        catch (error) {
+          if (sakuraApiOnly && sakuraAccount.status().phase === 'expired') { ctx.llm.replaceAdapters(sakuraAccount.adapter()); await refreshState() }
+          throw new HttpError(error instanceof SakuraApiError && error.status === 401 ? 409 : 502, error instanceof SakuraApiError ? error.message : '账号活跃上报失败。')
+        }
+        json(res, 200, { ...sakuraAccount.status(), secureStorage: !!opts.onPersistSakuraApi, exclusiveUpstream: sakuraApiOnly })
+        return
+      }
+      if (action === 'page') {
+        if (!['purchase', 'keys', 'profile'].includes(String(body.page))) throw new HttpError(400, 'invalid SakuraAPI official page')
+        try { await (opts.sakuraApiOpenPage ?? openSakuraApiPage)(body.page as SakuraOfficialPage) }
+        catch { throw new HttpError(502, '无法打开官网页面，请检查系统默认浏览器。') }
+        json(res, 200, { opened: true })
+        return
+      }
+      if (settingsUpdating || switchingWorkspace || deletingSession || switching || contextOperation) throw new HttpError(409, '工作区正在变更，请稍后处理授权。')
+      // Refresh/poll can update the live model catalog and logout removes its
+      // credential. No task may start during either network/storage operation.
+      assertAgentsIdle()
+      if (ctx.agents.list().some(agent => ctx.peek<{ isCompacting(id: string): boolean }>('compaction')?.isCompacting(agent.sessionId))) {
+        throw new HttpError(409, '上下文压缩正在运行，请稍后处理授权。')
+      }
+      settingsUpdating = true
+      try {
+        let state
+        if (action === 'login') {
+          if (body.remember !== undefined && typeof body.remember !== 'boolean') throw new HttpError(400, 'remember must be boolean')
+          state = await sakuraAccount.beginLogin(body.remember)
+        } else if (action === 'remember') {
+          if (typeof body.remember !== 'boolean') throw new HttpError(400, 'remember must be boolean')
+          state = await sakuraAccount.setRemember(body.remember)
+        } else if (action === 'poll' || action === 'retry') {
+          if (typeof body.id !== 'string' || body.id.length > 100) throw new HttpError(400, 'invalid authorization operation')
+          state = await sakuraAccount.pollLogin(body.id, action === 'retry')
+        } else if (action === 'keys') state = await sakuraAccount.keyPage(body.page as number)
+        else if (action === 'key-select') state = await sakuraAccount.selectKey(body.id as number)
+        else if (action === 'key-prepare') {
+          if (typeof body.name !== 'string' || !Array.isArray(body.groupIds)) throw new HttpError(400, '请输入 Key 名称并选择分组。')
+          json(res, 200, sakuraAccount.prepareKey(body.name, body.groupIds as number[]))
+          return
+        } else if (action === 'key-create' || action === 'key-cancel') {
+          if (typeof body.id !== 'string' || body.id.length > 100) throw new HttpError(400, 'invalid Key creation operation')
+          if (action === 'key-create') {
+            if (body.confirmed !== true) throw new HttpError(400, '创建 Key 需要明确确认。')
+            state = await sakuraAccount.createKey(body.id)
+          } else { sakuraAccount.cancelKeyCreation(body.id); state = sakuraAccount.status() }
+        } else if (action === 'cancel') state = await sakuraAccount.cancelLogin()
+        else if (action === 'refresh') state = await sakuraAccount.refresh()
+        else state = await sakuraAccount.logout()
+        if (sakuraApiOnly) {
+          ctx.llm.replaceAdapters(sakuraAccount.adapter())
+          overrides.model = state.model
+          applySelectedModel()
+        }
+        settingsUpdating = false
+        if (sakuraApiOnly && ['connected', 'expired', 'signed-out'].includes(state.phase)) await refreshState()
+        json(res, 200, { ...state, secureStorage: !!opts.onPersistSakuraApi, exclusiveUpstream: sakuraApiOnly })
+      } catch (error) {
+        if (sakuraApiOnly && sakuraAccount.status().phase === 'expired') {
+          ctx.llm.replaceAdapters(sakuraAccount.adapter())
+          settingsUpdating = false
+          await refreshState()
+        }
+        if (error instanceof SakuraApiError) throw new HttpError(error.status === 401 ? 409 : error.status, error.message)
+        throw error
+      } finally { settingsUpdating = false }
       return
     }
     // Requests that started on an older workspace must not act on the new one
@@ -1186,6 +1831,9 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     const sessionEpochAtEntry = sessionEpoch
     const assertWorkspaceSame = (): void => {
       if (settingsUpdating) throw new HttpError(409, 'settings are being saved; retry after completion')
+      if (ctx.peek<MemoryProcessingService>('memoryProcessing')?.status().active && method !== 'GET' && method !== 'HEAD') {
+        throw new HttpError(409, '长期记忆正在整理，请等待完成后再提交任务或修改设置。')
+      }
       if (workspaceEpochAtEntry !== workspaceEpoch || switchingWorkspace) {
         throw new HttpError(503, 'the workspace switched while this request was in flight; retry')
       }
@@ -1195,6 +1843,9 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       if (deletingSession && method !== 'GET' && method !== 'HEAD') {
         throw new HttpError(409, 'a session deletion is in progress; retry after it completes')
       }
+      if (contextOperation && method !== 'GET' && method !== 'HEAD') {
+        throw new HttpError(409, '上下文正在压缩或清空，请等待完成后再操作。')
+      }
     }
 
     const assertSessionSame = (): void => {
@@ -1202,6 +1853,15 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       if (closed) throw new HttpError(503, 'server is shutting down')
       if (switching || sessionEpochAtEntry !== sessionEpoch) {
         throw new HttpError(409, 'the session changed while this request was in flight; retry in the current session')
+      }
+    }
+
+    const assertExpertTarget = (body: Record<string, unknown>): void => {
+      assertSessionSame()
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      const sessionId = isSessionId(mainAgent().sessionId) ? mainAgent().sessionId : null
+      if (body.sessionId !== undefined && body.sessionId !== sessionId) {
+        throw new HttpError(409, '会话已改变，专家操作未提交，请在当前会话确认后重试。')
       }
     }
 
@@ -1237,6 +1897,267 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
 
     if (pathname === '/api/state' && method === 'GET') {
       json(res, 200, await stateSnapshot())
+      return
+    }
+
+    if (pathname === '/api/plugins/marketplace' && method === 'GET') {
+      // The authenticated local operator opts into public network search.
+      // Remote viewers/operators cannot cause requests from the host network.
+      if (access.remote || principal.role !== 'operator') throw new HttpError(404, '插件市场搜索仅对本机操作员开放。')
+      const result = await pluginMarketplace.search(url.searchParams.get('q') ?? '', Number(url.searchParams.get('page') ?? 1))
+      assertWorkspaceSame()
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      json(res, 200, result)
+      return
+    }
+
+    if (pathname === '/api/skills/reload' && method === 'POST') {
+      if (access.remote) throw new HttpError(404, 'Skill 刷新仅对本机操作员开放。')
+      await bodyJson(req, 4096)
+      assertWorkspaceSame()
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      ctx.peek<SkillsService>('skills')?.reload()
+      await refreshState()
+      json(res, 200, await stateSnapshot())
+      return
+    }
+
+    if (pathname === '/api/retry/settings' && (method === 'GET' || method === 'POST')) {
+      if (method === 'GET') { json(res, 200, { ...retryPolicy }); return }
+      const body = await bodyJson(req, 4096)
+      assertWorkspaceSame()
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      let candidate: RetryPolicy
+      try { candidate = validateRetryPolicy(body) } catch (error) { throw new HttpError(400, (error as Error).message) }
+      if (retryUpdating) throw new HttpError(409, '正在保存重试策略，请稍后。')
+      retryUpdating = true
+      try {
+        if (!access.remote && persistSettings) {
+          try {
+            if (opts.onPersistRetry) await opts.onPersistRetry(candidate)
+            else await persistSettings({ ...currentDesktopState(true), retry: candidate })
+          } catch { throw new HttpError(500, '重试策略保存失败，原策略未改变。') }
+        }
+        if (closed) throw new HttpError(503, 'server is shutting down')
+        retryPolicy = candidate
+        ctx.peek<RetryService>('retry')?.configure(candidate)
+        await refreshState()
+        json(res, 200, { ...retryPolicy })
+      } finally { retryUpdating = false }
+      return
+    }
+
+    const retryMatch = pathname.match(/^\/api\/retries\/([\w-]+)$/)
+    if (retryMatch && method === 'POST') {
+      const body = await bodyJson(req, 4096)
+      assertSessionSame()
+      if (typeof body.allow !== 'boolean') throw new HttpError(400, 'allow must be boolean')
+      if (!pendingRetries.resolve(retryMatch[1]!, body.allow)) throw new HttpError(404, 'unknown or already-resolved retry confirmation')
+      json(res, 200, { ok: true })
+      return
+    }
+
+    if (pathname === '/api/mentions' && method === 'GET') {
+      const candidates = await mentionCandidates()
+      assertSessionSame()
+      json(res, 200, { workspaceId: workspaceId(), candidates })
+      return
+    }
+
+    if (pathname === '/api/skills/import' && method === 'POST') {
+      if (access.remote) throw new HttpError(404, 'Skill import is available only on a local workspace')
+      const body = await bodyJson(req, SKILL_IMPORT_MAX_BYTES * 6 + 8192)
+      assertWorkspaceSame()
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      assertAgentsIdle()
+      settingsUpdating = true
+      try {
+        const imported = await importSkill(workspaceCwd, body)
+        ctx.peek<SkillsService>('skills')?.reload()
+        await refreshState()
+        json(res, 200, imported)
+      } finally { settingsUpdating = false }
+      return
+    }
+
+    if (pathname === '/api/workspace/memories' && method === 'GET') {
+      if (access.remote || principal.role !== 'operator') throw new HttpError(404, 'memory management is available only locally')
+      const workspaces = await memoryCatalog()
+      assertWorkspaceSame()
+      json(res, 200, { workspaceId: workspaceId(), workspaces })
+      return
+    }
+
+    if (pathname === '/api/workspace/memory/process' && method === 'POST') {
+      if (access.remote || principal.role !== 'operator') throw new HttpError(404, 'memory processing is available only locally')
+      const body = await bodyJson(req, 4096)
+      assertWorkspaceSame()
+      const target = typeof body.workspace === 'string' ? knownMemoryWorkspace(body.workspace) : workspaceCwd
+      if (target !== workspaceCwd) throw new HttpError(409, '自动整理只对当前打开的工作区运行，请先切换到该工作区；其他记忆仍可查看、编辑或 @ 引用。')
+      if (body.confirmed !== true) throw new HttpError(400, '手动整理会调用模型，需要明确确认。')
+      const processor = ctx.peek<MemoryProcessingService>('memoryProcessing')
+      if (!processor) throw new HttpError(404, 'memory processing is not mounted')
+      let entry: { id: string; revision: number; fingerprint: string } | undefined
+      if (body.entryId !== undefined) {
+        if (typeof body.entryId !== 'string' || !/^[a-f0-9]{24}-\d+$/.test(body.entryId) || !Number.isSafeInteger(body.revision) || typeof body.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(body.fingerprint)) throw new HttpError(400, '请选择有效记忆条目并刷新版本后重试。')
+        entry = { id: body.entryId, revision: Number(body.revision), fingerprint: body.fingerprint }
+      }
+      assertAgentsIdle()
+      if (ctx.agents.list().some(agent => ctx.peek<CompactionService>('compaction')?.isCompacting(agent.sessionId))) throw new HttpError(409, '请等待上下文压缩完成。')
+      settingsUpdating = true
+      try {
+        const snapshot = await processor.process({ signal: shutdownController.signal, manual: true, entry })
+        json(res, 200, { ...snapshot, workspaceId: workspaceId(), workspace: workspaceCwd })
+      } finally { settingsUpdating = false; await refreshState() }
+      return
+    }
+
+    if (pathname === '/api/workspace/memory/export' && method === 'GET') {
+      if (access.remote || principal.role !== 'operator') throw new HttpError(404, 'memory export is available only locally')
+      const target = knownMemoryWorkspace(url.searchParams.get('workspace') || workspaceCwd)
+      const store = target === workspaceCwd ? ctx.peek<WorkspaceMemoryService>('workspaceMemory') : new WorkspaceMemoryStore(target)
+      if (!store) throw new HttpError(404, 'memory unavailable')
+      const snapshot = await store.reload()
+      assertWorkspaceSame()
+      if (snapshot.error) throw new HttpError(500, snapshot.error)
+      res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'content-disposition': 'attachment; filename="workspace-memory.md"' })
+      res.end('# Workspace memory\n\n' + snapshot.content + (snapshot.pendingContent ? '\n\n## 待整理记录（不是已确认长期记忆）\n\n' + snapshot.pendingContent : ''))
+      return
+    }
+
+    if (pathname === '/api/context/settings' && method === 'POST') {
+      const body = await bodyJson(req, 4096)
+      assertSessionSame()
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      const compaction = ctx.peek<CompactionService>('compaction')
+      if (!compaction) throw new HttpError(400, '当前工作区未启用上下文压缩服务。')
+      let settings: ContextBudgetSettings
+      try { settings = validateContextBudget(body) }
+      catch (error) { throw new HttpError(400, (error as Error).message) }
+      assertAgentsIdle()
+      if (ctx.agents.list().some(agent => compaction.isCompacting(agent.sessionId))) throw new HttpError(409, '上下文正在压缩，请完成后再修改阈值。')
+      settingsUpdating = true
+      try {
+        const nextPrefs = new Map(workspacePrefs)
+        nextPrefs.set(workspaceCwd, { ...prefsFor(workspaceCwd), contextBudget: settings })
+        try { await (opts.onPersistContextBudget ?? persistSettings)?.({ ...currentDesktopState(true), workspacePrefs: Object.fromEntries(nextPrefs) }) }
+        catch { throw new HttpError(500, '无法保存上下文阈值，原设置未改变。') }
+        if (closed) throw new HttpError(503, 'server is shutting down')
+        compaction.setContextBudget(settings)
+        workspacePrefs.set(workspaceCwd, nextPrefs.get(workspaceCwd)!)
+        broadcast({ type: 'context/budget', budget: contextBudget() })
+      } finally { settingsUpdating = false }
+      await refreshState()
+      json(res, 200, { contextBudget: contextBudget() })
+      return
+    }
+
+    const contextAction = pathname.match(/^\/api\/context\/(compact|clear)$/)
+    if (contextAction && method === 'POST') {
+      const body = await bodyJson(req, 4096)
+      assertSessionSame()
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      if (!isSessionId(body.sessionId) || !Number.isSafeInteger(body.contextRevision) || Number(body.contextRevision) < 0) {
+        throw new HttpError(400, '请刷新当前会话后重试；操作需要会话 ID 与上下文版本。')
+      }
+      if (!sameSession(mainAgent().sessionId, body.sessionId)) throw new HttpError(409, '当前会话已改变，请重新选择操作。')
+      const action = contextAction[1] as 'compact' | 'clear'
+      if (action === 'clear' && body.confirmed !== true) throw new HttpError(400, '清空上下文需要明确确认；历史不会删除。')
+      if (body.focus !== undefined && (typeof body.focus !== 'string' || body.focus.length > 1000)) throw new HttpError(400, '压缩重点必须是 1,000 字符以内的文本。')
+      const mount = ctx
+      const compaction = mount.peek<CompactionService>('compaction')
+      if (action === 'compact' && !compaction) throw new HttpError(400, '当前工作区未启用上下文压缩服务。')
+      const assertContextIdle = (): void => {
+        if (closed || ctx !== mount || workspaceEpoch !== workspaceEpochAtEntry || sessionEpoch !== sessionEpochAtEntry || switching || switchingWorkspace) {
+          throw new HttpError(409, '工作区或会话已改变，本次操作未继续。')
+        }
+        if (!sameSession(mainAgent().sessionId, body.sessionId as string)) throw new HttpError(409, '当前会话已改变，请刷新后重试。')
+        assertAgentsIdle()
+        if (pending.snapshot().length || pendingQuestions.snapshot().length || pendingPlans.snapshot().length || pendingRetries.snapshot().length) throw new HttpError(409, '请先处理待确认的审批、问题、计划或重试。')
+        if (mount.agents.list().some(agent => compaction?.isCompacting(agent.sessionId))) throw new HttpError(409, '上下文已经在压缩，请等待完成。')
+      }
+      assertContextIdle()
+      contextOperation = { action, sessionId: body.sessionId }
+      broadcast({ type: 'context/status', ...contextOperation, active: true })
+      void refreshState()
+      let compactedEvents = 0
+      try {
+        const session = await mount.sessions.open(body.sessionId)
+        assertContextIdle()
+        if ((session.events.at(-1)?.seq ?? 0) !== body.contextRevision) throw new HttpError(409, '上下文内容已更新，请刷新后重新确认。')
+        if (action === 'clear') {
+          await session.clearContext(assertContextIdle)
+          contextCache = null
+          broadcast({ type: 'context/cleared', sessionId: session.id, workspaceId: workspaceId() })
+        } else {
+          const result = await compaction!.compact(session.id, { focus: body.focus as string | undefined, signal: shutdownController.signal })
+          if (result.deferred) throw new HttpError(409, '上下文发生变化或仍有工具调用未完成，请待任务结束后再压缩。')
+          compactedEvents = result.compactedEvents
+        }
+      } finally {
+        contextOperation = null
+        broadcast({ type: 'context/status', action, sessionId: body.sessionId, active: false })
+        await refreshState()
+      }
+      json(res, 200, { ok: true, sessionId: body.sessionId, compactedEvents, workspaceId: workspaceId() })
+      return
+    }
+
+    if (pathname === '/api/collaboration' && method === 'GET') {
+      json(res, 200, await collaborationSnapshot())
+      return
+    }
+
+    if (pathname === '/api/workspace/memory' && (method === 'GET' || method === 'POST')) {
+      const requestedWorkspace = url.searchParams.get('workspace')
+      const target = knownMemoryWorkspace(requestedWorkspace || workspaceCwd)
+      const memory = target === workspaceCwd ? ctx.peek<WorkspaceMemoryService>('workspaceMemory') : new WorkspaceMemoryStore(target)
+      if (!memory || access.remote || principal.role !== 'operator') {
+        throw new HttpError(404, 'memory settings are available only in a local workspace')
+      }
+      if (method === 'GET') {
+        assertWorkspaceSame()
+        const snapshot = await memory.reload()
+        assertWorkspaceSame()
+        json(res, 200, { ...snapshot, workspaceId: workspaceId(), workspace: target })
+        return
+      }
+      const body = await bodyJson(req, WORKSPACE_MEMORY_MAX_CHARS * 6 + 4096)
+      assertWorkspaceSame()
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      if (!Number.isSafeInteger(body.revision) || Number(body.revision) < 0) throw new HttpError(400, 'memory revision is required')
+      if (body.enabled !== undefined && typeof body.enabled !== 'boolean') throw new HttpError(400, 'enabled must be boolean')
+      if (Object.keys(body).some(key => !['revision', 'fingerprint', 'enabled', 'content', 'processing', 'clearPending', 'confirmed', 'entry'].includes(key))) throw new HttpError(400, 'invalid memory settings fields')
+      if (body.fingerprint !== undefined && (typeof body.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(body.fingerprint))) throw new HttpError(400, 'invalid memory fingerprint')
+      if (body.clearPending !== undefined && (typeof body.clearPending !== 'boolean' || body.clearPending && body.confirmed !== true)) throw new HttpError(400, '清空待整理记录需要明确确认。')
+      if (body.entry !== undefined) {
+        const entry = body.entry as Record<string, unknown> | null
+        if (!entry || Array.isArray(entry) || Object.keys(entry).some(key => !['collection', 'id', 'action', 'enabled', 'content'].includes(key)) ||
+          !['longTerm', 'pending'].includes(String(entry.collection)) || !['delete', 'toggle', 'replace'].includes(String(entry.action)) ||
+          typeof entry.id !== 'string' || !/^[a-f0-9]{24}-\d+$/.test(entry.id) ||
+          entry.action === 'delete' && body.confirmed !== true || body.content !== undefined || body.clearPending !== undefined) throw new HttpError(400, '请选择有效条目；删除条目需要明确确认。')
+      }
+      const processing = body.processing === undefined ? undefined : validateMemoryProcessing(body.processing)
+      if (body.content !== undefined && (typeof body.content !== 'string' || body.content.length > WORKSPACE_MEMORY_MAX_CHARS || body.content.includes('\0'))) {
+        throw new HttpError(400, `memory content must be text of at most ${WORKSPACE_MEMORY_MAX_CHARS} characters`)
+      }
+      assertAgentsIdle()
+      const compacting = ctx.peek<{ isCompacting(id: string): boolean }>('compaction')
+      if (ctx.agents.list().some(agent => compacting?.isCompacting(agent.sessionId))) throw new HttpError(409, 'context compaction is running; wait before editing memory')
+      if (ctx.peek<MemoryProcessingService>('memoryProcessing')?.status().active) throw new HttpError(409, '长期记忆正在整理，请等待完成。')
+      if (switching || switchingWorkspace) throw new HttpError(409, 'a workspace or session change is in progress; retry')
+      settingsUpdating = true
+      try {
+        const saved = await memory.update({
+          ...(body.enabled !== undefined ? { enabled: body.enabled as boolean } : {}),
+          ...(body.content !== undefined ? { content: body.content as string } : {}),
+          ...(processing ? { processing } : {}),
+          ...(body.clearPending === true ? { clearPending: true } : {}),
+          ...(body.entry !== undefined ? { entry: body.entry as unknown as MemoryEntryOperation } : {}),
+        }, Number(body.revision), { fingerprint: typeof body.fingerprint === 'string' ? body.fingerprint : undefined })
+        json(res, 200, { ...saved, workspaceId: workspaceId(), workspace: target })
+      } finally { settingsUpdating = false }
+      await refreshState()
       return
     }
 
@@ -1277,32 +2198,68 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     }
 
     if (pathname === '/api/message' && method === 'POST') {
-      const body = await bodyJson(req)
+      const body = await bodyJson(req, Math.ceil(CHAT_FILE_LIMITS.totalBytes / 3) * 4 + 1024 * 1024)
       assertSessionSame()
-      if (typeof body.text !== 'string' || !body.text.trim()) {
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      const mainAtEntry = mainAgent()
+      const targetSession = isSessionId(mainAtEntry.sessionId) ? mainAtEntry.sessionId : null
+      const expertsAtEntry = expertMode ? liveExperts() : []
+      const expertEpochAtEntry = expertEpoch
+      const assertMessageTarget = (): void => {
+        assertSessionSame()
+        if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+        if (mainAgent() !== mainAtEntry || body.sessionId !== undefined && body.sessionId !== targetSession) {
+          throw new HttpError(409, '会话已改变，附件与消息未提交，请在当前会话确认后发送。')
+        }
+        liveExperts()
+        if (expertEpochAtEntry !== expertEpoch || body.expertMode !== undefined && body.expertMode !== expertMode) {
+          throw new HttpError(409, '专家组已改变，附件与消息未发送；请确认后重新发送。')
+        }
+      }
+      assertMessageTarget()
+      let files: ChatUploadFile[]
+      try { files = [...parseChatFiles(body.files), ...parseChatImages(body.images)] }
+      catch (error) { if (error instanceof ChatAttachmentError) throw new HttpError(error.status, error.message); throw error }
+      if (typeof body.text !== 'string' || !body.text.trim() && !files.length) {
         json(res, 400, { error: 'text is required' })
         return
       }
-      let text: string = body.text.trim()
-      // Attached images (GUI paste/upload) — data URLs only, capped at 8 MB total.
-      let images: string[] | undefined
-      if (Array.isArray(body.images) && body.images.length) {
-        const ok = body.images.filter((s): s is string => typeof s === 'string' && s.startsWith('data:image/'))
-        const total = ok.reduce((n, s) => n + s.length, 0)
-        if (total > 8 * 1024 * 1024) {
-          json(res, 413, { error: 'images too large (8 MB cap)' })
-          return
-        }
-        images = ok.length ? ok : undefined
+      const text = body.text.trim() || (Array.isArray(body.files) && body.files.length ? '请查看附件文件。' : '(see attached images)')
+      if (files.length > CHAT_FILE_LIMITS.count) throw new HttpError(413, '文件与图片附件每条消息合计最多 12 个。')
+      if (files.reduce((total, file) => total + file.bytes.length, 0) > CHAT_FILE_LIMITS.totalBytes) {
+        throw new HttpError(413, '文件与图片附件合计不能超过 16 MiB。')
       }
-      const queued = submitUserTask(prepareUserTask(text), images)
+      const task = await prepareUserTask(text)
+      assertMessageTarget()
+      if (sakuraAccount && !access.remote && principal.role === 'operator') {
+        try { await sakuraAccount.foregroundActivity() }
+        catch (error) {
+          if (sakuraApiOnly && sakuraAccount.status().phase === 'expired') { ctx.llm.replaceAdapters(sakuraAccount.adapter()); await refreshState() }
+          if (sakuraApiOnly) throw new HttpError(409, error instanceof SakuraApiError ? error.message : '客户端账号活跃验证失败，请同步授权后再发送。')
+        }
+        assertMessageTarget()
+      }
+      const prepared = new Map<string, StoredChatFiles>()
+      if (files.length) {
+        const mount = ctx
+        try {
+          for (const agent of [mainAtEntry, ...expertsAtEntry]) prepared.set(agent.id, await mount.agents.prepareFiles(agent.id, files))
+          assertMessageTarget()
+        } catch (error) {
+          await Promise.all([...prepared.values()].map(file => file.remove()))
+          await refreshState()
+          if (error instanceof HttpError) throw error
+          throw new HttpError(error instanceof ChatAttachmentError ? error.status : 500, '附件保存失败，消息没有发送；请保留草稿并检查磁盘权限或空间。')
+        }
+      }
+      const queued = submitUserTask(task, undefined, prepared, text)
       json(res, 202, { ok: true, queued })
       return
     }
 
     if (pathname === '/api/experts/start' && method === 'POST') {
-      const body = await bodyJson(req) as { task?: unknown; experts?: unknown }
-      assertSessionSame()
+      const body = await bodyJson(req)
+      assertExpertTarget(body)
       if (body.task !== undefined && body.task !== null && (typeof body.task !== 'string' || !body.task.trim())) {
         throw new HttpError(400, 'task must be a non-empty string')
       }
@@ -1315,25 +2272,26 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       } catch (error) {
         throw new HttpError(400, error instanceof Error ? error.message : String(error))
       }
-      const task = typeof body.task === 'string' ? prepareUserTask(body.task.trim()) : undefined
+      const task = typeof body.task === 'string' ? await prepareUserTask(body.task.trim()) : undefined
+      assertExpertTarget(body)
       const result = startExpertTeam(keys)
       const queued = task ? submitUserTask(task) : false
-      broadcast({ type: 'notice', level: 'info', message: `专家协同模式已开启：${[...result.started, ...result.reused].join('、')}${result.skipped.length ? `（${result.skipped.join('、')}与普通成员重名，未加入团队）` : ''}。` })
+      broadcast({ type: 'notice', key: 'expert-mode', level: 'info', message: `专家协同模式已开启：${[...result.started, ...result.reused].join('、')}${result.skipped.length ? `（${result.skipped.join('、')}与普通成员重名，未加入团队）` : ''}。共享当前对话上下文；长期记忆仅采集用户调整方向。` })
       await refreshState()
       json(res, 200, { expertMode: true, queued, ...result })
       return
     }
 
     if (pathname === '/api/experts/summarize' && method === 'POST') {
-      await bodyJson(req, 4096)
-      assertSessionSame()
+      const body = await bodyJson(req, 4096)
+      assertExpertTarget(body)
       const summary = buildExpertSummary(liveExperts())
       if (!summary) throw new HttpError(409, 'experts have not produced any completed conclusions yet')
       const main = mainAgent()
       const queued = main.status === 'running'
       // Expert outputs are copied into this one main-agent request; summarizing
       // must not send a new round of work back to the expert team.
-      void main.turn(summary).then((result) => {
+      void main.turn(summary, { source: 'expert-summary', expertMode: true }).then((result) => {
         if (result.error) broadcast({ type: 'notice', level: 'error', message: result.error })
       }).catch((error: unknown) => {
         broadcast({ type: 'notice', level: 'error', message: error instanceof Error ? error.message : String(error) })
@@ -1343,13 +2301,15 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     }
 
     if (pathname === '/api/experts/stop' && method === 'POST') {
-      await bodyJson(req, 4096)
-      assertSessionSame()
+      const body = await bodyJson(req, 4096)
+      assertExpertTarget(body)
       const stopped = expertMode
       expertMode = false
+      ctx.agents.setExpertMemoryMode(mainAgent().id, false)
+      if (stopped) expertEpoch++
       await refreshState()
       if (stopped) {
-        broadcast({ type: 'notice', level: 'info', message: '专家协同模式已关闭；专家成员保留在花名册中，可继续单独对话或删除。' })
+        broadcast({ type: 'notice', key: 'expert-mode', level: 'info', message: '专家协同模式已关闭；专家成员保留在花名册中，可继续单独对话或删除。' })
       }
       json(res, 200, { ok: true, stopped })
       return
@@ -1359,6 +2319,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       const main = mainAgent()
       main.interrupt()
       pending.cancel(main.id)
+      pendingRetries.cancel(main.id)
       json(res, 200, { ok: true })
       return
     }
@@ -1366,6 +2327,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     const approvalMatch = pathname.match(/^\/api\/approvals\/([\w-]+)$/)
     if (approvalMatch && method === 'POST') {
       const body = await bodyJson(req, 4096)
+      assertSessionSame()
       if (typeof body.allow !== 'boolean' || (body.always !== undefined && typeof body.always !== 'boolean')) {
         throw new HttpError(400, 'allow must be boolean; always must be boolean when supplied')
       }
@@ -1385,6 +2347,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     const questionMatch = pathname.match(/^\/api\/questions\/([\w-]+)$/)
     if (questionMatch && method === 'POST') {
       const body = await bodyJson(req, 64 * 1024)
+      assertSessionSame()
       if (typeof body.answer !== 'string' || !body.answer.trim()) throw new HttpError(400, 'answer is required')
       if (!pendingQuestions.resolve(questionMatch[1]!, body.answer.trim())) {
         json(res, 404, { error: 'unknown or already-answered question' })
@@ -1397,6 +2360,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     const planMatch = pathname.match(/^\/api\/plans\/([\w-]+)$/)
     if (planMatch && method === 'POST') {
       const body = await bodyJson(req, 4096)
+      assertSessionSame()
       if (body.decision !== 'approve' && body.decision !== 'reject') throw new HttpError(400, 'decision must be approve or reject')
       if (!pendingPlans.resolve(planMatch[1]!, body.decision)) {
         json(res, 404, { error: 'unknown or already-resolved plan' })
@@ -1426,6 +2390,24 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       return
     }
 
+    if (pathname === '/api/sessions/archived' && method === 'GET') {
+      const sessions = await ctx.sessions.list({ archived: true })
+      assertWorkspaceSame()
+      json(res, 200, { workspaceId: workspaceId(), sessions: sessions.map(session => ({ ...session, deleteBlocked: sessionDeletionBlock(session.id) })) })
+      return
+    }
+
+    const archiveMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/archive$/)
+    if (archiveMatch && method === 'POST') {
+      const id = decodeSessionId(archiveMatch[1]!)
+      const body = await bodyJson(req, 4096)
+      assertWorkspaceSame()
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      if (typeof body.archived !== 'boolean') throw new HttpError(400, '归档状态必须为布尔值。')
+      json(res, 200, await archiveSession(id, body.archived))
+      return
+    }
+
     const renameMatch = pathname.match(/^\/api\/sessions\/([^/]+)$/)
     if (renameMatch && method === 'PATCH') {
       const id = decodeSessionId(renameMatch[1]!)
@@ -1449,10 +2431,127 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       return
     }
 
+    if (pathname === '/api/sessions/batch-delete' && method === 'POST') {
+      const body = await bodyJson(req, 32 * 1024)
+      assertWorkspaceSame()
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      if (!Array.isArray(body.ids) || body.ids.length < 1 || body.ids.length > 100 || body.ids.some(id => !isSessionId(id))) {
+        throw new HttpError(400, 'select 1-100 valid session IDs')
+      }
+      const unique = new Map<string, string>()
+      for (const id of body.ids as string[]) unique.set(process.platform === 'win32' ? id.toLowerCase() : id, id)
+      const ids = [...unique.values()]
+      json(res, 200, await deleteSessions(ids))
+      return
+    }
+
     const deleteMatch = pathname.match(/^\/api\/sessions\/([^/]+)$/)
     if (deleteMatch && method === 'DELETE') {
       const id = decodeSessionId(deleteMatch[1]!)
       json(res, 200, await deleteSession(id))
+      return
+    }
+
+    const historyMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/history\/(preview|edit|rewind)$/)
+    if (historyMatch && method === 'POST') {
+      const id = decodeSessionId(historyMatch[1]!), action = historyMatch[2]!
+      const body = await bodyJson(req, 256 * 1024)
+      assertSessionSame()
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      if (!sameSession(mainAgent().sessionId, id)) throw new HttpError(409, '请先恢复此会话，再编辑或回滚；只读历史不会修改代码。')
+      if (!Number.isSafeInteger(body.turnSeq) || Number(body.turnSeq) < 1) throw new HttpError(400, '需要已保存的用户消息序号。')
+      const mount = ctx, history = new ConversationHistoryService(mount.sessions, mount.checkpoints)
+      const restoresCode = action !== 'preview' && (body.mode === 'code' || body.mode === 'both')
+      const codeRestoreBlockedReason = (): string => mount.jobs?.list().some(job => job.status === 'running')
+        ? '后台命令仍在运行，暂不能恢复代码；可选择只回滚对话（保留代码和后台任务），或停止后台任务后刷新预览。' : ''
+      const assertHistoryIdle = (): void => {
+        if (closed || mount !== ctx || workspaceEpochAtEntry !== workspaceEpoch || sessionEpochAtEntry !== sessionEpoch || switching || switchingWorkspace ||
+            !sameSession(mainAgent().sessionId, id)) throw new HttpError(409, '工作区或对话已改变，本次编辑或回滚未继续。')
+        if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+        assertAgentsIdle()
+        if (pending.snapshot().length || pendingQuestions.snapshot().length || pendingPlans.snapshot().length || pendingRetries.snapshot().length) throw new HttpError(409, '请先处理审批、问题、计划或重试确认。')
+        if (mount.agents.list().some(agent => mount.peek<CompactionService>('compaction')?.isCompacting(agent.sessionId))) throw new HttpError(409, '上下文正在压缩，请稍后再编辑或回滚。')
+        // A long-lived preview/dev server must not block a read-only preview or
+        // an independent conversation branch. Only restoring project files can
+        // race its side effects; recheck that gate throughout the transaction.
+        const blocked = restoresCode ? codeRestoreBlockedReason() : ''
+        if (blocked) throw new HttpError(409, blocked)
+      }
+      assertHistoryIdle()
+      if (action === 'preview') {
+        const preview = await history.preview(id, Number(body.turnSeq))
+        assertSessionSame(); assertHistoryIdle()
+        json(res, 200, { ...preview, codeRestoreBlockedReason: codeRestoreBlockedReason(), workspaceId: workspaceId() })
+        return
+      }
+      if (body.confirmed !== true || !Number.isSafeInteger(body.contextRevision) || typeof body.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(body.fingerprint)) {
+        throw new HttpError(400, '请先预览影响范围，并明确确认对话与代码版本。')
+      }
+      if (!['conversation', 'code', 'both'].includes(String(body.mode))) throw new HttpError(400, '回滚范围必须为对话、代码或两者。')
+      if (action === 'edit' && (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 64_000 || body.mode === 'code')) {
+        throw new HttpError(400, '编辑消息须为 1～64,000 字符；可选择是否同时回滚代码。')
+      }
+      contextOperation = { action: action as 'edit' | 'rewind', sessionId: id }
+      broadcast({ type: 'context/status', ...contextOperation, active: true })
+      void refreshState()
+      let result: Awaited<ReturnType<ConversationHistoryService['rewind']>>
+      try {
+        const task = action === 'edit' ? await prepareUserTask((body.text as string).trim()) : undefined
+        assertHistoryIdle()
+        result = await history.rewind({ sessionId: id, turnSeq: Number(body.turnSeq), contextRevision: Number(body.contextRevision),
+          fingerprint: body.fingerprint, mode: body.mode as HistoryMode,
+          ...(task !== undefined ? { edit: { task, originalText: (body.text as string).trim() } } : {}),
+        }, assertHistoryIdle)
+        if (result.session.id !== id) {
+          pending.cancel(); pendingQuestions.cancel(); pendingPlans.cancel(); pendingRetries.cancel()
+          mount.agents.disposeAll()
+          sessionEpoch++; expertEpoch++
+          expertMode = false; expertIds.clear()
+          mount.approval.engine.clearSessionAllows()
+          const todos = mount.peek<{ todos: unknown[] }>('todos')
+          if (todos) todos.todos = []
+          harness.main({ resumeSessionId: result.session.id }); applySelectedModel()
+        }
+        contextCache = null; statsCache = null
+        mount.emit('session/branched', { sessionId: result.session.id, sourceId: id })
+        broadcast({ type: 'session/rewound', sessionId: result.session.id, sourceId: id, mode: body.mode,
+          action, restoredFiles: result.restoredFiles, workspaceId: workspaceId() })
+      } finally {
+        contextOperation = null
+        broadcast({ type: 'context/status', action, sessionId: id, active: false })
+      }
+      await refreshState()
+      json(res, 200, { ok: true, sessionId: result.session.id, sourceId: id, restoredFiles: result.restoredFiles, workspaceId: workspaceId(),
+        edited: action === 'edit', generated: false })
+      return
+    }
+
+    // Separate regeneration from the branch commit: a network failure can never
+    // silently edit a second time or cause automatic duplicate model requests.
+    if (pathname === '/api/conversation/generate' && method === 'POST') {
+      const body = await bodyJson(req, 4096)
+      assertSessionSame()
+      if (!isSessionId(body.sessionId) || !sameSession(mainAgent().sessionId, body.sessionId)) throw new HttpError(409, '当前编辑分支已改变，未重新生成。')
+      assertAgentsIdle()
+      const mount = ctx, main = mainAgent()
+      contextOperation = { action: 'edit', sessionId: body.sessionId }
+      try {
+        const session = await mount.sessions.open(body.sessionId)
+        if (closed || mount !== ctx || sessionEpochAtEntry !== sessionEpoch || workspaceEpochAtEntry !== workspaceEpoch || main !== mainAgent()) throw new HttpError(409, '编辑分支已改变。')
+        assertAgentsIdle()
+        const last = session.events.at(-1)
+        if (!last || last.type !== 'user/message' || !session.events.some(record => record.type === 'agent/meta' && record.payload.action === 'edit')) {
+          throw new HttpError(409, '此编辑分支已经生成或已改变，未重复请求模型。')
+        }
+        if (pending.snapshot().length || pendingQuestions.snapshot().length || pendingPlans.snapshot().length || pendingRetries.snapshot().length ||
+            mount.agents.list().some(agent => mount.peek<CompactionService>('compaction')?.isCompacting(agent.sessionId))) throw new HttpError(409, '请先完成待处理操作。')
+        if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+        await session.append({ type: 'session/note', payload: { note: 'generation-start', userSeq: last.seq } })
+        // A durable claim prevents double submits and a duplicate user message.
+        void main.turn(last.payload.content, { resumeUserSeq: last.seq, originalText: last.payload.originalText }).catch(error =>
+          broadcast({ type: 'notice', level: 'error', message: error instanceof Error ? error.message : String(error) }))
+      } finally { contextOperation = null }
+      json(res, 202, { ok: true })
       return
     }
 
@@ -1462,8 +2561,10 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       assertWorkspaceSame()
       try {
         const session = await ctx.sessions.open(id)
-        json(res, 200, { records: session.events })
-      } catch {
+        assertWorkspaceSame()
+        json(res, 200, { records: session.events, turnSummaries: recordedTurnSummaries(session.events) })
+      } catch (error) {
+        if (error instanceof HttpError || error instanceof SessionError && error.code === 'EBUSY') throw error
         json(res, 404, { error: `session "${id}" not found` })
       }
       return
@@ -1480,12 +2581,14 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       }
       try {
         const md = await exporter.toMarkdown(id)
+        assertWorkspaceSame()
         res.writeHead(200, {
           'content-type': 'text/markdown; charset=utf-8',
           'content-disposition': `attachment; filename="${id}.md"`,
         })
         res.end(md)
       } catch (error) {
+        if (error instanceof HttpError || error instanceof SessionError && error.code === 'EBUSY') throw error
         json(res, 404, { error: error instanceof Error ? error.message : `session "${id}" not found` })
       }
       return
@@ -1555,14 +2658,17 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     if (agentInterruptMatch && method === 'POST') {
       const id = decodeURIComponent(agentInterruptMatch[1]!)
       const ok = ctx.agents.interrupt(id)
-      if (ok) pending.cancel(id)
+      if (ok) { pending.cancel(id); pendingRetries.cancel(id) }
       json(res, ok ? 200 : 404, ok ? { ok: true } : { error: 'agent not found or not running' })
       return
     }
 
     if (pathname === '/api/settings' && method === 'POST') {
       const body = await bodyJson(req)
-      assertWorkspaceSame()
+      assertSessionSame()
+      if (sakuraApiOnly && ['baseURL', 'apiKey', 'provider', 'format'].some(key => Object.hasOwn(body, key))) {
+        throw new HttpError(400, '桌面版只允许 SakuraAPI 授权的上游，不能填写地址或 Key。')
+      }
       // Validate the entire patch before changing permissions or live routing.
       // In particular, an invalid model must not partially relax approval mode.
       const levels = ['off', 'low', 'medium', 'high'] as const
@@ -1614,7 +2720,18 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       }
       // No await between validation and commit: a turn cannot start halfway
       // through this patch. Approval-only edits remain available mid-turn.
-      modelUpdate?.commit()
+      if (sakuraApiOnly && typeof body.model === 'string') {
+        settingsUpdating = true
+        try {
+          await sakuraAccount!.selectModel(body.model)
+          if (closed) throw new HttpError(503, 'server is shutting down')
+          ctx.llm.replaceAdapters(sakuraAccount!.adapter())
+          overrides.model = body.model
+        } catch (error) {
+          if (error instanceof SakuraApiError) throw new HttpError(error.status, error.message)
+          throw error
+        } finally { settingsUpdating = false }
+      } else modelUpdate?.commit()
       if (body.model !== undefined) applySelectedModel()
       if (body.thinking !== undefined) ctx.llm.setThinking(body.thinking as (typeof levels)[number])
       if (body.approvalMode !== undefined) ctx.approval.setMode(body.approvalMode as ApprovalMode)
@@ -1627,6 +2744,12 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     if (pathname === '/api/models/upstream' && method === 'POST') {
       assertWorkspaceSame()
       const body = await bodyJson(req, 4096) as { baseURL?: unknown; apiKey?: unknown }
+      assertWorkspaceSame()
+      if (sakuraApiOnly) {
+        if (body.baseURL !== undefined || body.apiKey !== undefined) throw new HttpError(400, '桌面版只使用 SakuraAPI 授权同步的模型，不允许指定地址或 Key。')
+        json(res, 200, { models: sakuraAccount!.status().models })
+        return
+      }
       if (typeof body.baseURL !== 'string' || !body.baseURL) throw new HttpError(400, 'baseURL is required')
       if (body.apiKey !== undefined && (typeof body.apiKey !== 'string' || body.apiKey.length > 4096 || /[\x00-\x20\x7f]/.test(body.apiKey))) {
         throw new HttpError(400, 'API key contains invalid whitespace or control characters')
@@ -1663,6 +2786,11 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
         provider?: unknown
       }
       assertWorkspaceSame()
+      if (sakuraApiOnly) {
+        if (['baseURL', 'apiKey', 'rememberKey', 'format', 'provider', 'model'].some(key => Object.hasOwn(body, key))) {
+          throw new HttpError(400, '桌面版上游固定为 SakuraAPI；Key 与模型请使用官网授权和模型选择器同步，不允许手填。')
+        }
+      }
       const patch: {
         workspace?: string; baseURL?: string; model?: string; apiKey?: string; rememberKey?: boolean
         create?: boolean; newWorkspaceDir?: string | null; sessionDir?: string | null; agents?: string[] | null
@@ -1820,16 +2948,28 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     const failed = (error: Error): void => {
       clearInterval(heartbeat)
       updateChecker.close()
+      pluginMarketplace.close()
       access.dispose()
       harness.dispose()
       reject(error)
     }
     server.once('error', failed)
-    server.listen(requestedPort, host, () => {
-      server.off('error', failed)
-      const address = server.address()
-      resolve(typeof address === 'object' && address ? address.port : (opts.port ?? 0))
-    })
+    const listen = (attempt: number): void => {
+      server.listen(requestedPort, host, () => {
+        const address = server.address()
+        const port = typeof address === 'object' && address ? address.port : requestedPort
+        if (requestedPort === 0 && BLOCKED_WEB_PORTS.has(port)) {
+          server.close(() => {
+            if (attempt >= 31) failed(new Error('cannot allocate a browser-compatible Web port'))
+            else listen(attempt + 1)
+          })
+          return
+        }
+        server.off('error', failed)
+        resolve(port)
+      })
+    }
+    listen(0)
   })
   const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host === '::' ? '[::1]' : host.includes(':') ? `[${host}]` : host
   const url = access.publicOrigin ? access.publicOrigin + '/' : `http://${displayHost}:${port}/`
@@ -1844,10 +2984,10 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       workspace: () => ({
         id: workspaceId(), name: path.basename(workspaceCwd) || '当前工作区',
         agents: ctx.agents.list().map(agent => ({ id: agent.id, name: agent.name, role: agent.meta.role ?? 'sub', status: agent.status, model: agent.model })),
-        pendingCount: pending.snapshot().length + pendingQuestions.snapshot().length + pendingPlans.snapshot().length,
+        pendingCount: pending.snapshot().length + pendingQuestions.snapshot().length + pendingPlans.snapshot().length + pendingRetries.snapshot().length,
       }),
       command: action => {
-        if (closed || settingsUpdating || switchingWorkspace || switching || deletingSession || action.workspaceId !== workspaceId()) {
+        if (closed || settingsUpdating || switchingWorkspace || switching || deletingSession || contextOperation || action.workspaceId !== workspaceId()) {
           throw new Error('workspace unavailable')
         }
         const agent = action.agentId ? ctx.agents.get(action.agentId) : mainAgent()
@@ -1857,6 +2997,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
           pending.cancel(agent.id)
           pendingQuestions.cancel(agent.id)
           pendingPlans.cancel(agent.id)
+          pendingRetries.cancel(agent.id)
           return `已请求停止 ${agent.name} 的当前回合，排队任务不会删除。`
         }
         const text = action.text?.trim()
@@ -1871,7 +3012,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     weixin.start()
   }
 
-  if (autoUpdateCheck) scheduleUpdateCheck(updateInitialDelay)
+  if (autoUpdateCheck()) scheduleUpdateCheck(updateInitialDelay)
   if (opts.open !== false) openBrowser(url)
   if (!opts.quiet) {
     console.log(`SakuraCode Web GUI → ${url}  (cwd: ${workspaceCwd})`)
@@ -1895,18 +3036,29 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     get harness() {
       return harness
     },
+    updateDesktopViewport(value) {
+      const viewport = parseDesktopViewport(value)
+      if (closed || !opts.onWindowAction || access.remote || !viewport || viewport.version <= (desktopViewport?.version ?? 0)) return
+      desktopViewport = viewport
+      broadcast({ type: 'desktop/viewport', viewport })
+    },
     async close() {
       if (closed) return
       closed = true
+      shutdownController.abort()
       clearInterval(heartbeat)
+      if (stateRefreshTimer !== undefined) clearTimeout(stateRefreshTimer)
       if (updateTimer !== undefined) clearTimeout(updateTimer)
       updateChecker.close()
+      pluginMarketplace.close()
       await updateInFlight
+      await sakuraAccount?.close()
       await weixin?.close()
       ctx.agents.disposeAll()
       pending.cancel()
       pendingQuestions.cancel()
       pendingPlans.cancel()
+      pendingRetries.cancel()
       access.dispose()
       for (const res of clients.keys()) res.destroy()
       clients.clear()

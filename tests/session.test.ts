@@ -1,4 +1,6 @@
 import { promises as fs } from 'node:fs'
+import nodeFs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -13,6 +15,8 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
+  syncBuiltinESMExports()
   await fs.rm(tmpRoot, { recursive: true, force: true })
 })
 
@@ -26,6 +30,123 @@ const readLines = async (file: string): Promise<string[]> => {
 // ---------------------------------------------------------------------------
 // Session.append — the append-only JSONL log
 // ---------------------------------------------------------------------------
+
+describe('Session activity metadata', () => {
+  it('projects explicit expert ownership across cold listings without guessing from names or changing logs', async () => {
+    const service = new SessionService(tmpRoot)
+    const expert = await service.create({ agent: '架构师', role: 'sub', expert: 'architect' })
+    const ordinary = await service.create({ agent: '架构师', title: '架构师', role: 'sub' })
+    await expert.append({ type: 'user/message', payload: { content: 'shared task' } })
+    const original = await fs.readFile(expert.file, 'utf8')
+    const rows = await new SessionService(tmpRoot).list()
+    expect(rows.find(row => row.id === expert.id)?.expert).toBe('architect')
+    expect(rows.find(row => row.id === ordinary.id)?.expert).toBeUndefined()
+    expect(await fs.readFile(expert.file, 'utf8')).toBe(original)
+    expect(rows).toHaveLength(2)
+  })
+
+  it('streams cold listings, reuses compact summaries and rereads only changed logs', async () => {
+    const svc = new SessionService(tmpRoot)
+    const first = await svc.create(), second = await svc.create()
+    await first.append({ type: 'user/message', payload: { content: 'first history' } })
+    await second.append({ type: 'user/message', payload: { content: 'second history' } })
+    await first.append({ type: 'tool/result', payload: { id: 'large', name: 'read', output: 'PRIVATE_OUTPUT'.repeat(100_000), durationMs: 1 } })
+    const stream = vi.spyOn(nodeFs, 'createReadStream')
+    syncBuiltinESMExports()
+    const fullRead = vi.spyOn(fs, 'readFile')
+    const before = await svc.list()
+    expect(stream).toHaveBeenCalledTimes(2)
+    expect(fullRead).not.toHaveBeenCalled()
+    expect(JSON.stringify(before)).not.toContain('PRIVATE_OUTPUT')
+    await Promise.all(Array.from({ length: 6 }, () => svc.list()))
+    expect(stream).toHaveBeenCalledTimes(2)
+    before[0]!.title = 'caller mutation'
+    before[0]!.activity!.lastTask = 'caller mutation'
+    expect(JSON.stringify(await svc.list())).not.toContain('caller mutation')
+    await svc.rename(first.id, 'updated title')
+    expect((await svc.list()).find(row => row.id === first.id)?.title).toBe('updated title')
+    expect(stream).toHaveBeenCalledTimes(3)
+    await svc.setArchived(first.id, true)
+    expect((await svc.list()).map(row => row.id)).toEqual([second.id])
+    expect((await svc.list({ archived: true }))[0]?.id).toBe(first.id)
+    expect(stream).toHaveBeenCalledTimes(4)
+    await svc.delete(first.id)
+    expect((await svc.list({ archived: 'all' })).map(row => row.id)).toEqual([second.id])
+  })
+
+  it('coalesces concurrent cold scans without retaining complete session records', async () => {
+    const session = await new SessionService(tmpRoot).create()
+    await session.append({ type: 'user/message', payload: { content: 'only one stream' } })
+    const svc = new SessionService(tmpRoot), stream = vi.spyOn(nodeFs, 'createReadStream')
+    syncBuiltinESMExports()
+    const results = await Promise.all(Array.from({ length: 10 }, () => svc.list()))
+    expect(stream).toHaveBeenCalledOnce()
+    expect(results.every(rows => rows[0]?.activity?.lastTask === 'only one stream')).toBe(true)
+    expect((svc as unknown as { sessions: Map<string, unknown> }).sessions.size).toBe(0)
+  })
+
+  it('invalidates changed, truncated and link-replaced histories even when an earlier projection is cached', async () => {
+    const svc = new SessionService(tmpRoot), session = await svc.create()
+    await session.append({ type: 'user/message', payload: { content: 'original history' } })
+    await svc.list()
+    const outside = path.join(tmpRoot, 'external.jsonl')
+    const replacement = JSON.stringify({ seq: 1, time: '2026-04-01T00:00:00.000Z', type: 'user/message', payload: { content: 'external replacement' } }) + '\n'
+    await fs.writeFile(session.file, replacement)
+    expect((await svc.list())[0]).toMatchObject({ events: 1, title: 'external replacement' })
+    await fs.truncate(session.file, 0)
+    expect((await svc.list())[0]).toMatchObject({ events: 0, title: null, activity: { status: 'empty' } })
+    await fs.writeFile(outside, replacement)
+    await fs.unlink(session.file)
+    await fs.symlink(outside, session.file, 'file')
+    expect(await svc.list()).toEqual([])
+    expect(await fs.readFile(outside, 'utf8')).toBe(replacement)
+  })
+
+  it('does not reuse another root\'s summary for an identical session id', async () => {
+    const a = path.join(tmpRoot, 'a'), b = path.join(tmpRoot, 'b')
+    await new Session('same-id', path.join(a, 'same-id')).append({ type: 'user/message', payload: { content: 'root a' } })
+    await new Session('same-id', path.join(b, 'same-id')).append({ type: 'user/message', payload: { content: 'root b' } })
+    const svc = new SessionService(a)
+    expect((await svc.list())[0]?.title).toBe('root a')
+    svc.root = b
+    expect((await svc.list())[0]?.title).toBe('root b')
+    svc.root = a
+    expect((await svc.list())[0]?.title).toBe('root a')
+  })
+
+  it('projects bounded task/tool status without system prompts, arguments, reasoning or tool output', async () => {
+    const service = new SessionService(tmpRoot)
+    const session = await service.create()
+    await session.append({ type: 'system/message', payload: { content: 'PRIVATE_SYSTEM' } })
+    await session.append({ type: 'user/message', payload: { content: 'latest task '.repeat(40) } })
+    await session.append({ type: 'tool/call', payload: { id: 'a', name: 'read', arguments: 'PRIVATE_ARGUMENTS' } })
+    await session.append({ type: 'tool/result', payload: { id: 'a', name: 'read', output: 'PRIVATE_OUTPUT', durationMs: 1 } })
+    await session.append({ type: 'tool/call', payload: { id: 'b', name: 'write', arguments: '{}' } })
+    await session.append({ type: 'tool/result', payload: { id: 'b', name: 'write', output: 'PRIVATE_ERROR', isError: true, durationMs: 1 } })
+    const final = await session.append({ type: 'assistant/attempt', payload: { error: 'cancelled' } })
+    const row = (await service.list())[0]!
+    expect(row.updatedAt).toBe(final.time)
+    expect(row.activity).toMatchObject({ status: 'cancelled', lastTool: 'write', toolCalls: 2, completedTools: 1, failedTools: 1 })
+    expect(row.activity?.lastTask).toHaveLength(180)
+    expect(JSON.stringify(row)).not.toContain('PRIVATE_')
+  })
+
+  it('orders by actual recent activity and ignores an incomplete final log write', async () => {
+    const service = new SessionService(tmpRoot)
+    const first = await service.create()
+    const second = await service.create()
+    const raw = [
+      { seq: 1, time: '2026-01-01T00:00:00.000Z', type: 'user/message', payload: { content: 'updated first' } },
+      { seq: 2, time: '2026-03-01T00:00:00.000Z', type: 'assistant/message', payload: { role: 'assistant', content: 'done', stream: stream() } },
+    ]
+    await fs.writeFile(first.file, raw.map(row => JSON.stringify(row)).join('\n') + '\n{"torn":')
+    await fs.writeFile(second.file, JSON.stringify({ seq: 1, time: '2026-02-01T00:00:00.000Z', type: 'user/message', payload: { content: 'older second' } }) + '\n')
+    const rows = await service.list()
+    expect(rows.map(row => row.id)).toEqual([first.id, second.id])
+    expect(rows[0]).toMatchObject({ events: 2, updatedAt: raw[1]!.time, activity: { status: 'done' } })
+    expect(rows[1]?.activity?.status).toBe('unfinished')
+  })
+})
 
 describe('Session.append', () => {
   it('appends JSON lines with increasing seq and returns the record', async () => {
@@ -56,6 +177,32 @@ describe('Session.append', () => {
     expect(s.events[1]!.seq).toBe(2)
     expect(s.file).toBe(path.join(s.dir, 'session.jsonl'))
   })
+
+  it('publishes only committed records and recovers after a failed concurrent append', async () => {
+    const s = new Session('failed-write', path.join(tmpRoot, 'failed-write'))
+    const seen: SessionEventRecord[] = []
+    s.subscribe(record => seen.push(record))
+    const original = fs.appendFile.bind(fs)
+    let release!: () => void, entered!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const spy = vi.spyOn(fs, 'appendFile').mockImplementationOnce(async () => {
+      entered(); await held; throw new Error('synthetic log disk failure')
+    }).mockImplementation(original)
+    try {
+      const rejected = expect(s.append({ type: 'user/message', payload: { content: 'MUST_NOT_ENTER_CONTEXT' } })).rejects.toThrow('synthetic log disk failure')
+      const next = s.append({ type: 'user/message', payload: { content: 'COMMITTED_AFTER_FAILURE' } })
+      await started
+      expect(s.events).toEqual([])
+      expect(seen).toEqual([])
+      release(); await rejected
+      const committed = await next
+      expect(s.events).toEqual([committed])
+      expect(seen).toEqual([committed])
+      expect(s.deriveMessages()).toEqual([{ role: 'user', content: 'COMMITTED_AFTER_FAILURE' }])
+      expect((await readLines(s.file)).map(line => JSON.parse(line))).toEqual([committed])
+    } finally { release(); spy.mockRestore() }
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -63,7 +210,7 @@ describe('Session.append', () => {
 // ---------------------------------------------------------------------------
 
 describe('Session.subscribe', () => {
-  it('fires listeners synchronously on every append', async () => {
+  it('fires listeners before a committed append resolves', async () => {
     const s = new Session('s-3', path.join(tmpRoot, 's3'))
     const seen: SessionEventRecord[] = []
     s.subscribe((event) => seen.push(event))
@@ -215,6 +362,33 @@ describe('SessionService', () => {
     await expect(svc.open('linked')).rejects.toMatchObject({ code: 'EINVAL' })
     expect(await svc.list()).toEqual([])
     expect(await fs.readFile(external.file, 'utf8')).toContain('must survive')
+  })
+
+  it('revalidates cached handles and refuses a directory replaced with an external junction', async () => {
+    const svc = new SessionService(path.join(tmpRoot, 'sessions'))
+    const session = await svc.create()
+    const outside = new Session('external', path.join(tmpRoot, 'external'))
+    await outside.append({ type: 'user/message', payload: { content: 'EXTERNAL_DIRECTORY_MUST_SURVIVE' } })
+    await fs.rm(session.dir, { recursive: true })
+    await fs.symlink(outside.dir, session.dir, process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(svc.delete(session.id)).rejects.toMatchObject({ code: 'EINVAL' })
+    expect(await fs.readFile(outside.file, 'utf8')).toContain('EXTERNAL_DIRECTORY_MUST_SURVIVE')
+    expect((await fs.lstat(session.dir)).isSymbolicLink()).toBe(true)
+    await fs.rm(session.dir, { recursive: true })
+    await expect(svc.delete(session.id)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(session.append({ type: 'session/note', payload: { late: true } })).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.stat(session.dir)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('refuses a session log that is not a regular file, even when the handle is cached', async () => {
+    const svc = new SessionService(tmpRoot)
+    const session = await svc.create()
+    await fs.unlink(session.file)
+    await fs.mkdir(session.file)
+    await fs.writeFile(path.join(session.file, 'keep.txt'), 'do not delete a non-log directory')
+    await expect(svc.delete(session.id)).rejects.toMatchObject({ code: 'EINVAL' })
+    expect(await fs.readFile(path.join(session.file, 'keep.txt'), 'utf8')).toBe('do not delete a non-log directory')
+    expect(await svc.list()).toEqual([])
   })
 
   it('keeps identical IDs isolated when the storage root changes, including a pending open', async () => {
@@ -383,6 +557,51 @@ describe('Session.deriveMessages', () => {
     const messages = s.deriveMessages()
     expect(messages).toHaveLength(3)
     expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool'])
+  })
+
+  it('a durable clear preserves the latest system prompt and history but drops summaries and old tool pairs', async () => {
+    const session = new Session('context-reset', path.join(tmpRoot, 'context-reset'))
+    await session.append({ type: 'system/message', payload: { content: 'system rules' } })
+    await session.append({ type: 'user/message', payload: { content: 'old user message' } })
+    await session.append({ type: 'session/note', payload: { note: 'compaction', summary: 'old summary' } })
+    const call: ToolCallId = { id: 'old-call', type: 'function', function: { name: 'read', arguments: '{}' } }
+    await session.append({ type: 'assistant/message', payload: { role: 'assistant', content: null, tool_calls: [call], stream: stream([call]) } })
+    const prefix = await fs.readFile(session.file, 'utf8')
+    await session.clearContext()
+    await session.append({ type: 'tool/result', payload: { id: 'old-call', name: 'read', output: 'late old output', durationMs: 1 } })
+    await session.append({ type: 'user/message', payload: { content: 'fresh question' } })
+    expect(session.deriveMessages()).toEqual([{ role: 'system', content: 'system rules' }, { role: 'user', content: 'fresh question' }])
+    expect((await fs.readFile(session.file, 'utf8')).startsWith(prefix)).toBe(true)
+    const restored = await new SessionService(tmpRoot).open(session.id)
+    expect(restored.deriveMessages()).toEqual(session.deriveMessages())
+  })
+
+  it('a failed clear write leaves model projection and sequence intact', async () => {
+    const session = new Session('clear-fail', path.join(tmpRoot, 'clear-fail'))
+    await session.append({ type: 'user/message', payload: { content: 'must not forget' } })
+    const before = session.deriveMessages()
+    const denied = vi.spyOn(fs, 'appendFile').mockRejectedValueOnce(Object.assign(new Error('denied'), { code: 'EACCES' }))
+    try { await expect(session.clearContext()).rejects.toThrow('denied') } finally { denied.mockRestore() }
+    expect(session.deriveMessages()).toEqual(before)
+    expect(session.events).toHaveLength(1)
+    expect((await session.append({ type: 'user/message', payload: { content: 'next' } })).seq).toBe(2)
+  })
+
+  it('excludes concurrent append and deletion while a clear marker is being persisted', async () => {
+    const session = new Session('clear-busy', path.join(tmpRoot, 'clear-busy'))
+    await session.append({ type: 'user/message', payload: { content: 'old history' } })
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const append = fs.appendFile.bind(fs)
+    const writing = vi.spyOn(fs, 'appendFile').mockImplementationOnce(async (...args: Parameters<typeof fs.appendFile>) => { await gate; return append(...args) })
+    const clear = session.clearContext()
+    try {
+      await expect(session.append({ type: 'user/message', payload: { content: 'cannot interleave' } })).rejects.toMatchObject({ code: 'EBUSY' })
+      await expect(session.delete()).rejects.toMatchObject({ code: 'EBUSY' })
+      await expect(session.clearContext()).rejects.toMatchObject({ code: 'EBUSY' })
+    } finally { release(); await clear; writing.mockRestore() }
+    expect(session.deriveMessages()).toEqual([])
+    expect(session.events.at(-1)?.seq).toBe(2)
   })
 })
 

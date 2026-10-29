@@ -1,11 +1,22 @@
 /** Stable-release checks. Failures retain the last known result; notices are claimed once per version. */
+import { isLoopbackHost } from './web/access.js'
+
+/** App-scoped preferences. An empty URL restores the official GitHub feed. */
+export interface UpdateSettings { feedUrl: string; autoCheck: boolean }
 
 export interface UpdateInfo {
   current: string
   latest?: string
   hasUpdate: boolean
-  /** Canonical HTTPS link to this project's release tag, never an arbitrary feed URL. */
+  /** Canonical GitHub tag, or a same-origin page on an explicitly configured update server. */
   releaseUrl?: string
+  /** Custom manifests are accepted only from the selected source. No automatic execution/install. */
+  sourceUrl?: string
+  downloadUrl?: string
+  sha256?: string
+  size?: number
+  notes?: string
+  publishedAt?: string
   /** Last completed check attempt, including a failed attempt. */
   checkedAt?: string
   error?: string
@@ -20,6 +31,33 @@ export interface UpdateCheckerOptions {
 export const DEFAULT_UPDATES_URL = 'https://api.github.com/repos/Guyao146/SakuraCode/releases/latest'
 const RELEASE_TAG_URL = 'https://github.com/Guyao146/SakuraCode/releases/tag/'
 const MAX_BODY_BYTES = 1024 * 1024
+export const MAX_UPDATE_DOWNLOAD_BYTES = 512 * 1024 * 1024
+
+export function parseUpdateFeedUrl(value: unknown): string {
+  if (typeof value !== 'string' || value.length > 2048 || /[\x00-\x1f\x7f\\]/.test(value)) throw new Error('更新源必须是有效的 HTTPS 地址。')
+  const text = value.trim()
+  if (!text) return ''
+  let url: URL
+  try { url = new URL(text) } catch { throw new Error('更新源必须是有效的 HTTPS 地址。') }
+  if (url.username || url.password || url.search || url.hash ||
+    url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopbackHost(url.hostname))) {
+    throw new Error('更新源须使用 HTTPS，且不能包含账号、密码、查询参数或片段；HTTP 仅限本机测试。')
+  }
+  return url.href
+}
+
+export function parseUpdateSettings(value: unknown): UpdateSettings {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('无效更新设置。')
+  const row = value as Record<string, unknown>
+  if (Object.keys(row).some(key => !['feedUrl', 'autoCheck'].includes(key)) || typeof row.autoCheck !== 'boolean') throw new Error('无效更新设置字段。')
+  return { feedUrl: parseUpdateFeedUrl(row.feedUrl), autoCheck: row.autoCheck }
+}
+
+function sameOriginReleaseUrl(value: unknown, source: string): string {
+  const url = parseUpdateFeedUrl(value)
+  if (!url || new URL(url).origin !== new URL(source).origin) throw new Error('更新说明与下载地址必须与更新源同源。')
+  return url
+}
 
 interface Version {
   core: string[]
@@ -91,6 +129,7 @@ export class UpdateChecker {
     private readonly url: string = DEFAULT_UPDATES_URL,
     options: UpdateCheckerOptions = {},
   ) {
+    this.url = parseUpdateFeedUrl(url) || DEFAULT_UPDATES_URL
     this.fetcher = options.fetch ?? globalThis.fetch
     this.timeoutMs = options.timeoutMs ?? 10_000
     if (!Number.isInteger(this.timeoutMs) || this.timeoutMs <= 0 || this.timeoutMs > 2_147_483_647) {
@@ -200,7 +239,7 @@ export class UpdateChecker {
   private async query(signal: AbortSignal): Promise<UpdateInfo> {
     signal.throwIfAborted()
     const response = await this.fetcher(this.url, {
-      headers: { 'user-agent': `SakuraCode/${this.current}`, accept: 'application/vnd.github+json' },
+      headers: { 'user-agent': `SakuraCode/${this.current}`, accept: this.url === DEFAULT_UPDATES_URL ? 'application/vnd.github+json' : 'application/json' },
       credentials: 'omit', redirect: 'error', signal,
     })
     const cancelBody = (): void => { void response.body?.cancel().catch(() => {}) }
@@ -208,7 +247,7 @@ export class UpdateChecker {
       cancelBody()
       signal.throwIfAborted()
     }
-    if (!response.ok) {
+    if (!response.ok || response.redirected) {
       cancelBody()
       throw new Error(`update source returned ${response.status}`)
     }
@@ -245,6 +284,26 @@ export class UpdateChecker {
     const body: unknown = JSON.parse(contents)
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('update source returned an invalid release')
     const release = body as Record<string, unknown>
+    if (release.schemaVersion !== undefined) {
+      if (this.url === DEFAULT_UPDATES_URL || release.schemaVersion !== 1 || release.project !== 'SakuraCode' || release.platform !== 'windows-x64' ||
+        typeof release.version !== 'string') throw new Error('update source returned an invalid SakuraCode manifest')
+      const version = parseVersion(release.version)
+      if (version.prerelease.length || release.draft !== undefined && release.draft !== false || release.prerelease !== undefined && release.prerelease !== false) {
+        throw new Error('update source returned a draft or prerelease; stable releases only')
+      }
+      const releaseUrl = sameOriginReleaseUrl(release.releaseUrl, this.url)
+      let download: Pick<UpdateInfo, 'downloadUrl' | 'sha256' | 'size'> = {}
+      if (release.downloadUrl !== undefined || release.sha256 !== undefined || release.size !== undefined) {
+        if (typeof release.sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(release.sha256) || !Number.isSafeInteger(release.size) ||
+          (release.size as number) <= 0 || (release.size as number) > MAX_UPDATE_DOWNLOAD_BYTES) throw new Error('update source returned invalid download integrity metadata')
+        download = { downloadUrl: sameOriginReleaseUrl(release.downloadUrl, this.url), sha256: release.sha256.toLowerCase(), size: release.size as number }
+      }
+      if (release.notes !== undefined && (typeof release.notes !== 'string' || release.notes.length > 16000 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(release.notes))) throw new Error('update source returned invalid release notes')
+      if (release.publishedAt !== undefined && (typeof release.publishedAt !== 'string' || release.publishedAt.length > 80 || !Number.isFinite(Date.parse(release.publishedAt)))) throw new Error('update source returned an invalid release date')
+      return { current: this.current, latest: version.key, hasUpdate: compareVersions(this.current, release.version) < 0,
+        releaseUrl, sourceUrl: this.url, ...download, ...(typeof release.notes === 'string' ? { notes: release.notes } : {}),
+        ...(typeof release.publishedAt === 'string' ? { publishedAt: new Date(release.publishedAt).toISOString() } : {}), checkedAt: new Date().toISOString() }
+    }
     if (typeof release.tag_name !== 'string') throw new Error('update source returned no release tag')
     const tag = release.tag_name.trim()
     const version = parseVersion(tag)

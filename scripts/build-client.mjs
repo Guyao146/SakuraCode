@@ -24,6 +24,10 @@ if (!existsSync('src/web/index.html')) {
   process.exit(1)
 }
 const webHtml = readFileSync('src/web/index.html', 'utf8')
+const vipAssets = Object.fromEntries(Array.from({ length: 10 }, (_, index) => {
+  const name = `vip-${index + 1}.png`
+  return [name, readFileSync(path.join(root, 'src', 'web', 'assets', 'vip', name)).toString('base64')]
+}))
 
 rmSync('build', { recursive: true, force: true })
 mkdirSync('build', { recursive: true })
@@ -40,12 +44,12 @@ await build({
     {
       name: 'sakura-embed-web',
       setup(b) {
-        b.onResolve({ filter: /^sakura-web-index-embed$/ }, () => ({
-          path: 'sakura-web-index-embed',
+        b.onResolve({ filter: /^sakura-web-(?:index|vip)-embed$/ }, (args) => ({
+          path: args.path,
           namespace: 'sakura-embed',
         }))
-        b.onLoad({ filter: /.*/, namespace: 'sakura-embed' }, () => ({
-          contents: `export default ${JSON.stringify(webHtml)}`,
+        b.onLoad({ filter: /.*/, namespace: 'sakura-embed' }, (args) => ({
+          contents: `export default ${JSON.stringify(args.path === 'sakura-web-index-embed' ? webHtml : vipAssets)}`,
           loader: 'js',
         }))
       },
@@ -69,5 +73,7 @@ writeFileSync(
 )
 sh('node --experimental-sea-config build/sea-config.json')
 copyFileSync(process.execPath, 'build/SakuraCode.exe')
-sh(`node ${JSON.stringify(path.join(root, 'node_modules', 'postject', 'dist', 'cli.js'))} build/SakuraCode.exe NODE_SEA_BLOB build/sea-prep.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2`)
+// postject's WASM parser can exhaust native memory when V8 compiles it in
+// parallel. These flags affect only the injector, not the packaged runtime.
+sh(`node --liftoff-only --wasm-num-compilation-tasks=1 ${JSON.stringify(path.join(root, 'node_modules', 'postject', 'dist', 'cli.js'))} build/SakuraCode.exe NODE_SEA_BLOB build/sea-prep.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2`)
 console.log('\nDone: build/SakuraCode.exe')

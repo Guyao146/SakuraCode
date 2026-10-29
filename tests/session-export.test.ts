@@ -74,11 +74,13 @@ describe('session-export', () => {
       payload: { id: 'c1', name: 'bash', output: 'boom', isError: true, durationMs: 3, images: ['data:image/png;base64,AAAA'] },
     })
     await session.append({ type: 'session/note', payload: { note: 'compaction', summary: 's' } })
+    await session.clearContext()
     const md = await exporter.toMarkdown(session.id)
     expect(md).toContain('⚠ 出错')
     expect(md).toContain('[图片 ×1]')
     expect(md).not.toContain('data:image')
     expect(md).toContain('[上下文已压缩]')
+    expect(md).toContain('[上下文已清空，历史记录保留]')
   })
 
   it('toJson drops meta/system and collapses images to counts', async () => {

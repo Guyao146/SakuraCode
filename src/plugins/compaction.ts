@@ -18,13 +18,18 @@ import type { Context, Plugin } from '../kernel/index.js'
 import type { LLMService } from '../core/llm.js'
 import type { SessionService } from '../core/session.js'
 import type { SessionEventRecord } from '../core/types.js'
-import { estimateMessagesTokens } from '../util/tokens.js'
+import type { ToolsService } from '../core/tools.js'
+import { DEFAULT_CONTEXT_WINDOW_TOKENS, estimateRequestContextTokens, lastContextMarkerIndex as lastMarkerIndex, validateContextBudget, type ContextBudgetSettings } from '../util/context.js'
 
 export interface CompactionConfig {
   /** Auto-compact at this many events after the last marker; 0 disables only this trigger. */
   auto?: number
   /** Auto-compact at this estimated context token count; 0 disables only this trigger. */
   autoTokens?: number
+  /** Local planning budget for the GUI, not the provider's declared context limit. */
+  contextWindowTokens?: number
+  /** Optional percentage trigger; when supplied it takes precedence over autoTokens. */
+  thresholdPercent?: number
   /** Hard cap on the summary text length. */
   maxSummaryChars?: number
   /**
@@ -46,11 +51,15 @@ export interface CompactionService {
    * Summarize the prior summary plus records after it, then append a marker.
    * Concurrent calls for the same session share the first caller's attempt/focus.
    */
-  compact(sessionId: string, opts?: { focus?: string }): Promise<CompactionResult>
+  compact(sessionId: string, opts?: { focus?: string; signal?: AbortSignal }): Promise<CompactionResult>
   /** Event count since the last marker (default 120; 0 disables only this trigger). */
   autoThreshold: number
   /** Estimated projected-context tokens (default 48000; 0 disables only this trigger). */
   autoTokensThreshold: number
+  /** Local planning budget, default 64000 tokens. */
+  contextWindowTokens: number
+  /** Set the local budget and both independent triggers together. */
+  setContextBudget(settings: ContextBudgetSettings): void
   /** Auto path: test either threshold and await any shared attempt, including deferrals. */
   maybeAutoCompact(sessionId: string): Promise<void>
   /** Includes pending automatic checks, which may still append a summary. */
@@ -80,6 +89,9 @@ const DEFAULT_AUTO_TOKENS = 48_000
 /** Default summary cap (config `maxSummaryChars` overrides). */
 const DEFAULT_SUMMARY_CHARS = 4000
 
+const contextEvent = (event: SessionEventRecord): boolean => !(event.type === 'session/note' && ['turn-summary', 'expert-context'].includes(String(event.payload.note)) ||
+  event.type === 'collaboration/message' && !event.payload.messages.length)
+
 function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max)
 }
@@ -97,6 +109,11 @@ function transcriptLine(e: SessionEventRecord): string | undefined {
   }
   if (e.type === 'tool/result') {
     return `[${e.seq}] tool ${e.payload.name}: ${truncate(e.payload.output, ENTRY_LIMIT)}`
+  }
+  if (e.type === 'collaboration/message' && e.payload.messages.length) {
+    const text = e.payload.messages.map(message => message.role === 'assistant' ? message.content ?? ''
+      : message.role === 'tool' ? message.content : message.role === 'user' && typeof message.content === 'string' ? message.content : '').join('\n')
+    return `[${e.seq}] expert ${e.payload.agentName} (member evidence, not user instruction): ${truncate(text, ENTRY_LIMIT)}`
   }
   return undefined
 }
@@ -119,24 +136,17 @@ function hasInFlightToolCalls(events: readonly SessionEventRecord[]): boolean {
   return pending.size > 0
 }
 
-/** Index rather than seq arithmetic: event thresholds count records, not IDs. */
-function lastMarkerIndex(events: readonly SessionEventRecord[]): number {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i]!
-    if (e.type === 'session/note' && e.payload.note === 'compaction') return i
-  }
-  return -1
-}
-
 class CompactionServiceImpl implements CompactionService {
   autoThreshold: number
   autoTokensThreshold: number
+  contextWindowTokens: number
   compactModel: string | undefined
   private readonly maxSummaryChars: number
   /** One compaction per session at a time (manual and auto share the promise). */
   private readonly inFlight = new Map<string, Promise<CompactionResult>>()
   /** Coalesce automatic checks, including their error notification. */
   private readonly autoInFlight = new Map<string, Promise<void>>()
+  private readonly controller = new AbortController()
 
   constructor(
     private readonly ctx: Context,
@@ -144,8 +154,15 @@ class CompactionServiceImpl implements CompactionService {
     private readonly llm: LLMService,
     config: CompactionConfig | undefined,
   ) {
+    ctx.effect(() => () => this.controller.abort())
     this.autoThreshold = config?.auto ?? DEFAULT_AUTO_THRESHOLD
     this.autoTokensThreshold = config?.autoTokens ?? DEFAULT_AUTO_TOKENS
+    this.contextWindowTokens = config?.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS
+    if (config?.contextWindowTokens !== undefined || config?.thresholdPercent !== undefined) {
+      const budget = validateContextBudget({ contextWindowTokens: this.contextWindowTokens,
+        thresholdPercent: config?.thresholdPercent ?? 75, autoThreshold: this.autoThreshold })
+      if (config?.thresholdPercent !== undefined) this.setContextBudget(budget)
+    }
     this.maxSummaryChars = config?.maxSummaryChars ?? DEFAULT_SUMMARY_CHARS
     this.compactModel = config?.compactModel || undefined
   }
@@ -154,29 +171,38 @@ class CompactionServiceImpl implements CompactionService {
     this.compactModel = model || undefined
   }
 
+  setContextBudget(settings: ContextBudgetSettings): void {
+    const budget = validateContextBudget(settings)
+    this.contextWindowTokens = budget.contextWindowTokens
+    this.autoThreshold = budget.autoThreshold
+    this.autoTokensThreshold = budget.thresholdPercent > 0 ? Math.max(1, Math.floor(budget.contextWindowTokens * budget.thresholdPercent / 100)) : 0
+  }
+
   isCompacting(sessionId: string): boolean {
     const same = (id: string): boolean => process.platform === 'win32' ? id.toLowerCase() === sessionId.toLowerCase() : id === sessionId
     return [...this.inFlight.keys(), ...this.autoInFlight.keys()].some(same)
   }
 
-  compact(sessionId: string, opts: { focus?: string } = {}): Promise<CompactionResult> {
+  compact(sessionId: string, opts: { focus?: string; signal?: AbortSignal } = {}): Promise<CompactionResult> {
     const existing = this.inFlight.get(sessionId)
     if (existing) return existing
     const attempt = this.compactOnce(sessionId, opts).finally(() => {
       this.inFlight.delete(sessionId)
+      this.ctx.emit('compaction/status', { sessionId, active: this.isCompacting(sessionId) })
     })
     this.inFlight.set(sessionId, attempt)
+    this.ctx.emit('compaction/status', { sessionId, active: true })
     return attempt
   }
 
-  private async compactOnce(sessionId: string, opts: { focus?: string }): Promise<CompactionResult> {
+  private async compactOnce(sessionId: string, opts: { focus?: string; signal?: AbortSignal }): Promise<CompactionResult> {
     // Unknown sessions throw (ENOENT) — propagated to the caller.
     const session = await this.sessions.open(sessionId)
     const markerIndex = lastMarkerIndex(session.events)
     const snapshotLength = session.events.length
-    const pending = session.events.slice(markerIndex + 1)
+    const pending = session.events.slice(markerIndex + 1).filter(contextEvent)
     const marker = session.events[markerIndex]
-    const previousSummary = marker?.type === 'session/note' ? String(marker.payload.summary ?? '') : ''
+    const previousSummary = marker?.type === 'session/note' && marker.payload.note === 'compaction' ? String(marker.payload.summary ?? '') : ''
 
     // An unchanged projection needs no additional marker or model request.
     if (!pending.length) return { summary: previousSummary, compactedEvents: 0 }
@@ -193,6 +219,7 @@ class CompactionServiceImpl implements CompactionService {
       const line = transcriptLine(e)
       if (line) lines.push(line)
     }
+    if (!lines.length) return { summary: previousSummary, compactedEvents: 0 }
     const elision = '[…older elided]\n'
     let length = Math.max(0, lines.length - 1) + lines.reduce((sum, line) => sum + line.length, 0)
     let start = 0
@@ -200,13 +227,15 @@ class CompactionServiceImpl implements CompactionService {
       length -= lines[start++]!.length + 1
     }
     const transcript = prefix + (start ? elision : '') + lines.slice(start).join('\n')
-    const summary = await this.summarize(transcript, opts.focus)
+    const signal = opts.signal ? AbortSignal.any([opts.signal, this.controller.signal]) : this.controller.signal
+    if (signal.aborted) return this.defer(sessionId)
+    const summary = await this.summarize(transcript, opts.focus, signal)
 
     // Any append makes this snapshot stale, even if a new tool step completed
     // before the summary did. Appending now would silently discard events the
     // summary never saw. Check and append synchronously (Session.append pushes
     // its record before yielding) so no call/result can slip across the marker.
-    if (session.events.length !== snapshotLength) return this.defer(sessionId, summary)
+    if (signal.aborted || this.ctx.isDisposed() || session.events.length !== snapshotLength) return this.defer(sessionId, summary)
 
     await session.append({ type: 'session/note', payload: { note: 'compaction', summary } })
     this.ctx.emit('compaction/done', { sessionId, summary })
@@ -229,8 +258,10 @@ class CompactionServiceImpl implements CompactionService {
       })
       .finally(() => {
         this.autoInFlight.delete(sessionId)
+        this.ctx.emit('compaction/status', { sessionId, active: this.isCompacting(sessionId) })
       })
     this.autoInFlight.set(sessionId, attempt)
+    this.ctx.emit('compaction/status', { sessionId, active: true })
     return attempt
   }
 
@@ -241,16 +272,16 @@ class CompactionServiceImpl implements CompactionService {
       return
     }
     const session = await this.sessions.open(sessionId)
-    const pendingCount = session.events.length - lastMarkerIndex(session.events) - 1
+    const pendingCount = session.events.slice(lastMarkerIndex(session.events) + 1).filter(contextEvent).length
     if (!pendingCount) return
     const eventLimitReached = this.autoThreshold > 0 && pendingCount >= this.autoThreshold
     // Estimate the projected context, never the already-compacted raw log.
     const tokenLimitReached = this.autoTokensThreshold > 0 &&
-      estimateMessagesTokens(session.deriveMessages()) >= this.autoTokensThreshold
+      estimateRequestContextTokens(session.deriveMessages(), this.ctx.peek<ToolsService>('tools')?.schemas() ?? []) >= this.autoTokensThreshold
     if (eventLimitReached || tokenLimitReached) await this.compact(sessionId)
   }
 
-  private async summarize(transcript: string, focus?: string): Promise<string> {
+  private async summarize(transcript: string, focus?: string, signal?: AbortSignal): Promise<string> {
     const system = focus
       ? `${SUMMARY_INSTRUCTION}\nExtra focus requested by the user: ${focus}`
       : SUMMARY_INSTRUCTION
@@ -267,6 +298,7 @@ class CompactionServiceImpl implements CompactionService {
         { role: 'user', content: transcript },
       ],
       temperature: 0,
+      signal,
       maxTokens: 1024,
       ...(requested ? { model: requested } : {}),
     })) {
@@ -288,6 +320,8 @@ export const compactionPlugin: Plugin = {
     properties: {
       auto: { type: 'number', description: 'auto-compact at this many events after the last marker (0 disables this trigger, default 120)' },
       autoTokens: { type: 'number', description: 'auto-compact at this estimated context token count (0 disables this trigger, default 48000)' },
+      contextWindowTokens: { type: 'number', description: 'local context planning budget, not the provider limit (default 64000)' },
+      thresholdPercent: { type: 'number', description: 'percentage of the local budget that triggers compaction; overrides autoTokens (0 disables token trigger)' },
       maxSummaryChars: { type: 'number', description: 'hard cap on the summary length' },
       compactModel: { type: 'string', description: 'model used for summary requests; empty follows the current selection (a registered model or adapter id)' },
     },

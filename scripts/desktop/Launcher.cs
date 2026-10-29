@@ -53,6 +53,10 @@ namespace SakuraCode.Desktop
         public string NewWorkspaceDir { get; set; }
         /// Per-workspace prefs keyed by workspace path: { "sessionDir": …, "agents": […] }.
         public Dictionary<string, Dictionary<string, object>> WorkspacePrefs { get; set; }
+        /// Non-secret display preferences, shared across workspaces and random ports.
+        public Dictionary<string, object> Appearance { get; set; }
+        public Dictionary<string, object> Retry { get; set; }
+        public Dictionary<string, object> Updates { get; set; }
     }
 
     internal static class Program
@@ -193,7 +197,12 @@ namespace SakuraCode.Desktop
         private bool exiting;
         private bool allowClose;
         private bool busy;
+        private bool trayHidden;
+        private bool layingOutBrowser;
+        private int viewportWidth, viewportHeight, viewportDpi, viewportVersion;
+        private FormWindowState trayRestoreState = FormWindowState.Normal;
         private string activeSecret = "";
+        private string[] accountSecrets = new string[0];
         private string engineError = "";
         private DesktopSettings settings;
 
@@ -205,19 +214,19 @@ namespace SakuraCode.Desktop
             Icon = appIcon;
             Text = appTitle;
             Name = "SakuraCodeDesktopHost";
-            // The launcher shell stays invisible: the product surface is the
-            // dedicated browser app window (no tab bar, no address bar), just
-            // like a native client.
+            // Start hidden during the handshake, then host Chromium's content
+            // in this resizable borderless window (no extra browser caption).
             ShowInTaskbar = false;
-            FormBorderStyle = FormBorderStyle.FixedToolWindow;
+            FormBorderStyle = FormBorderStyle.None;
+            BackColor = Color.FromArgb(26, 28, 34);
             StartPosition = FormStartPosition.Manual;
             Location = new Point(-32000, -32000);
             ClientSize = new Size(0, 0);
             LoadSettings();
             BuildTray();
-            FormClosing += delegate(object sender, FormClosingEventArgs e)
+            FormClosing += async delegate(object sender, FormClosingEventArgs e)
             {
-                if (!allowClose && e.CloseReason == CloseReason.UserClosing) e.Cancel = true;
+                if (!allowClose && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; await ExitAsync(); }
             };
             monitor.Tick += async delegate
             {
@@ -229,10 +238,19 @@ namespace SakuraCode.Desktop
                     await ExitAsync();
                 }
                 else if (browserWindow == IntPtr.Zero || !Native.IsWindow(browserWindow) || !Native.IsProcessAlive(browserOwnerId)) await ExitAsync();
+                else LayoutBrowser();
             };
             // Start on the UI message loop, after the hidden native handle
             // exists. Async continuations must stay on the WinForms thread.
             Shown += async delegate { Hide(); await BeginLaunch(); };
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            // ShowInTaskbar recreates the HWND during launch. Every new host
+            // needs the same border policy, not just the initial hidden one.
+            Native.HideWindowBorder(Handle);
         }
 
         /// <summary>The launcher only reads settings; editing happens in the main page.</summary>
@@ -242,22 +260,23 @@ namespace SakuraCode.Desktop
             string file = Path.Combine(options.DataDir, "settings.json");
             try { if (File.Exists(file)) settings = new JavaScriptSerializer().Deserialize<DesktopSettings>(File.ReadAllText(file, Encoding.UTF8)) ?? settings; }
             catch { Log("Settings file unreadable; starting from defaults."); }
+            if (settings.Appearance != null && (settings.Appearance.Count != 1 || !ValidQuotaDisplay(AsString(settings.Appearance, "quotaDisplay")))) settings.Appearance = null;
+            if (settings.Retry != null && !ValidRetryPolicy(settings.Retry)) settings.Retry = null;
+            if (settings.Updates != null && !ValidUpdateSettings(settings.Updates)) settings.Updates = null;
             workspaceInput = options.Workspace ?? settings.Workspace ?? Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-            baseUrlInput = settings.BaseUrl ?? "";
-            modelInput = settings.Model ?? "";
-            rememberKeyInput = settings.RememberKey;
-            if (settings.RememberKey && !String.IsNullOrEmpty(settings.ProtectedApiKey))
-            {
-                try { apiKeyInput = Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(settings.ProtectedApiKey), null, DataProtectionScope.CurrentUser)); }
-                catch { Log("Saved API key could not be decrypted; dropping it."); apiKeyInput = ""; rememberKeyInput = false; }
-            }
+            // Keep legacy configuration on disk, but the dedicated product must
+            // never decrypt/import a user-supplied upstream or model API Key.
+            baseUrlInput = "https://api.sakuraapi.top/v1";
+            modelInput = "";
+            rememberKeyInput = false;
+            apiKeyInput = "";
         }
 
         private void BuildTray()
         {
             var menu = new ContextMenuStrip();
             menu.Items.Add("打开工作区", null, delegate { FocusWorkspace(); });
-            // Settings moved into the main page; the tray only focuses or exits.
+            menu.Items.Add("收起到托盘", null, delegate { MinimizeToTray(); });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出 SakuraCode", null, async delegate { await ExitAsync(); });
             tray.Icon = appIcon;
@@ -270,17 +289,198 @@ namespace SakuraCode.Desktop
         {
             if (Native.IsWindow(browserWindow))
             {
-                Native.ShowWindow(browserWindow, 9);
-                Native.SetForegroundWindow(browserWindow);
+                if (trayHidden || WindowState == FormWindowState.Minimized) WindowState = trayRestoreState;
+                trayHidden = false;
+                Show();
+                Native.SetForegroundWindow(Handle);
+                LayoutBrowser();
+                FocusBrowser();
             }
             // No settings window exists anymore; with no app window there is
             // nothing to surface (the monitor exits once the browser is gone).
         }
 
+        private void MinimizeToTray()
+        {
+            if (exiting || !Native.IsWindow(browserWindow)) return;
+            if (WindowState != FormWindowState.Minimized) trayRestoreState = WindowState;
+            trayHidden = true;
+            // Do not toggle ShowInTaskbar: it recreates the HWND and can destroy
+            // the embedded Chromium child. Hiding removes the taskbar button.
+            Hide();
+        }
+
+        private void FocusBrowser()
+        {
+            if (!exiting && !trayHidden && Visible && IsHandleCreated && WindowState != FormWindowState.Minimized && Native.IsWindow(browserWindow))
+                Native.FocusEmbeddedBrowser(Handle, browserWindow);
+        }
+
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            // The external consent browser can take focus while Chromium is
+            // still processing kiosk/fullscreen bounds. Restore the embedded
+            // surface on return, even when the host itself was never resized.
+            LayoutBrowser();
+            // Activation focuses the empty WinForms host, not its cross-process
+            // Chromium child. Restore native keyboard/IME focus, without moving
+            // the page's caret or taking focus from another foreground app.
+            FocusBrowser();
+        }
+
         protected override void WndProc(ref Message message)
         {
             if (message.Msg == showMessage) { FocusWorkspace(); return; }
+            if (message.Msg == 0x0112 && (message.WParam.ToInt64() & 0xfff0) == 0xf020) // SC_MINIMIZE, including taskbar/keyboard
+            {
+                MinimizeToTray();
+                message.Result = IntPtr.Zero;
+                return;
+            }
+            // Keep the standard resizable/snap-capable window style, but make
+            // its entire client area ours — Windows never paints a titlebar.
+            if (message.Msg == 0x0083) { message.Result = IntPtr.Zero; return; } // WM_NCCALCSIZE
+            if (message.Msg == 0x0085 && WindowState != FormWindowState.Minimized)
+            {
+                // WM_NCPAINT: the host owns the whole frame. DefWindowProc
+                // would otherwise draw a light resize border over our client.
+                message.Result = IntPtr.Zero;
+                return;
+            }
+            if (message.Msg == 0x0086 && WindowState != FormWindowState.Minimized)
+            {
+                // WM_NCACTIVATE: keep the normal activation bookkeeping, but
+                // lParam=-1 prevents the default active/inactive frame repaint.
+                // Minimized windows still need the default icon processing.
+                message.LParam = new IntPtr(-1);
+                base.WndProc(ref message);
+                return;
+            }
+            if (message.Msg == 0x0024)
+            {
+                base.WndProc(ref message);
+                Native.LimitMaximizedBounds(Handle, message.LParam);
+                return;
+            }
+            if (message.Msg == 0x0084 && WindowState != FormWindowState.Maximized)
+            {
+                int hit = Native.ResizeHit(Handle, message.LParam, FrameInset);
+                if (hit != 0) { message.Result = new IntPtr(hit); return; }
+            }
             base.WndProc(ref message);
+            if (message.Msg == 0x0005 || message.Msg == 0x0047 || message.Msg == 0x02e0) LayoutBrowser(); // size, position, DPI: read native client, not cached WinForms geometry
+            if (message.Msg == 0x0007) FocusBrowser(); // WM_SETFOCUS, including keyboard navigation back to the host
+            if (message.Msg == 0x031a || message.Msg == 0x031e) // theme / DWM composition changed
+                Native.HideWindowBorder(Handle);
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams result = base.CreateParams;
+                result.Style |= 0x00040000 | 0x00020000 | 0x00010000 | 0x00080000;
+                result.Style &= ~0x00c00000; // no WS_CAPTION
+                return result;
+            }
+        }
+
+        private int FrameInset
+        {
+            get { return WindowState == FormWindowState.Maximized ? 0 : Math.Max(5, (int)Math.Ceiling(DeviceDpi / 96.0 * 5)); }
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            LayoutBrowser();
+        }
+
+        private void LayoutBrowser(bool force = false)
+        {
+            if (layingOutBrowser || exiting || trayHidden || !IsHandleCreated || browserWindow == IntPtr.Zero || WindowState == FormWindowState.Minimized || !Native.IsWindow(browserWindow)) return;
+            Native.NativeRect client, actual, browserClient;
+            if (!Native.GetClientRect(Handle, out client) || client.Right <= client.Left || client.Bottom <= client.Top || Native.GetParent(browserWindow) != Handle) return;
+            int inset = FrameInset;
+            int width = Math.Max(1, client.Right - client.Left - inset * 2), height = Math.Max(1, client.Bottom - client.Top - inset * 2);
+            var expected = new Native.NativePoint { X = client.Left + inset, Y = client.Top + inset };
+            if (!Native.ClientToScreen(Handle, ref expected)) return;
+            PublishViewport(width, height);
+            // Compare BOTH outer and client rectangles. A Chromium fullscreen
+            // state change can leave its outer HWND correct but reserve stale
+            // nonclient space. Do not remount the renderer or steal focus.
+            if (!force && Native.GetWindowRect(browserWindow, out actual) && actual.Left == expected.X && actual.Top == expected.Y &&
+                actual.Right - actual.Left == width && actual.Bottom - actual.Top == height &&
+                Native.GetClientRect(browserWindow, out browserClient) && browserClient.Right - browserClient.Left == width && browserClient.Bottom - browserClient.Top == height) return;
+            layingOutBrowser = true;
+            try
+            {
+                if (!Native.SetWindowPos(browserWindow, IntPtr.Zero, client.Left + inset, client.Top + inset, width, height, 0x0034)) return;
+                // Notify the existing renderer on the browser's own queue. This
+                // bounded repair also covers activation without a host resize.
+                Native.PostMessage(browserWindow, 0x0005, IntPtr.Zero, new IntPtr(((height & 0xffff) << 16) | (width & 0xffff)));
+            }
+            finally { layingOutBrowser = false; }
+        }
+
+        private void PublishViewport(int width, int height)
+        {
+            int dpi = DeviceDpi;
+            if (viewportWidth == width && viewportHeight == height && viewportDpi == dpi) return;
+            try
+            {
+                lock (settingsLock)
+                {
+                    if (engineInput == null) return;
+                    engineInput.WriteLine(new JavaScriptSerializer().Serialize(new { type = "desktop/viewport",
+                        viewport = new { width = width, height = height, dpi = dpi, version = viewportVersion + 1 } }));
+                    viewportWidth = width; viewportHeight = height; viewportDpi = dpi; viewportVersion++;
+                }
+            }
+            catch { /* Next native layout retries; no user data or renderer state is changed. */ }
+        }
+
+        private void AttachBrowser()
+        {
+            // ShowInTaskbar can recreate the HWND. Configure the host FIRST;
+            // otherwise its recreation destroys an already-attached browser.
+            Rectangle work = Screen.FromPoint(Cursor.Position).WorkingArea;
+            MinimumSize = new Size(480, 400);
+            ClientSize = new Size(Math.Min(1440, Math.Max(480, work.Width - 64)), Math.Min(960, Math.Max(400, work.Height - 64)));
+            Location = new Point(work.Left + (work.Width - Width) / 2, work.Top + (work.Height - Height) / 2);
+            ShowInTaskbar = true;
+            Native.ShowWindow(browserWindow, 0);
+            long style = Native.GetWindowLongPtr(browserWindow, -16).ToInt64();
+            Native.SetWindowLongPtr(browserWindow, -16, new IntPtr((style & ~0x80cf0000L) | 0x40000000L));
+            Native.ClearLastError(0);
+            Native.SetParent(browserWindow, Handle);
+            int error = Marshal.GetLastWin32Error();
+            if (error != 0) throw new Win32Exception(error, "无法创建无标题栏工作区窗口。");
+            LayoutBrowser();
+            Native.ShowWindow(browserWindow, 5);
+            Show();
+            Activate();
+            FocusBrowser();
+        }
+
+        private void WindowAction(string action)
+        {
+            if (exiting || IsDisposed || !IsHandleCreated) return;
+            BeginInvoke(new Action(async delegate
+            {
+                if (exiting || !Native.IsWindow(browserWindow)) return;
+                if (action == "minimize") MinimizeToTray();
+                else if (action == "reflow") LayoutBrowser(true);
+                else if (action == "maximize") WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized;
+                else if (action == "close") await ExitAsync();
+                else if (action == "drag")
+                {
+                    Native.SendMessage(browserWindow, 0x001f, IntPtr.Zero, IntPtr.Zero); // cancel browser capture
+                    Native.ReleaseCapture();
+                    Native.PostMessage(Handle, 0x0112, new IntPtr(0xf012), IntPtr.Zero); // SC_MOVE | HTCAPTION
+                }
+            }));
         }
 
         private Task BeginLaunch()
@@ -330,14 +530,28 @@ namespace SakuraCode.Desktop
                     Log("Opening the app window…");
                     var browserArgs = new List<string> {
                         "--app=" + url, "--user-data-dir=" + profile,
-                        "--no-first-run", "--no-default-browser-check", "--disable-background-mode",
-                        "--disable-sync", "--disable-extensions", "--window-size=1440,960"
+                        "--no-first-run", "--no-default-browser-check", "--disable-background-mode", "--disable-background-networking",
+                        "--disable-sync", "--disable-extensions", "--disable-default-apps",
+                        // --disable-extensions alone leaves Edge's built-in
+                        // voice/media/feedback background pages running. This
+                        // dedicated workspace needs none of those components;
+                        // keep Chromium's renderer/network/GPU sandboxes intact.
+                        "--disable-component-extensions-with-background-pages", "--window-size=1440,960",
+                        // Kiosk affects only the embedded browser surface: it removes
+                        // Chromium's own caption and prevents F11 from bringing it
+                        // back. The resizable native host is NOT a kiosk/fullscreen app.
+                        "--kiosk", "--start-fullscreen"
                     };
                     if (Environment.GetEnvironmentVariable("SAKURA_DESKTOP_DEBUG") == "1")
                     {
                         string oldPort = Path.Combine(profile, "DevToolsActivePort");
                         if (File.Exists(oldPort)) File.Delete(oldPort);
                         browserArgs.Add("--remote-debugging-port=0");
+                        // Opt-in smoke runs must keep processing viewport changes
+                        // even while the user's interactive desktop is locked.
+                        browserArgs.Add("--disable-backgrounding-occluded-windows");
+                        browserArgs.Add("--disable-renderer-backgrounding");
+                        browserArgs.Add("--disable-background-timer-throttling");
                     }
                     browser = new Process { StartInfo = new ProcessStartInfo(browserPath, String.Join(" ", browserArgs.ConvertAll(Program.Quote))) { UseShellExecute = false, WorkingDirectory = options.DataDir } };
                     browser.Start();
@@ -358,15 +572,18 @@ namespace SakuraCode.Desktop
                     // Remember which process actually owns the window so the
                     // monitor can keep watching it after the root is gone.
                     browserOwnerId = Native.WindowOwner(browserWindow);
+                    AttachBrowser();
                 }
                 cancellation.ThrowIfCancellationRequested();
-                settings = new DesktopSettings {
-                    Workspace = cwd, BaseUrl = endpoint, Model = modelName, RememberKey = rememberKeyInput,
-                    RecentWorkspaces = settings.RecentWorkspaces,
-                    ProtectedApiKey = rememberKeyInput && activeSecret.Length > 0 ? Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(activeSecret), null, DataProtectionScope.CurrentUser)) : null
-                };
-                Program.WriteJson(Path.Combine(options.DataDir, "settings.json"), settings);
-                Program.WriteJson(Path.Combine(options.DataDir, "runtime.json"), new { launcherPid = Process.GetCurrentProcess().Id, enginePid = engine.Id, browserPid = browser != null ? browser.Id : 0, windowOwnerPid = browserOwnerId != 0 ? (int)browserOwnerId : (browser != null ? browser.Id : 0), url = url, browserProfile = profile });
+                // Merely starting a newer release must not rewrite existing
+                // user settings. Explicit workspace edits still persist below.
+                string settingsFile = Path.Combine(options.DataDir, "settings.json");
+                if (!File.Exists(settingsFile))
+                {
+                    settings.Workspace = cwd;
+                    Program.WriteJson(settingsFile, settings);
+                }
+                Program.WriteJson(Path.Combine(options.DataDir, "runtime.json"), new { launcherPid = Process.GetCurrentProcess().Id, enginePid = engine.Id, browserPid = browser != null ? browser.Id : 0, windowOwnerPid = browserOwnerId != 0 ? (int)browserOwnerId : (browser != null ? browser.Id : 0), windowHandle = Handle.ToInt64(), browserWindowHandle = browserWindow.ToInt64(), frameless = true, url = url, browserProfile = profile });
                 Log("Workspace opened; engine and app window ready.");
                 tray.Visible = true;
                 monitor.Start();
@@ -423,8 +640,14 @@ namespace SakuraCode.Desktop
                     var frame = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(e.Data);
                     object type;
                     if (frame == null || !frame.TryGetValue("type", out type)) return;
-                    if ((string)type == "desktop/settings") { PersistSettingsFrame(frame); return; }
+                    if ((string)type == "desktop/settings") { PersistWorkspaceSettingsFrame(frame); return; }
+                    if ((string)type == "desktop/context-settings") { PersistContextSettingsFrame(frame); return; }
+                    if ((string)type == "desktop/appearance") { PersistAppearanceFrame(frame); return; }
+                    if ((string)type == "desktop/retry") { PersistRetryFrame(frame); return; }
+                    if ((string)type == "desktop/updates") { PersistUpdatesFrame(frame); return; }
                     if ((string)type == "desktop/weixin") { PersistWeixinFrame(frame); return; }
+                    if ((string)type == "desktop/sakuraapi") { PersistAccountFrame(frame); return; }
+                    if ((string)type == "desktop/window") { WindowAction(AsString(frame, "action")); return; }
                     if ((string)type != "desktop/ready") return;
                     Uri uri;
                     string url = (string)frame["url"];
@@ -447,16 +670,16 @@ namespace SakuraCode.Desktop
             child.BeginOutputReadLine();
             child.BeginErrorReadLine();
             engineInput = new StreamWriter(child.StandardInput.BaseStream, new UTF8Encoding(false)) { AutoFlush = true };
-                engineInput.WriteLine(new JavaScriptSerializer().Serialize(new { cwd = cwd, baseURL = endpoint, model = modelName, apiKey = activeSecret, approvalMode = "default", recentWorkspaces = settings.RecentWorkspaces ?? new string[0], rememberKey = rememberKeyInput, newWorkspaceDir = settings.NewWorkspaceDir ?? "", workspacePrefs = settings.WorkspacePrefs ?? new Dictionary<string, Dictionary<string, object>>(), weixin = LoadWeixinSettings() }));
+                engineInput.WriteLine(new JavaScriptSerializer().Serialize(new { cwd = cwd, baseURL = endpoint, model = modelName, apiKey = activeSecret, approvalMode = "default", recentWorkspaces = settings.RecentWorkspaces ?? new string[0], rememberKey = rememberKeyInput, newWorkspaceDir = settings.NewWorkspaceDir ?? "", workspacePrefs = settings.WorkspacePrefs ?? new Dictionary<string, Dictionary<string, object>>(), appearance = settings.Appearance, retry = settings.Retry, updates = settings.Updates, weixin = LoadWeixinSettings(), sakuraApi = LoadAccountSettings() }));
             Task winner = await Task.WhenAny(ready.Task, Task.Delay(45000, cancellation));
             cancellation.ThrowIfCancellationRequested();
             if (winner != ready.Task) throw new TimeoutException("本机服务启动超时，请检查项目插件 / MCP 配置。启动日志位于 " + Path.Combine(options.DataDir, "desktop.log"));
             return await ready.Task;
         }
 
-        /// <summary>Persists settings edits coming from the main page: the
-        /// workspace / model fields are public, the key is re-encrypted with
-        /// DPAPI only while the "save key" option is on.</summary>
+        /// <summary>Persist explicit workspace edits without importing or
+        /// rewriting the legacy model configuration. Authorization uses its
+        /// separate DPAPI storage and acknowledged pipe.</summary>
         private void PersistSettingsFrame(Dictionary<string, object> frame)
         {
             object box;
@@ -465,18 +688,21 @@ namespace SakuraCode.Desktop
             if (updated == null) return;
             lock (settingsLock)
             {
-                string apiKey = AsString(updated, "apiKey");
-                string protectedKey = null;
-                if (AsBool(updated, "rememberKey") && !String.IsNullOrEmpty(apiKey))
-                    protectedKey = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(apiKey), null, DataProtectionScope.CurrentUser));
                 object list;
-                updated.TryGetValue("recentWorkspaces", out list);
-                string[] recent = null;
-                if (list is object[])
+                string[] recent = settings != null ? settings.RecentWorkspaces : null;
+                if (updated.TryGetValue("recentWorkspaces", out list))
                 {
-                    var rows = (object[])list;
-                    var paths = new List<string>(rows.Length);
-                    foreach (object row in rows) if (row != null) paths.Add(row.ToString());
+                    // Deserialize<Dictionary<string, object>> produces ArrayList
+                    // for nested JSON arrays; legacy reflection callers use
+                    // object[]. Both implement IList, neither may be dropped.
+                    var rows = list as System.Collections.IList;
+                    if (rows == null) throw new IOException();
+                    var paths = new List<string>(rows.Count);
+                    foreach (object row in rows)
+                    {
+                        if (!(row is string)) throw new IOException();
+                        paths.Add((string)row);
+                    }
                     recent = paths.ToArray();
                 }
                 object prefsBox;
@@ -508,17 +734,224 @@ namespace SakuraCode.Desktop
                 var merged = new DesktopSettings {
                     Workspace = AsString(updated, "workspace"),
                     RecentWorkspaces = recent,
-                    BaseUrl = AsString(updated, "baseURL"),
-                    Model = AsString(updated, "model"),
-                    ProtectedApiKey = protectedKey,
-                    RememberKey = AsBool(updated, "rememberKey"),
+                    // Workspace changes must not destroy obsolete model
+                    // settings: the host ignores them rather than migrating them.
+                    BaseUrl = settings != null ? settings.BaseUrl : null,
+                    Model = settings != null ? settings.Model : null,
+                    ProtectedApiKey = settings != null ? settings.ProtectedApiKey : null,
+                    RememberKey = settings != null && settings.RememberKey,
                     NewWorkspaceDir = newWorkspaceDir,
                     WorkspacePrefs = workspacePrefs,
+                    // Full workspace/context frames can predate a display save.
+                    // Only the dedicated appearance transaction may change it.
+                    Appearance = settings != null ? settings.Appearance : null,
+                    Retry = settings != null ? settings.Retry : null,
+                    Updates = settings != null ? settings.Updates : null,
                 };
                 Program.WriteJson(Path.Combine(options.DataDir, "settings.json"), merged);
                 settings = merged;
                 Log("Settings saved from the main page; workspace=" + merged.Workspace);
             }
+        }
+
+        private void PersistWorkspaceSettingsFrame(Dictionary<string, object> frame)
+        {
+            string id = AsString(frame, "id");
+            if (id != null && id.Length > 100) return;
+            bool ok = false;
+            try
+            {
+                object value;
+                if (!frame.TryGetValue("settings", out value) || !(value is Dictionary<string, object>)) throw new IOException();
+                PersistSettingsFrame(frame);
+                ok = true;
+            }
+            catch { Log("Workspace settings storage failed; previous workspace preferences remain active."); }
+            // No-id frames from older pages keep their legacy merge behavior.
+            if (String.IsNullOrEmpty(id)) return;
+            try
+            {
+                lock (settingsLock)
+                {
+                    if (engineInput != null) engineInput.WriteLine(new JavaScriptSerializer().Serialize(new { type = "desktop/settings/saved", id = id, ok = ok }));
+                }
+            }
+            catch { /* Parent disconnection rejects the pending workspace save. */ }
+        }
+
+        /// <summary>The context viewer must not claim persistence before the
+        /// actual settings file has reached disk. Keep the legacy frame intact.</summary>
+        private void PersistContextSettingsFrame(Dictionary<string, object> frame)
+        {
+            string id = AsString(frame, "id");
+            if (String.IsNullOrEmpty(id) || id.Length > 100) return;
+            bool ok = false;
+            try
+            {
+                object value;
+                if (!frame.TryGetValue("settings", out value) || !(value is Dictionary<string, object>)) throw new IOException();
+                PersistSettingsFrame(frame);
+                ok = true;
+            }
+            catch { Log("Context settings storage failed; previous thresholds remain active."); }
+            try
+            {
+                lock (settingsLock)
+                {
+                    if (engineInput != null) engineInput.WriteLine(new JavaScriptSerializer().Serialize(new { type = "desktop/context-settings/saved", id = id, ok = ok }));
+                }
+            }
+            catch { /* A disconnected parent pipe rejects the pending settings write. */ }
+        }
+
+        private static bool ValidQuotaDisplay(string value)
+        {
+            return value == "always" || value == "hover" || value == "settings";
+        }
+
+        private void PersistAppearanceFrame(Dictionary<string, object> frame)
+        {
+            string id = AsString(frame, "id");
+            if (String.IsNullOrEmpty(id) || id.Length > 100) return;
+            bool ok = false;
+            try
+            {
+                object value;
+                if (!frame.TryGetValue("settings", out value)) throw new IOException();
+                var updated = value as Dictionary<string, object>;
+                if (updated == null || updated.Count != 1) throw new IOException();
+                string mode = AsString(updated, "quotaDisplay");
+                if (!ValidQuotaDisplay(mode)) throw new IOException();
+                lock (settingsLock)
+                {
+                    var current = settings ?? new DesktopSettings();
+                    var merged = new DesktopSettings {
+                        Workspace = current.Workspace, RecentWorkspaces = current.RecentWorkspaces,
+                        BaseUrl = current.BaseUrl, Model = current.Model,
+                        ProtectedApiKey = current.ProtectedApiKey, RememberKey = current.RememberKey,
+                        NewWorkspaceDir = current.NewWorkspaceDir, WorkspacePrefs = current.WorkspacePrefs,
+                        Appearance = new Dictionary<string, object> { { "quotaDisplay", mode } },
+                        Retry = current.Retry,
+                        Updates = current.Updates,
+                    };
+                    Program.WriteJson(Path.Combine(options.DataDir, "settings.json"), merged);
+                    settings = merged;
+                    ok = true;
+                }
+            }
+            catch { Log("Appearance storage failed; previous display preferences remain active."); }
+            try
+            {
+                lock (settingsLock)
+                {
+                    if (engineInput != null) engineInput.WriteLine(new JavaScriptSerializer().Serialize(new { type = "desktop/appearance/saved", id = id, ok = ok }));
+                }
+            }
+            catch { /* A disconnected launcher rejects the pending display save. */ }
+        }
+
+        private static bool RetryInteger(Dictionary<string, object> row, string key, int min, int max, out int number)
+        {
+            object value;
+            number = 0;
+            if (!row.TryGetValue(key, out value) || !(value is int || value is long)) return false;
+            long parsed = Convert.ToInt64(value);
+            if (parsed < min || parsed > max) return false;
+            number = (int)parsed;
+            return true;
+        }
+
+        private static bool ValidRetryPolicy(Dictionary<string, object> row)
+        {
+            object enabled;
+            int window, retries, delay;
+            return row != null && row.Count == 4 && row.TryGetValue("enabled", out enabled) && enabled is bool &&
+                RetryInteger(row, "windowMs", 1000, 3600000, out window) && RetryInteger(row, "maxRetries", 0, 20, out retries) &&
+                RetryInteger(row, "delayMs", 0, 60000, out delay) && delay < window;
+        }
+
+        private void PersistRetryFrame(Dictionary<string, object> frame)
+        {
+            string id = AsString(frame, "id");
+            if (String.IsNullOrEmpty(id) || id.Length > 100) return;
+            bool ok = false;
+            try
+            {
+                object value;
+                if (!frame.TryGetValue("settings", out value)) throw new IOException();
+                var updated = value as Dictionary<string, object>;
+                if (!ValidRetryPolicy(updated)) throw new IOException();
+                lock (settingsLock)
+                {
+                    var current = settings ?? new DesktopSettings();
+                    var merged = new DesktopSettings {
+                        Workspace = current.Workspace, RecentWorkspaces = current.RecentWorkspaces,
+                        BaseUrl = current.BaseUrl, Model = current.Model, ProtectedApiKey = current.ProtectedApiKey,
+                        RememberKey = current.RememberKey, NewWorkspaceDir = current.NewWorkspaceDir,
+                        WorkspacePrefs = current.WorkspacePrefs, Appearance = current.Appearance,
+                        Retry = new Dictionary<string, object>(updated),
+                        Updates = current.Updates,
+                    };
+                    Program.WriteJson(Path.Combine(options.DataDir, "settings.json"), merged);
+                    settings = merged;
+                    ok = true;
+                }
+            }
+            catch { Log("Retry policy storage failed; previous preferences remain active."); }
+            try
+            {
+                lock (settingsLock) { if (engineInput != null) engineInput.WriteLine(new JavaScriptSerializer().Serialize(new { type = "desktop/retry/saved", id = id, ok = ok })); }
+            }
+            catch { /* Parent disconnection rejects the pending write. */ }
+        }
+
+        private static bool ValidUpdateSettings(Dictionary<string, object> row)
+        {
+            object feed, auto;
+            if (row == null || row.Count != 2 || !row.TryGetValue("feedUrl", out feed) || !(feed is string) ||
+                !row.TryGetValue("autoCheck", out auto) || !(auto is bool)) return false;
+            string text = (string)feed;
+            if (text.Length > 2048 || text.IndexOf('\\') >= 0) return false;
+            foreach (char character in text) if (Char.IsControl(character)) return false;
+            if (text.Length == 0) return true;
+            Uri url;
+            if (!Uri.TryCreate(text, UriKind.Absolute, out url) || !String.IsNullOrEmpty(url.UserInfo) ||
+                !String.IsNullOrEmpty(url.Query) || !String.IsNullOrEmpty(url.Fragment)) return false;
+            return url.Scheme == Uri.UriSchemeHttps || url.Scheme == Uri.UriSchemeHttp && url.IsLoopback;
+        }
+
+        private void PersistUpdatesFrame(Dictionary<string, object> frame)
+        {
+            string id = AsString(frame, "id");
+            if (String.IsNullOrEmpty(id) || id.Length > 100) return;
+            bool ok = false;
+            try
+            {
+                object value;
+                if (!frame.TryGetValue("settings", out value)) throw new IOException();
+                var updated = value as Dictionary<string, object>;
+                if (!ValidUpdateSettings(updated)) throw new IOException();
+                lock (settingsLock)
+                {
+                    var current = settings ?? new DesktopSettings();
+                    var merged = new DesktopSettings {
+                        Workspace = current.Workspace, RecentWorkspaces = current.RecentWorkspaces,
+                        BaseUrl = current.BaseUrl, Model = current.Model, ProtectedApiKey = current.ProtectedApiKey,
+                        RememberKey = current.RememberKey, NewWorkspaceDir = current.NewWorkspaceDir,
+                        WorkspacePrefs = current.WorkspacePrefs, Appearance = current.Appearance, Retry = current.Retry,
+                        Updates = new Dictionary<string, object>(updated),
+                    };
+                    Program.WriteJson(Path.Combine(options.DataDir, "settings.json"), merged);
+                    settings = merged;
+                    ok = true;
+                }
+            }
+            catch { Log("Update preferences storage failed; previous source remains active."); }
+            try
+            {
+                lock (settingsLock) { if (engineInput != null) engineInput.WriteLine(new JavaScriptSerializer().Serialize(new { type = "desktop/updates/saved", id = id, ok = ok })); }
+            }
+            catch { /* Parent disconnection rejects the pending update settings write. */ }
         }
 
         private object LoadWeixinSettings()
@@ -574,6 +1007,93 @@ namespace SakuraCode.Desktop
             catch { /* The engine closes its pending write when the parent pipe disconnects. */ }
         }
 
+        private object LoadAccountSettings()
+        {
+            string file = Path.Combine(options.DataDir, "sakuraapi.json");
+            if (!File.Exists(file)) return null;
+            try
+            {
+                var envelope = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
+                string encrypted = AsString(envelope, "protectedSettings");
+                if (String.IsNullOrEmpty(encrypted)) return null;
+                byte[] plain = ProtectedData.Unprotect(Convert.FromBase64String(encrypted), null, DataProtectionScope.CurrentUser);
+                try
+                {
+                    if (plain.Length > 65536) throw new IOException();
+                    var data = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(plain));
+                    RememberAccountSecrets(data);
+                    return data;
+                }
+                finally { Array.Clear(plain, 0, plain.Length); }
+            }
+            catch { Log("Saved SakuraAPI account could not be decrypted; sign in again."); return null; }
+        }
+
+        private void PersistAccountFrame(Dictionary<string, object> frame)
+        {
+            string id = AsString(frame, "id");
+            if (String.IsNullOrEmpty(id) || id.Length > 100) return;
+            bool ok = false;
+            try
+            {
+                object value;
+                if (!frame.TryGetValue("settings", out value)) throw new IOException();
+                lock (settingsLock)
+                {
+                    string file = Path.Combine(options.DataDir, "sakuraapi.json");
+                    if (value == null) { if (File.Exists(file)) File.Delete(file); accountSecrets = new string[0]; }
+                    else
+                    {
+                        if (!(value is Dictionary<string, object>)) throw new IOException();
+                        RememberAccountSecrets((Dictionary<string, object>)value);
+                        byte[] plain = Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(value));
+                        try
+                        {
+                            if (plain.Length > 65536) throw new IOException();
+                            string encrypted = Convert.ToBase64String(ProtectedData.Protect(plain, null, DataProtectionScope.CurrentUser));
+                            Program.WriteJson(file, new { protectedSettings = encrypted });
+                        }
+                        finally { Array.Clear(plain, 0, plain.Length); }
+                    }
+                }
+                ok = true;
+            }
+            catch { Log("SakuraAPI secure storage failed; login was not acknowledged."); }
+            try
+            {
+                lock (settingsLock)
+                {
+                    if (engineInput != null) engineInput.WriteLine(new JavaScriptSerializer().Serialize(new { type = "desktop/sakuraapi/saved", id = id, ok = ok }));
+                }
+            }
+            catch { /* Parent-pipe shutdown rejects the pending write on the engine side. */ }
+        }
+
+        // Record both account tokens and the separately selected inference Key.
+        // A failed save must still redact the received rotation from logs.
+        private void RememberAccountSecrets(Dictionary<string, object> data)
+        {
+            var secrets = new List<string>();
+            if (accountSecrets != null) secrets.AddRange(accountSecrets);
+            foreach (string name in new[] { "apiKey", "accessToken", "refreshToken" })
+            {
+                string secret = AsString(data, name);
+                if (!String.IsNullOrEmpty(secret)) secrets.Add(secret);
+            }
+            object value;
+            if (data.TryGetValue("client", out value) && value is Dictionary<string, object>)
+            {
+                var client = (Dictionary<string, object>)value;
+                foreach (string name in new[] { "accessToken", "refreshToken" })
+                {
+                    string secret = AsString(client, name);
+                    if (!String.IsNullOrEmpty(secret)) secrets.Add(secret);
+                }
+            }
+            if (secrets.Count > 48) secrets.RemoveRange(0, secrets.Count - 48);
+            accountSecrets = secrets.ToArray();
+        }
+
         private static string AsString(IDictionary<string, object> row, string key)
         {
             object value;
@@ -590,6 +1110,7 @@ namespace SakuraCode.Desktop
         {
             if (exiting) return;
             exiting = true;
+            Hide();
             if (launchCancellation != null) launchCancellation.Cancel();
             if (launchTask != null) await launchTask;
             await StopRuntimeAsync();
@@ -645,6 +1166,8 @@ namespace SakuraCode.Desktop
         private string Redact(string value)
         {
             foreach (string secret in new[] { activeSecret, Environment.GetEnvironmentVariable("SAKURA_API_KEY") })
+                if (!String.IsNullOrEmpty(secret)) value = value.Replace(secret, "[redacted]");
+            foreach (string secret in accountSecrets ?? new string[0])
                 if (!String.IsNullOrEmpty(secret)) value = value.Replace(secret, "[redacted]");
             return Regex.Replace(value, @"(?i)(Bearer\s+)[^\s]+", "$1[redacted]");
         }
@@ -707,6 +1230,80 @@ namespace SakuraCode.Desktop
 
     internal static class Native
     {
+        internal static void HideWindowBorder(IntPtr window)
+        {
+            try
+            {
+                // Windows 11: suppress just the DWM outline, retaining shadow,
+                // resize/snap styles and the existing native hit testing.
+                uint borderColor = 0xfffffffe; // DWMWA_COLOR_NONE
+                if (DwmSetWindowAttribute(window, 34, ref borderColor, 4) >= 0) return; // DWMWA_BORDER_COLOR
+                // Windows 10 has no border-color attribute. Disable its native
+                // frame rendering without removing WS_THICKFRAME or WS_SYSMENU.
+                uint policy = 1; // DWMNCRP_DISABLED
+                DwmSetWindowAttribute(window, 2, ref policy, 4); // DWMWA_NCRENDERING_POLICY
+            }
+            catch (DllNotFoundException) { /* No compositor: custom WM_NCPAINT still owns the frame. */ }
+            catch (EntryPointNotFoundException) { /* Same fallback for older runtimes. */ }
+        }
+
+        [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref uint value, int size);
+        [StructLayout(LayoutKind.Sequential)] internal struct NativePoint { public int X, Y; }
+        [StructLayout(LayoutKind.Sequential)] internal struct NativeRect { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)] internal struct MinMaxInfo
+        {
+            public NativePoint Reserved, MaxSize, MaxPosition, MinTrackSize, MaxTrackSize;
+        }
+        [StructLayout(LayoutKind.Sequential)] internal struct MonitorInfo
+        {
+            public int Size;
+            public NativeRect Monitor, Work;
+            public uint Flags;
+        }
+
+        internal static void LimitMaximizedBounds(IntPtr window, IntPtr pointer)
+        {
+            var monitor = new MonitorInfo { Size = Marshal.SizeOf(typeof(MonitorInfo)) };
+            if (!GetMonitorInfo(MonitorFromWindow(window, 2), ref monitor)) return;
+            var limits = (MinMaxInfo)Marshal.PtrToStructure(pointer, typeof(MinMaxInfo));
+            limits.MaxPosition.X = monitor.Work.Left - monitor.Monitor.Left;
+            limits.MaxPosition.Y = monitor.Work.Top - monitor.Monitor.Top;
+            limits.MaxSize.X = monitor.Work.Right - monitor.Work.Left;
+            limits.MaxSize.Y = monitor.Work.Bottom - monitor.Work.Top;
+            Marshal.StructureToPtr(limits, pointer, false);
+        }
+
+        internal static int ResizeHit(IntPtr window, IntPtr parameter, int inset)
+        {
+            NativeRect rect;
+            if (!GetWindowRect(window, out rect)) return 0;
+            long packed = parameter.ToInt64();
+            int x = (short)(packed & 0xffff), y = (short)((packed >> 16) & 0xffff);
+            bool left = x >= rect.Left && x < rect.Left + inset;
+            bool right = x < rect.Right && x >= rect.Right - inset;
+            bool top = y >= rect.Top && y < rect.Top + inset;
+            bool bottom = y < rect.Bottom && y >= rect.Bottom - inset;
+            if (top && left) return 13;
+            if (top && right) return 14;
+            if (bottom && left) return 16;
+            if (bottom && right) return 17;
+            if (left) return 10;
+            if (right) return 11;
+            if (top) return 12;
+            if (bottom) return 15;
+            return 0;
+        }
+
+        [DllImport("kernel32.dll", EntryPoint = "SetLastError")] internal static extern void ClearLastError(uint error);
+        [DllImport("user32.dll", SetLastError = true)] internal static extern IntPtr SetParent(IntPtr window, IntPtr parent);
+        [DllImport("user32.dll", SetLastError = true)] internal static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
+        [DllImport("user32.dll", SetLastError = true)] internal static extern IntPtr SetWindowLongPtr(IntPtr window, int index, IntPtr value);
+        [DllImport("user32.dll", SetLastError = true)] internal static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+        [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr window, out NativeRect rect);
+        [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+        [DllImport("user32.dll")] internal static extern bool ReleaseCapture();
+        [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
         [StructLayout(LayoutKind.Sequential)] internal struct JobBasicLimits
         {
             public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
@@ -736,6 +1333,46 @@ namespace SakuraCode.Desktop
         [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr window);
         [DllImport("user32.dll")] internal static extern bool ShowWindow(IntPtr window, int command);
         [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(IntPtr window);
+        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] internal static extern IntPtr GetParent(IntPtr window);
+        [DllImport("user32.dll")] internal static extern bool GetClientRect(IntPtr window, out NativeRect rect);
+        [DllImport("user32.dll")] internal static extern bool ClientToScreen(IntPtr window, ref NativePoint point);
+        [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+        [DllImport("user32.dll")] private static extern bool IsChild(IntPtr parent, IntPtr window);
+        [DllImport("user32.dll")] private static extern IntPtr SetFocus(IntPtr window);
+        [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint from, uint to, bool attach);
+        [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+        [StructLayout(LayoutKind.Sequential)] private struct GuiThreadInfo
+        {
+            public uint Size, Flags;
+            public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
+            public NativeRect CaretRect;
+        }
+        [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
+
+        internal static void FocusEmbeddedBrowser(IntPtr host, IntPtr child)
+        {
+            // Never change another application's focus. Existing renderer/IME
+            // child focus is already correct and must not be reset.
+            if (!IsWindow(host) || !IsWindow(child) || GetParent(child) != host ||
+                GetAncestor(GetForegroundWindow(), 2) != host) return;
+            uint owner;
+            uint browserThread = GetWindowThreadProcessId(child, out owner);
+            uint currentThread = GetCurrentThreadId();
+            if (browserThread == 0) return;
+            var info = new GuiThreadInfo { Size = (uint)Marshal.SizeOf(typeof(GuiThreadInfo)) };
+            // A background browser thread can retain a stale focus HWND.
+            // Inspect the foreground input queue, not the child's old queue.
+            if (GetGUIThreadInfo(0, ref info) &&
+                (info.Focus == child || IsChild(child, info.Focus))) return;
+            bool attached = browserThread != currentThread;
+            if (attached && !AttachThreadInput(currentThread, browserThread, true)) return;
+            try
+            {
+                if (GetAncestor(GetForegroundWindow(), 2) == host && GetParent(child) == host) SetFocus(child);
+            }
+            finally { if (attached) AttachThreadInput(currentThread, browserThread, false); }
+        }
         private delegate bool EnumWindowProc(IntPtr window, IntPtr parameter);
         [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowProc callback, IntPtr parameter);
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
@@ -783,8 +1420,7 @@ namespace SakuraCode.Desktop
             if (pid == 0) return false;
             try
             {
-                var process = Process.GetProcessById((int)pid);
-                return process != null && !process.HasExited;
+                using (var process = Process.GetProcessById((int)pid)) return !process.HasExited;
             }
             catch { return false; }
         }
@@ -796,7 +1432,7 @@ namespace SakuraCode.Desktop
             {
                 foreach (int pid in DescendantPids((int)rootPid))
                 {
-                    try { Process.GetProcessById(pid).Kill(); } catch { }
+                    try { using (var process = Process.GetProcessById(pid)) process.Kill(); } catch { }
                 }
             }
             catch { }
@@ -807,20 +1443,30 @@ namespace SakuraCode.Desktop
         private static System.Collections.Generic.List<int> DescendantPids(int rootPid)
         {
             var result = new System.Collections.Generic.List<int> { rootPid };
+            var seen = new HashSet<int> { rootPid };
             var queue = new System.Collections.Generic.Queue<int>();
             queue.Enqueue(rootPid);
-            var snapshot = TakeSnapshot();
+            var children = new Dictionary<int, List<int>>();
+            foreach (var entry in TakeSnapshot())
+            {
+                List<int> ids;
+                if (!children.TryGetValue(entry.ParentPid, out ids)) children[entry.ParentPid] = ids = new List<int>();
+                ids.Add(entry.Pid);
+            }
             try
             {
                 while (queue.Count > 0 && result.Count < 512)
                 {
                     int current = queue.Dequeue();
-                    foreach (var entry in snapshot)
+                    List<int> ids;
+                    if (!children.TryGetValue(current, out ids)) continue;
+                    foreach (int pid in ids)
                     {
-                        if (entry.ParentPid == current && !result.Contains(entry.Pid))
+                        if (seen.Add(pid))
                         {
-                            result.Add(entry.Pid);
-                            queue.Enqueue(entry.Pid);
+                            result.Add(pid);
+                            queue.Enqueue(pid);
+                            if (result.Count >= 512) break;
                         }
                     }
                 }
@@ -831,28 +1477,37 @@ namespace SakuraCode.Desktop
 
         private struct ProcessEntry { public int Pid; public int ParentPid; }
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct ProcessSnapshotEntry
+        {
+            public uint Size, Usage, ProcessId;
+            public UIntPtr DefaultHeapId;
+            public uint ModuleId, Threads, ParentProcessId;
+            public int PriorityClassBase;
+            public uint Flags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string ExecutableFile;
+        }
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+        [DllImport("kernel32.dll", EntryPoint = "Process32FirstW", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool Process32First(IntPtr snapshot, ref ProcessSnapshotEntry entry);
+        [DllImport("kernel32.dll", EntryPoint = "Process32NextW", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool Process32Next(IntPtr snapshot, ref ProcessSnapshotEntry entry);
+
         private static ProcessEntry[] TakeSnapshot()
         {
             var entries = new System.Collections.Generic.List<ProcessEntry>(128);
+            // This scan runs repeatedly while Chromium starts. WMI loads a
+            // management provider and queries every process on each 100ms poll;
+            // the native Toolhelp snapshot supplies just the two IDs we need.
+            IntPtr snapshot = CreateToolhelp32Snapshot(2, 0); // TH32CS_SNAPPROCESS
+            if (snapshot == new IntPtr(-1)) return entries.ToArray();
             try
             {
-                // .NET Framework's Process class does not expose the parent pid;
-                // Win32_Process does, and it is cheap enough for a one-off scan.
-                foreach (var row in new System.Management.ManagementObjectSearcher("SELECT ProcessId, ParentProcessId FROM Win32_Process").Get())
+                var row = new ProcessSnapshotEntry { Size = (uint)Marshal.SizeOf(typeof(ProcessSnapshotEntry)) };
+                if (Process32First(snapshot, ref row)) do
                 {
-                    try
-                    {
-                        entries.Add(new ProcessEntry
-                        {
-                            Pid = Convert.ToInt32(row["ProcessId"], System.Globalization.CultureInfo.InvariantCulture),
-                            ParentPid = Convert.ToInt32(row["ParentProcessId"], System.Globalization.CultureInfo.InvariantCulture),
-                        });
-                    }
-                    catch { }
-                    finally { try { row.Dispose(); } catch { } }
-                }
+                    entries.Add(new ProcessEntry { Pid = (int)row.ProcessId, ParentPid = (int)row.ParentProcessId });
+                } while (Process32Next(snapshot, ref row));
             }
             catch { }
+            finally { CloseHandle(snapshot); }
             return entries.ToArray();
         }
     }

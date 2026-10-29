@@ -18,6 +18,10 @@ export class HarnessContext extends Context {
   get sessions(): SessionService {
     return this.get<SessionService>('sessions')
   }
+  /** Optional per-turn filesystem preimages. */
+  get checkpoints(): import('./checkpoints.js').CheckpointService | undefined {
+    return this.peek<import('./checkpoints.js').CheckpointService>('checkpoints')
+  }
   /** Model adapters / streaming. */
   get llm(): LLMService {
     return this.get<LLMService>('llm')

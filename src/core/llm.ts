@@ -7,6 +7,8 @@
 
 import type { Context } from '../kernel/index.js'
 import type { ChatMessage, LLMRequest, ModelAdapter, StreamChunk, ThinkingLevel, UsageStats } from './types.js'
+import type { RetryService } from './retry.js'
+import { LLMRequestError, retryableStatus, retryAfterMilliseconds } from '../util/retry.js'
 
 /** A configuration assessment, never a connectivity probe or a credentials dump. */
 export interface ModelStatus {
@@ -58,6 +60,15 @@ export class LLMService {
 
   setThinking(level: ThinkingLevel): void {
     this.thinking = level
+  }
+
+  /** App-owned routing policy. Discards configuration/environment providers
+   * without changing their files; the CLI's normal multi-provider API remains. */
+  replaceAdapters(adapter: ModelAdapter): void {
+    this.adapters = new Map([[adapter.id, adapter]])
+    this.configuredAdapters = new Map([[adapter.id, adapter]])
+    this.defaultId = this.configuredDefaultId = adapter.id
+    this.selection = adapter.defaultModel
   }
 
   register(adapter: ModelAdapter, opts: { default?: boolean; replace?: boolean } = {}): () => void {
@@ -298,13 +309,17 @@ export class LLMService {
     const adapter = this.pick(requested)
     const model = requested ?? adapter.defaultModel
     const resolved: LLMRequest = model && model !== req.model ? { ...req, model } : req
-    const payload = await this.ctx.waterfall<{ req: LLMRequest; source: AsyncIterable<StreamChunk> | null }>(
-      'llm/stream',
-      async (p) => ({ ...p, source: adapter.stream(p.req) }),
-      { req: resolved, source: null },
-    )
-    if (!payload.source) throw new Error('llm/stream pipeline produced no stream source')
-    yield* payload.source
+    const ctx = this.ctx
+    const source = async function* (request: LLMRequest): AsyncIterable<StreamChunk> {
+      const payload = await ctx.waterfall<{ req: LLMRequest; source: AsyncIterable<StreamChunk> | null }>(
+        'llm/stream', async p => ({ ...p, source: adapter.stream(p.req) }), { req: request, source: null },
+      )
+      if (!payload.source) throw new Error('llm/stream pipeline produced no stream source')
+      yield* payload.source
+    }
+    const retry = ctx.peek<RetryService>('retry')
+    if (retry) yield* retry.stream(source, resolved)
+    else yield* source(resolved)
   }
 }
 
@@ -347,6 +362,10 @@ export interface OpenAICompatOptions {
   thinkingModel?: string
   /** Explicit credential requirement; unset infers from the endpoint host (loopback = no key). */
   requiresApiKey?: boolean
+  /** Private transport injection for offline acceptance; not a user/YAML setting. */
+  fetch?: typeof globalThis.fetch
+  /** Fixed-origin providers must not forward their credentials through redirects. */
+  redirect?: 'error'
 }
 
 /** Header names that carry credentials — used for scrubbing and readiness checks. */
@@ -420,7 +439,7 @@ export class OpenAICompatAdapter implements ModelAdapter {
   }
 
   private async post(url: string, body: Record<string, unknown>, signal: AbortSignal | undefined): Promise<Response> {
-    const response = await fetch(url, {
+    const response = await (this.opts.fetch ?? fetch)(url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -429,10 +448,14 @@ export class OpenAICompatAdapter implements ModelAdapter {
       },
       body: JSON.stringify(body),
       signal,
+      credentials: 'omit',
+      ...(this.opts.redirect ? { redirect: this.opts.redirect } : {}),
     })
     if (!response.ok || !response.body) {
       const detail = await response.text().catch(() => '')
-      throw new Error(`LLM request failed: HTTP ${response.status} ${detail.slice(0, 400)}`)
+      const quotaFailure = /insufficient_quota|quota_exhausted|insufficient_balance|billing_hard_limit_reached/i.test(detail)
+      throw new LLMRequestError(`LLM request failed: HTTP ${response.status} ${detail.slice(0, 400)}`,
+        !quotaFailure && retryableStatus(response.status), retryAfterMilliseconds(response.headers.get('retry-after')), response.status)
     }
     return response
   }
@@ -465,16 +488,24 @@ export class OpenAICompatAdapter implements ModelAdapter {
 
     const response = await this.post(url, body, req.signal)
     let finishReason: 'stop' | 'tool_calls' | 'length' = 'stop'
+    let finished = false
     for await (const event of sseEvents(response.body!)) {
-      if (!event || event === '[DONE]') break
+      if (!event) continue
+      if (event === '[DONE]') { finished = true; break }
       let parsed: {
         choices?: Array<{ delta?: SSEChoiceDelta; finish_reason?: string | null }>
         usage?: SSEUsage
+        error?: { message?: string; status?: number; code?: string }
       }
       try {
         parsed = JSON.parse(event)
       } catch {
         continue
+      }
+      if (parsed.error) {
+        const status = Number(parsed.error.status)
+        throw new LLMRequestError(`LLM request failed: ${parsed.error.message ?? 'upstream stream error'}`,
+          retryableStatus(status) || ['rate_limit_exceeded', 'server_error', 'overloaded_error'].includes(parsed.error.code ?? ''))
       }
       const choice = parsed.choices?.[0]
       const delta = choice?.delta
@@ -494,10 +525,12 @@ export class OpenAICompatAdapter implements ModelAdapter {
         }
       }
       const fr = choice?.finish_reason
+      if (fr) finished = true
       if (fr === 'tool_calls') finishReason = 'tool_calls'
       else if (fr === 'length') finishReason = 'length'
       if (parsed.usage) yield { type: 'usage', ...usageChunk(parsed.usage) }
     }
+    if (!finished) throw new LLMRequestError('LLM stream interrupted before completion', true)
     yield { type: 'done', reason: finishReason }
   }
 
@@ -530,6 +563,7 @@ export class OpenAICompatAdapter implements ModelAdapter {
     const calls = new Map<string, { index: number; callId?: string; name?: string; argsEmitted: boolean }>()
     let nextIndex = 0
     let anyText = false
+    let completed = false
     let finishReason: 'stop' | 'tool_calls' | 'length' = 'stop'
     const pendingUsage: UsageStats = {}
 
@@ -554,9 +588,10 @@ export class OpenAICompatAdapter implements ModelAdapter {
       let parsed: Record<string, unknown>
       try { parsed = JSON.parse(event) } catch { continue }
       const type = String(parsed.type ?? '')
-      if (type === 'error') {
-        const message = (parsed.error as { message?: string } | undefined)?.message ?? 'upstream responses error'
-        throw new Error(`LLM request failed: ${message}`)
+      if (type === 'error' || type === 'response.failed') {
+        const failure = (type === 'response.failed' ? (parsed.response as { error?: unknown } | undefined)?.error : parsed.error ?? parsed) as { message?: string; code?: string; status?: number } | undefined
+        const message = failure?.message ?? 'upstream responses error'
+        throw new LLMRequestError(`LLM request failed: ${message}`, ['rate_limit_exceeded', 'server_error', 'overloaded_error'].includes(failure?.code ?? '') || retryableStatus(failure?.status ?? 0))
       }
       if (type === 'response.output_text.delta') {
         const delta = String(parsed.delta ?? '')
@@ -591,6 +626,7 @@ export class OpenAICompatAdapter implements ModelAdapter {
         continue
       }
       if (type === 'response.completed' || type === 'response.incomplete') {
+        completed = true
         const responsePayload = parsed.response as Record<string, unknown> | undefined
         const usage = responsePayload?.usage as
           | {
@@ -621,6 +657,7 @@ export class OpenAICompatAdapter implements ModelAdapter {
         if (type === 'response.incomplete') finishReason = 'length'
       }
     }
+    if (!completed) throw new LLMRequestError('LLM responses stream interrupted before completion', true)
     if (pendingUsage.inputTokens !== undefined || pendingUsage.outputTokens !== undefined) {
       yield { type: 'usage', ...pendingUsage }
     }

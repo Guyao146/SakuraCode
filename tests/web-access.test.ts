@@ -107,17 +107,25 @@ describe('remote Web — access policy', () => {
     const cookie = await login(base, VIEWER)
     expect(await (await fetch(base + '/api/auth', { headers: { cookie } })).json()).toMatchObject({ role: 'viewer' })
     const sid = handle.harness.main().sessionId
-    for (const route of ['/api/state', '/api/commands', '/api/mcp', `/api/sessions/${sid}/records`, `/api/sessions/${sid}/export`]) {
+    for (const route of ['/api/state', '/api/collaboration', '/api/commands', '/api/mcp', `/api/sessions/${sid}/records`, `/api/sessions/${sid}/export`]) {
       expect((await fetch(base + route, { headers: { cookie } })).status, route).toBe(200)
     }
     const stream = await fetch(base + '/api/events', { headers: { cookie }, signal: AbortSignal.timeout(5000) })
     expect(stream.status).toBe(200)
     expect(stream.headers.get('x-accel-buffering')).toBe('no')
     await stream.body?.cancel()
-    for (const route of ['/api/message', '/api/interrupt', '/api/settings', '/api/sessions', '/api/agents', '/api/agents/a/message', '/api/agents/a/interrupt', '/api/approvals/a', '/api/questions/a', '/api/plans/a', '/api/mcp/a/reconnect']) {
+    for (const route of ['/api/message', '/api/interrupt', '/api/settings', '/api/sessions', '/api/sessions/batch-delete', '/api/account/sakura/login', '/api/account/sakura/poll', '/api/account/sakura/retry', '/api/account/sakura/page', '/api/account/sakura/logout', '/api/agents', '/api/agents/a/message', '/api/agents/a/interrupt', '/api/approvals/a', '/api/questions/a', '/api/plans/a', '/api/mcp/a/reconnect']) {
       expect((await post(base, route, {}, { cookie })).status, route).toBe(403)
       expect((await post(base, route, {}, bearer(VIEWER))).status, route + ' bearer').toBe(403)
     }
+    for (const headers of [{ cookie }, bearer(VIEWER)]) {
+      expect((await fetch(base + `/api/sessions/${sid}`, { method: 'DELETE', headers })).status).toBe(403)
+      expect((await fetch(base + `/api/sessions/${sid}`, { method: 'PATCH', headers, body: JSON.stringify({ title: 'not allowed' }) })).status).toBe(403)
+    }
+    expect(handle.harness.main().sessionId).toBe(sid)
+    expect((await fetch(base + `/api/sessions/${sid}`, { method: 'DELETE' })).status).toBe(401)
+    expect((await fetch(base + `/api/sessions/${sid}`, { method: 'DELETE', headers: bearer() })).status).toBe(200)
+    expect((await fetch(base + `/api/sessions/${sid}/records`, { headers: { cookie } })).status).toBe(404)
   })
 
   it('revokes a logged-out cookie and its already-open SSE stream', async () => {

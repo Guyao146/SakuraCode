@@ -18,16 +18,22 @@ import type { Context } from '../kernel/index.js'
 import type { HarnessContext } from './context.js'
 import { SessionService } from './session.js'
 import type { LLMService } from './llm.js'
-import type { AssistantMessage, ChatMessage, StreamSummary, ToolCallId, UsageStats } from './types.js'
+import type { AssistantMessage, ChatMessage, CheckpointTarget, StreamSummary, ToolCallId, TurnMetrics } from './types.js'
+import { storeChatFiles, type ChatUploadFile, type StoredChatFiles } from './attachments.js'
+import { estimateRequestContextTokens } from '../util/context.js'
+import { TurnMeter } from '../util/turn-metrics.js'
 
 export interface TurnResult {
   output: string
   steps: number
   cancelled?: boolean
   error?: string
+  metrics?: TurnMetrics
+  userSeq?: number
 }
 
 export interface AgentMeta {
+  checkpoint?: CheckpointTarget
   parentSession?: string
   parentAgent?: string
   description?: string
@@ -76,9 +82,26 @@ export interface AgentHandle {
   interrupt(): void
 }
 
-/** Optional per-turn extras (e.g. user-attached images as data URLs). */
+/** Explicit per-turn images/files; file bytes are saved in this agent's own session. */
 export interface TurnOptions {
+  /** Internal edit retry: continue a persisted final user message exactly once. */
+  resumeUserSeq?: number
+  originalText?: string
+  checkpoint?: CheckpointTarget
   images?: string[]
+  files?: readonly ChatUploadFile[]
+  /** HTTP uploads are fully saved before acceptance, including queued turns. */
+  preparedFiles?: StoredChatFiles
+  /** Internal provenance: generated summaries and mailbox traffic are never user memory. */
+  source?: 'user' | 'agent' | 'expert-summary'
+  from?: string
+  expertMode?: boolean
+  teamSize?: number
+  /** Local accounting group; checkpoints propagate it to delegated mailbox turns. */
+  turnGroup?: string
+  /** Fan-out waits only for the one canonical user write, never for the main reply. */
+  sharedUser?: Promise<{ sessionId: string; userSeq: number } | undefined>
+  onUserMessage?: (record: { sessionId: string; userSeq: number }) => void
 }
 
 export interface AgentLoop {
@@ -94,6 +117,7 @@ export interface AgentRuntime {
   toolFilter?: (name: string) => boolean
   maxSteps: number
   meta: AgentMeta
+  sharedContext?: { session: Sessionish; userSeq?: number; mirroredUser: boolean }
 }
 
 // ---------------------------------------------------------------------------
@@ -101,54 +125,106 @@ export interface AgentRuntime {
 // ---------------------------------------------------------------------------
 
 const SUBAGENT_FAMILY = new Set(['subagent', 'list_subagent_models'])
-
-/**
- * Sum usage across the steps of one turn. A field stays undefined only when
- * no step reported it; reported values add, even across optional gaps.
- */
-function mergeUsage(total: UsageStats | undefined, add: UsageStats): UsageStats {
-  const sum = (a: number | undefined, b: number | undefined): number | undefined =>
-    a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0)
-  return {
-    inputTokens: sum(total?.inputTokens, add.inputTokens),
-    outputTokens: sum(total?.outputTokens, add.outputTokens),
-    cachedTokens: sum(total?.cachedTokens, add.cachedTokens),
-    reasoningTokens: sum(total?.reasoningTokens, add.reasoningTokens),
-  }
-}
+const EXPERT_MEMORY_NOTE = '专家协作的长期记忆仅采集用户明确提出的调整方向，不记成员发言、工具输出或自行推导的结论。不要尝试通过 memory_write、命令或文件工具写记忆；用户仍可在设置中手动管理。'
 
 export class DefaultAgentLoop implements AgentLoop {
   constructor(private ctx: HarnessContext) {}
 
   async run(agent: AgentRuntime, session: Sessionish, input: string, signal: AbortSignal, opts?: TurnOptions): Promise<TurnResult> {
+    const meter = new TurnMeter()
+    if (opts?.resumeUserSeq !== undefined) {
+      const last = session.events.at(-1)
+      const claimed = last?.type === 'session/note' && (last.payload as { note?: string; userSeq?: number }).note === 'generation-start' &&
+        (last.payload as { userSeq?: number }).userSeq === opts.resumeUserSeq
+      const user = session.events.find(record => record.seq === opts.resumeUserSeq)
+      if (!claimed || !user || user.type !== 'user/message') throw new Error('编辑后的消息已改变，未重复生成。')
+    }
     // turn/start — listeners may claim or rewrite the input; throw to reject the turn.
     let payload: { input: string; agent: AgentRuntime; session: Sessionish }
     try {
       payload = await this.ctx.waterfall('turn/start', async (p) => p, { input, agent, session })
+      if (opts?.resumeUserSeq !== undefined && payload.input !== input) throw new Error('编辑消息已经保存；插件不能在重新生成时再次改写它，请发送新消息。')
     } catch (error) {
+      await opts?.preparedFiles?.remove()
       const output = `turn rejected: ${(error as Error).message}`
       await session.append({ type: 'session/note', payload: { note: output } })
-      return { output, steps: 0 }
+      const metrics = meter.finish('rejected')
+      this.ctx.emit('ui/turn/end', { agentId: agent.id, sessionId: session.id, error: output, metrics, main: agent.meta.role === 'main' })
+      return { output, steps: 0, error: output, metrics }
     }
     input = payload.input
 
-    await session.append({
-      type: 'user/message',
-      payload: { content: input, from: agent.meta.parentAgent, ...(opts?.images?.length ? { images: opts.images } : {}) },
-    })
+    if (opts?.files?.length && !session.dir) throw new Error('附件需要可持久保存的会话目录。')
+    if (opts?.files?.length) signal.throwIfAborted()
+    const uploaded = opts?.preparedFiles ?? (opts?.files?.length ? await storeChatFiles(session.dir!, opts.files) : undefined)
+    const images = [...(opts?.images ?? []), ...(uploaded?.images ?? [])]
+    let userSeq = opts?.resumeUserSeq
+    try {
+      if (uploaded) signal.throwIfAborted()
+      if (userSeq === undefined) {
+        const record = await session.append({
+          type: 'user/message',
+          payload: { content: input + (uploaded?.context ?? ''), originalText: opts?.originalText,
+            from: opts?.from ?? agent.meta.parentAgent, source: opts?.source ?? (agent.meta.parentAgent ? 'agent' : 'user'),
+            ...(opts?.expertMode || agent.meta.expertContext ? { expertMode: true } : {}),
+            ...(images.length ? { images } : {}), ...(uploaded ? { attachments: uploaded.attachments } : {}) },
+        }) as { seq?: number } | undefined
+        userSeq = record?.seq
+      }
+    } catch (error) { await uploaded?.remove(); throw error }
 
-    this.ctx.emit('ui/turn/start', { agentId: agent.id, sessionId: session.id })
+    if (userSeq !== undefined) opts?.onUserMessage?.({ sessionId: session.id, userSeq })
+    let publishedSeq = agent.sharedContext?.mirroredUser ? userSeq ?? 0 : (userSeq ?? 1) - 1
+    const publish = async (metrics?: TurnMetrics): Promise<void> => {
+      const shared = agent.sharedContext
+      if (!shared || userSeq === undefined) return
+      const lastSeq = session.events.at(-1)?.seq ?? publishedSeq
+      const messages = metrics ? [] : session.deriveMessages({ fromSeq: publishedSeq + 1, committedOnly: true }).filter(message => message.role !== 'system')
+      if (!messages.length && !metrics) return
+      await shared.session.append({ type: 'collaboration/message', payload: {
+        key: `${session.id}:${userSeq}:${metrics ? 'end' : lastSeq}`, agentId: agent.id, agentName: agent.name,
+        ...(typeof agent.meta.expert === 'string' ? { expert: agent.meta.expert } : {}), sourceSessionId: session.id,
+        turnSeq: userSeq, userSeq: shared.userSeq, messages, ...(metrics ? { metrics } : {}),
+      } })
+      if (!metrics) publishedSeq = lastSeq
+    }
+    const finish = async (result: TurnResult): Promise<TurnResult> => {
+      await publish()
+      await this.serialStopping(agent, session)
+      const metrics = meter.finish(result.cancelled ? 'cancelled' : result.error ? 'error' : 'done')
+      const completed = { ...result, userSeq, metrics }
+      await session.append({ type: 'session/note', payload: { note: 'turn-summary', userSeq, metrics,
+        ...(opts?.teamSize ? { teamSize: opts.teamSize } : {}) } })
+      await publish(metrics)
+      this.ctx.emit('turn/end', { agentId: agent.id, sessionId: session.id, ...completed })
+      this.ctx.emit('ui/turn/end', { agentId: agent.id, sessionId: session.id, ...completed,
+        ...(meter.usage ? { usage: meter.usage } : {}), ...(opts?.teamSize ? { teamSize: opts.teamSize } : {}), main: agent.meta.role === 'main' })
+      return completed
+    }
+
+    const checkpoint = opts?.checkpoint ?? (agent.sharedContext?.userSeq !== undefined ?
+      { sessionId: agent.sharedContext.session.id, turnSeq: agent.sharedContext.userSeq } : undefined) ??
+      (Number.isSafeInteger(userSeq) ? { sessionId: session.id, turnSeq: userSeq! } : undefined)
+    this.ctx.emit('ui/turn/start', { agentId: agent.id, sessionId: session.id, userSeq, originalText: opts?.originalText,
+      startedAt: meter.startedAt, ...(opts?.teamSize ? { teamSize: opts.teamSize } : {}), main: agent.meta.role === 'main' })
     const isMain = agent.meta.role === 'main'
     let steps = 0
     let lastText = ''
     let turnError: string | undefined
     let summary: StreamSummary | undefined
-    /** Aggregated usage across every step of this turn (summary holds only the last step). */
-    let turnUsage: UsageStats | undefined
+    let assistantLogged = false
+    let inputEstimate = 0
+    let attemptAccounted = false
+    let activeCalls = new Map<number, ToolCallId>()
+    let attemptStarted = 0
     const answered = new Set<string>()
 
     try {
       while (steps < agent.maxSteps) {
+        if (signal.aborted) throw new CancellationError()
+        summary = undefined
+        assistantLogged = false
+        attemptAccounted = false
         // agent/pre-step — listeners may rewrite or reject; rejection closes the turn.
         const pre = await this.ctx.waterfall('agent/pre-step', async (p) => p, {
           agent,
@@ -162,7 +238,14 @@ export class DefaultAgentLoop implements AgentLoop {
 
         // Assemble request: prompt assembly (logged when changed) + tool schemas + frozen history.
         const system = await this.syncSystemPrompt(session, agent)
-        const messages: ChatMessage[] = session.deriveMessages()
+        const shared = agent.sharedContext
+        const throughSeq = shared?.session.events.at(-1)?.seq
+        const messages: ChatMessage[] = shared ? [
+          ...shared.session.deriveMessages({ userSeq: shared.userSeq, throughSeq, committedOnly: true }),
+          ...session.deriveMessages({ fromSeq: publishedSeq + 1, committedOnly: true }).filter(message => message.role !== 'system'),
+        ] : session.deriveMessages()
+        if (shared) await session.append({ type: 'session/note', payload: { note: 'expert-context', contextSessionId: shared.session.id,
+          throughSeq, userSeq: shared.userSeq, ownFromSeq: publishedSeq + 1, step: steps } })
         if (messages[0]?.role === 'system') messages[0].content = system
         else messages.unshift({ role: 'system', content: system })
 
@@ -173,6 +256,7 @@ export class DefaultAgentLoop implements AgentLoop {
           messages,
           tools: toolsSchemas,
           signal,
+          retryContext: { agentId: agent.id, sessionId: session.id, main: isMain },
           ...(thinking !== 'off' ? { thinking } : {}),
         }
 
@@ -182,15 +266,29 @@ export class DefaultAgentLoop implements AgentLoop {
           session,
           request,
         })
+        inputEstimate = estimateRequestContextTokens(reqPayload.request.messages, reqPayload.request.tools ?? [])
 
         // llm/stream — consume the model stream, accumulate the assistant message.
         summary = { text: '', toolCalls: [], durationMs: 0 }
         let thinkingText = ''
-        const started = Date.now()
+        let started = Date.now()
         const calls = new Map<number, ToolCallId>()
+        activeCalls = calls; attemptStarted = started
         for await (const chunk of this.ctx.llm.stream(reqPayload.request)) {
           if (signal.aborted) throw new CancellationError()
-          if (chunk.type === 'text') {
+          if (chunk.type === 'reset') {
+            summary.durationMs = Date.now() - started
+            summary.toolCalls = [...calls.values()]
+            meter.attempt(summary, inputEstimate, true)
+            await session.append({ type: 'assistant/attempt', payload: { error: chunk.error, stream: { ...summary }, retry: true } })
+            summary = { text: '', toolCalls: [], durationMs: 0 }
+            thinkingText = ''
+            calls.clear()
+            attemptAccounted = false
+            started = Date.now()
+            attemptStarted = started
+            this.ctx.emit('ui/stream/reset', { agentId: agent.id, sessionId: session.id, main: isMain })
+          } else if (chunk.type === 'text') {
             summary.text += chunk.delta
             this.ctx.emit('ui/text', {
               agentId: agent.id,
@@ -214,13 +312,10 @@ export class DefaultAgentLoop implements AgentLoop {
             if (chunk.argsDelta) existing.function.arguments += chunk.argsDelta
             calls.set(chunk.index, existing)
           } else if (chunk.type === 'usage') {
-            summary.usage = {
-              inputTokens: chunk.inputTokens,
-              outputTokens: chunk.outputTokens,
-              cachedTokens: chunk.cachedTokens,
-              reasoningTokens: chunk.reasoningTokens,
+            summary.usage ??= {}
+            for (const field of ['inputTokens', 'outputTokens', 'cachedTokens', 'reasoningTokens'] as const) {
+              if (typeof chunk[field] === 'number' && Number.isFinite(chunk[field]) && chunk[field]! >= 0) summary.usage[field] = chunk[field]
             }
-            turnUsage = mergeUsage(turnUsage, summary.usage)
           } else if (chunk.type === 'error') {
             throw new Error(chunk.error)
           } else if (chunk.type === 'done') {
@@ -233,6 +328,8 @@ export class DefaultAgentLoop implements AgentLoop {
         for (const call of summary.toolCalls) {
           if (!call.id) call.id = `${agent.id}-call-${steps}-${call.function.name}-${Math.random().toString(36).slice(2, 8)}`
         }
+        meter.attempt(summary, inputEstimate)
+        attemptAccounted = true
 
         const assistantMessage: AssistantMessage = {
           role: 'assistant',
@@ -240,9 +337,11 @@ export class DefaultAgentLoop implements AgentLoop {
           ...(summary.toolCalls.length ? { tool_calls: summary.toolCalls } : {}),
         }
         await session.append({ type: 'assistant/message', payload: { ...assistantMessage, stream: summary } })
+        assistantLogged = true
         lastText = summary.text
 
         if (!summary.toolCalls.length) {
+          await publish()
           this.ctx.emit('step/end', { agentId: agent.id, step: steps, sessionId: session.id })
           break // nothing is owed — the turn closes
         }
@@ -266,6 +365,7 @@ export class DefaultAgentLoop implements AgentLoop {
             sessionId: session.id,
             agentId: agent.id,
             signal,
+            checkpoint,
           })
           answered.add(call.id)
           await session.append({
@@ -290,7 +390,9 @@ export class DefaultAgentLoop implements AgentLoop {
             ...(result.images ? { images: result.images } : {}),
             main: isMain,
           })
+          if (signal.aborted) throw new CancellationError()
         }
+        await publish()
         this.ctx.emit('step/end', { agentId: agent.id, step: steps, sessionId: session.id })
         if (turnError) break
       }
@@ -305,7 +407,9 @@ export class DefaultAgentLoop implements AgentLoop {
       // assistant(tool_calls) without matching tool results — that would
       // make the session unopenable by the model API on the next turn.
       if (summary) {
-        for (const call of summary.toolCalls) {
+        if (!assistantLogged) { summary.toolCalls = [...activeCalls.values()]; summary.durationMs = Date.now() - attemptStarted }
+        if (!attemptAccounted) { meter.attempt(summary, inputEstimate); attemptAccounted = true }
+        for (const call of assistantLogged ? summary.toolCalls : []) {
           if (answered.has(call.id)) continue
           await session.append({
             type: 'tool/result',
@@ -314,40 +418,25 @@ export class DefaultAgentLoop implements AgentLoop {
         }
       }
       if (error instanceof CancellationError || (error as Error)?.name === 'AbortError') {
-        await session.append({ type: 'assistant/attempt', payload: { error: 'cancelled' } })
-        await this.serialStopping(agent, session)
-        this.ctx.emit('turn/end', { agentId: agent.id, sessionId: session.id, cancelled: true })
-        this.ctx.emit('ui/turn/end', { agentId: agent.id, sessionId: session.id, cancelled: true, ...(turnUsage ? { usage: turnUsage } : {}), main: isMain })
-        return { output: lastText, steps, cancelled: true }
+        await session.append({ type: 'assistant/attempt', payload: { error: 'cancelled', ...(!assistantLogged && summary ? { stream: summary } : {}) } })
+        return finish({ output: lastText, steps, cancelled: true })
       }
-      turnError = error instanceof Error ? error.message : String(error)
-      await session.append({ type: 'assistant/attempt', payload: { error: turnError } })
-      await this.serialStopping(agent, session)
-      this.ctx.emit('turn/end', { agentId: agent.id, sessionId: session.id, error: turnError })
-      this.ctx.emit('ui/turn/end', { agentId: agent.id, sessionId: session.id, error: turnError, ...(turnUsage ? { usage: turnUsage } : {}), main: isMain })
-      return { output: lastText, steps, error: turnError }
+      turnError = this.ctx.llm.redactError(error instanceof Error ? error.message : String(error))
+      await session.append({ type: 'assistant/attempt', payload: { error: turnError, ...(!assistantLogged && summary ? { stream: summary } : {}) } })
+      return finish({ output: lastText, steps, error: turnError })
     }
 
     // Non-throwing limits are failed attempts too. Persist the outcome before
     // stopping hooks and publish the same result the agents service receives.
     if (turnError) await session.append({ type: 'assistant/attempt', payload: { error: turnError } })
     const result: TurnResult = { output: lastText, steps, ...(turnError ? { error: turnError } : {}) }
-    await this.serialStopping(agent, session)
-    this.ctx.emit('turn/end', { agentId: agent.id, sessionId: session.id, ...result })
-    this.ctx.emit('ui/turn/end', {
-      agentId: agent.id,
-      sessionId: session.id,
-      ...result,
-      ...(turnUsage ? { usage: turnUsage } : {}),
-      main: isMain,
-    })
-    return result
+    return finish(result)
   }
 
   /** Assemble the system prompt; append a system/message when it changed. */
   private async syncSystemPrompt(session: Sessionish, agent: AgentRuntime): Promise<string> {
     const base = this.ctx.systemPrompt.assemble()
-    const system = [base, agent.systemPrompt].filter((s) => s && s.trim()).join('\n\n')
+    const system = [base, agent.systemPrompt, agent.meta.expertContext ? EXPERT_MEMORY_NOTE : ''].filter((s) => s && s.trim()).join('\n\n')
     const lastSystem = [...session.events].reverse().find((e) => e.type === 'system/message')
     if (!lastSystem || (lastSystem.payload as { content: string }).content !== system) {
       await session.append({ type: 'system/message', payload: { content: system } })
@@ -368,9 +457,10 @@ export class DefaultAgentLoop implements AgentLoop {
 /** Structural subset of Session used by the loop (keeps tests light). */
 export interface Sessionish {
   id: string
+  dir?: string
   events: ReadonlyArray<{ seq: number; time: string; type: string; payload: unknown }>
   append(event: import('./types.js').SessionEventPayload): Promise<unknown>
-  deriveMessages(): ChatMessage[]
+  deriveMessages(options?: { fromSeq?: number; throughSeq?: number; userSeq?: number; committedOnly?: boolean }): ChatMessage[]
 }
 
 export class CancellationError extends Error {
@@ -388,6 +478,8 @@ let agentSeq = 0
 
 export class AgentsService {
   private agents = new Map<string, AgentEntry>()
+  private turnGroups = new Map<string, string>()
+  private turnSeq = 0
   private defaultMaxSteps = 40
   private stopping = false
 
@@ -405,6 +497,7 @@ export class AgentsService {
     const id = `agent-${++agentSeq}`
     const name = opts.name ?? `subagent-${id}`
     const meta: AgentMeta = opts.meta ?? {}
+    if (meta.parentAgent && this.userOnlyMemory(meta.parentAgent)) meta.expertContext = true
     const allowNested = this.config.allowNestedSubagents ?? false
     const toolFilter = toolPolicyFilter(opts.tools ?? 'full', allowNested, meta.role)
     const entry: AgentEntry = {
@@ -422,6 +515,7 @@ export class AgentsService {
       opts,
       controller: null,
       generation: 0,
+      pendingTurns: 0,
       chain: Promise.resolve({ output: '', steps: 0 }),
       toolFilter,
     }
@@ -432,7 +526,7 @@ export class AgentsService {
 
     // Kick off with the seed; the returned promise chain keeps background runs alive.
     if (opts.seed && opts.autoStart !== false) {
-      void entry.handle.turn(opts.seed).catch(() => {})
+      void entry.handle.turn(opts.seed, meta.checkpoint ? { checkpoint: meta.checkpoint } : undefined).catch(() => {})
     }
     return entry.handle
   }
@@ -445,6 +539,67 @@ export class AgentsService {
     return this.agents.get(id)?.handle
   }
 
+  /** One canonical context for a session's expert roster; archival sessions remain independent. */
+  shareExpertContext(mainId: string, memberIds: readonly string[]): void {
+    const main = this.agents.get(mainId)
+    if (!main || main.handle.meta.role !== 'main') throw new Error('Expert context requires the current main agent')
+    main.handle.meta.expertContext = true
+    for (const id of memberIds) {
+      const member = this.agents.get(id)
+      if (!member || member.handle.meta.role !== 'sub' || !member.handle.meta.expert) throw new Error('Only explicit expert members may share context')
+      member.sharedMainId = mainId
+      member.handle.meta.expertContext = true
+    }
+  }
+
+  /** Closing fan-out does not detach accepted peer turns or discard their shared evidence. */
+  setExpertMemoryMode(mainId: string, enabled: boolean): void {
+    const main = this.agents.get(mainId)
+    if (main) main.handle.meta.expertContext = enabled
+  }
+
+  userOnlyMemory(id: string): boolean {
+    const entry = this.agents.get(id)
+    return !!entry && (entry.memoryUserOnly === true || entry.handle.meta.expertContext === true)
+  }
+
+  releaseTurnGroup(id: string): void {
+    for (const [key, group] of this.turnGroups) if (group === id) this.turnGroups.delete(key)
+  }
+
+  /** Save explicit HTTP files without starting a model turn. Caller can roll
+   * back all team copies if any member fails before the message is accepted. */
+  async prepareFiles(id: string, files: readonly ChatUploadFile[]): Promise<StoredChatFiles> {
+    const entry = this.agents.get(id)
+    if (!entry || this.stopping || this.ctx.isDisposed()) throw new Error('智能体会话已关闭，附件未提交。')
+    const generation = entry.generation
+    const session = await this.openSession(entry)
+    const prepared = await storeChatFiles(session.dir!, files)
+    if (this.agents.get(id) !== entry || entry.generation !== generation || this.ctx.isDisposed()) {
+      await prepared.remove(); throw new Error('智能体会话已改变，附件未提交。')
+    }
+    return prepared
+  }
+
+  /** Coalesce creation for concurrent first-message uploads and mailbox turns. */
+  private async openSession(entry: AgentEntry): Promise<Sessionish> {
+    if (entry.session) return entry.session
+    const create = async (): Promise<Sessionish> => {
+      const handle = entry.handle
+      const session = entry.opts.resumeSessionId ? await this.sessions.open(entry.opts.resumeSessionId)
+        : await this.sessions.create({ agent: handle.name, model: handle.model, role: handle.meta.role,
+          ...(handle.meta.role === 'sub' && typeof handle.meta.expert === 'string' ? { expert: handle.meta.expert } : {}),
+          parentSession: handle.meta.parentSession, parentAgent: handle.meta.parentAgent })
+      handle.sessionId = session.id
+      if (!handle.meta.parentSession) handle.meta.parentSession = session.id
+      if (entry.opts.persistentSession || entry.opts.resumeSessionId) entry.session = session
+      return session
+    }
+    if (!entry.opts.persistentSession && !entry.opts.resumeSessionId) return create()
+    if (!entry.sessionOpening) entry.sessionOpening = create().finally(() => { entry.sessionOpening = undefined })
+    return entry.sessionOpening
+  }
+
   interrupt(id: string): boolean {
     const entry = this.agents.get(id)
     if (!entry?.controller) return false
@@ -453,17 +608,17 @@ export class AgentsService {
   }
 
   /** Fire-and-forget mailbox delivery: enqueue a turn without awaiting it. */
-  deliver(id: string, message: string): void {
+  deliver(id: string, message: string, opts?: Pick<TurnOptions, 'checkpoint' | 'from'>): void {
     const entry = this.agents.get(id)
     if (!entry) throw new Error(`unknown agent "${id}"`)
-    void entry.handle.turn(`[message from parent] ${message}`).catch(() => {})
+    void entry.handle.turn(`[message from parent] ${message}`, { ...opts, source: 'agent' }).catch(() => {})
   }
 
   /** Mailbox: deliver a message; runs now if idle, queues otherwise. Resolves with that turn's result. */
-  async sendMessage(id: string, message: string): Promise<TurnResult> {
+  async sendMessage(id: string, message: string, opts?: Pick<TurnOptions, 'checkpoint' | 'from'>): Promise<TurnResult> {
     const entry = this.agents.get(id)
     if (!entry) throw new Error(`unknown agent "${id}"`)
-    return entry.handle.turn(`[message from parent] ${message}`)
+    return entry.handle.turn(`[message from parent] ${message}`, { ...opts, source: 'agent' })
   }
 
   /** Abort every live agent and forget the roster (used on harness disposal and session switches). */
@@ -473,6 +628,7 @@ export class AgentsService {
       entry.controller?.abort()
     }
     this.agents.clear()
+    this.turnGroups.clear()
   }
 
   /** Cancel running turns and queued mail, but retain sessions for a failed
@@ -503,6 +659,11 @@ export class AgentsService {
     return this.ctx.peek<LLMService>('llm')?.listModels() ?? []
   }
 
+  /** Mailbox entries count as busy before their run microtask starts. */
+  hasPendingTurns(): boolean {
+    return [...this.agents.values()].some(entry => entry.pendingTurns > 0)
+  }
+
   // ------------------------------------------------------------------
 
   /**
@@ -510,10 +671,21 @@ export class AgentsService {
    * chain — a turn issued while the agent is running queues behind it.
    */
   private drive(entry: AgentEntry, input: string, opts?: TurnOptions): Promise<TurnResult> {
+    const target = opts?.checkpoint ?? entry.handle.meta.checkpoint
+    const turnGroup = opts?.turnGroup ?? (target ? this.turnGroups.get(`${target.sessionId}:${target.turnSeq}`) : undefined)
+    if (turnGroup) {
+      const notify = opts?.onUserMessage
+      opts = { ...opts, turnGroup, onUserMessage: record => {
+        if (entry.handle.meta.role === 'main') this.turnGroups.set(`${record.sessionId}:${record.userSeq}`, turnGroup)
+        notify?.(record)
+      } }
+    }
+    const turnId = `${entry.handle.id}:${++this.turnSeq}`
     const generation = entry.generation
-    if (this.stopping) return Promise.resolve({ output: '', steps: 0, cancelled: true })
+    if (this.stopping) return (opts?.preparedFiles?.remove() ?? Promise.resolve()).then(() => ({ output: '', steps: 0, cancelled: true }))
     const run = async (): Promise<TurnResult> => {
       if (entry.generation !== generation || this.agents.get(entry.handle.id) !== entry || this.ctx.isDisposed()) {
+        await opts?.preparedFiles?.remove()
         return { output: '', steps: 0, cancelled: true }
       }
       const handle = entry.handle
@@ -524,21 +696,23 @@ export class AgentsService {
       // interrupted, and the agent stays usable afterwards.
       const controller = new AbortController()
       entry.controller = controller
+      entry.memoryUserOnly = opts?.expertMode === true || handle.meta.expertContext === true
+      const driveMeter = new TurnMeter()
+      let loopEntered = false
       try {
-        let session = entry.session
-        if (!session) {
-          session = entry.opts.resumeSessionId
-            ? await this.sessions.open(entry.opts.resumeSessionId)
-            : await this.sessions.create({
-                agent: handle.name,
-                model: handle.model,
-                parentSession: handle.meta.parentSession,
-                parentAgent: handle.meta.parentAgent,
-              })
-          if (entry.opts.persistentSession || entry.opts.resumeSessionId) entry.session = session
+        const session = await this.openSession(entry)
+        let sharedContext: AgentRuntime['sharedContext']
+        if (entry.sharedMainId) {
+          const sharedUser = await opts?.sharedUser
+          if (opts?.sharedUser && !sharedUser) { await opts.preparedFiles?.remove(); throw new CancellationError() }
+          const parent = this.agents.get(entry.sharedMainId)
+          if (!parent || this.agents.get(handle.id) !== entry) throw new CancellationError()
+          const shared = await this.openSession(parent)
+          if (sharedUser && sharedUser.sessionId !== shared.id) throw new CancellationError()
+          const userSeq = sharedUser?.userSeq ?? (opts?.checkpoint?.sessionId === shared.id ? opts.checkpoint.turnSeq : undefined) ??
+            [...shared.events].reverse().find(event => event.type === 'user/message')?.seq
+          sharedContext = { session: shared, userSeq, mirroredUser: !!opts?.sharedUser }
         }
-        ;(handle as { sessionId: string }).sessionId = session.id
-        if (!handle.meta.parentSession) (handle.meta as { parentSession?: string }).parentSession = session.id
         const runtime: AgentRuntime = {
           id: handle.id,
           name: handle.name,
@@ -546,8 +720,10 @@ export class AgentsService {
           systemPrompt: entry.opts.systemPrompt,
           toolFilter: entry.toolFilter,
           maxSteps: entry.opts.maxSteps ?? this.defaultMaxSteps,
-          meta: handle.meta,
+          meta: entry.memoryUserOnly ? { ...handle.meta, expertContext: true } : handle.meta,
+          ...(sharedContext ? { sharedContext } : {}),
         }
+        loopEntered = true
         const result = await this.loop.run(runtime, session, input, controller.signal, opts)
         if (!result.error) handle.result = result.output
         if (result.cancelled) handle.status = 'cancelled'
@@ -559,16 +735,35 @@ export class AgentsService {
         this.emitStatus(handle)
         return result
       } catch (error) {
+        if (!loopEntered) await opts?.preparedFiles?.remove()
+        if (error instanceof CancellationError || (error as Error)?.name === 'AbortError') {
+          handle.status = 'cancelled'
+          entry.last = { output: '', steps: 0, cancelled: true, metrics: driveMeter.finish('cancelled') }
+          this.ctx.emit('ui/turn/end', { agentId: handle.id, sessionId: handle.sessionId, ...entry.last, main: handle.meta.role === 'main' })
+          this.emitStatus(handle)
+          return entry.last
+        }
         handle.status = 'error'
         handle.error = error instanceof Error ? error.message : String(error)
-        entry.last = { output: '', steps: 0, error: handle.error }
+        entry.last = { output: '', steps: 0, error: handle.error, metrics: driveMeter.finish('error') }
+        this.ctx.emit('ui/turn/end', { agentId: handle.id, sessionId: handle.sessionId, ...entry.last, main: handle.meta.role === 'main' })
         this.emitStatus(handle)
         return entry.last
       } finally {
         if (entry.controller === controller) entry.controller = null
+        entry.memoryUserOnly = false
       }
     }
-    const next = entry.chain.then(run, run)
+    entry.pendingTurns++
+    if (turnGroup) this.ctx.emit('agent/turn-queued', { turnGroup, turnId, agentId: entry.handle.id })
+    const settle = (result: TurnResult): TurnResult => {
+      if (turnGroup) this.ctx.emit('agent/turn-settled', { turnGroup, turnId, agentId: entry.handle.id, result })
+      return result
+    }
+    const next = entry.chain.then(run, run).then(settle, error => {
+      settle({ output: '', steps: 0, error: error instanceof Error ? error.message : String(error) })
+      throw error
+    }).finally(() => { entry.pendingTurns-- })
     entry.chain = next // run() never rejects; keep the mailbox chain alive
     return next
   }
@@ -584,10 +779,14 @@ interface AgentEntry {
   /** Controller of the in-flight turn only; null when idle (recreated per turn). */
   controller: AbortController | null
   generation: number
+  pendingTurns: number
   chain: Promise<TurnResult>
   last?: TurnResult
   session?: Sessionish
+  sessionOpening?: Promise<Sessionish>
   toolFilter: (name: string) => boolean
+  sharedMainId?: string
+  memoryUserOnly?: boolean
 }
 
 /**

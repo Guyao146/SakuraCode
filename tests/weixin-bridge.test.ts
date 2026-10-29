@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { WeixinBridge, WeixinBridgeError, parseWeixinSaved, type WeixinSaved, type WeixinTransport } from '../src/integrations/weixin.js'
-import type { WeixinCredentials, WeixinMessage, WeixinQr, WeixinQrStatus, WeixinUpdates } from '../src/integrations/weixin-client.js'
+import { WeixinBridge, WeixinBridgeError, parseWeixinSaved, type WeixinSaved } from '../src/integrations/weixin.js'
+import type { WeixinCredentials, WeixinMessage, WeixinQr, WeixinQrStatus, WeixinTransport, WeixinUpdates } from '../src/integrations/weixin-client.js'
 
 const credentials: WeixinCredentials = { botToken: 'bot-token-1234567890', botId: 'bot-1', userId: 'wx-user-1', baseUrl: 'https://ilinkai.weixin.qq.com' }
 const code = (workspaceId: string): string => createHash('sha256').update(workspaceId).digest('hex').slice(0, 6)
@@ -13,11 +13,9 @@ class FakeTransport implements WeixinTransport {
   incoming: WeixinMessage[] = []
   cursor = 'cursor-1'
   failures = 0
-  private controller?: AbortController
 
   async getQr(): Promise<WeixinQr> { return { ...this.qrResponse } }
   async pollQr(_qrcode: string, _baseUrl: string, signal: AbortSignal): Promise<WeixinQrStatus> {
-    this.controller = signal
     await new Promise((resolve) => setTimeout(resolve, 5))
     if (signal.aborted) throw signal.reason
     return this.statusSequence.shift() ?? { status: 'wait' }

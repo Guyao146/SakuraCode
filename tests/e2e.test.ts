@@ -68,7 +68,7 @@ async function freshHarness(cwd: string, baseURL: string): Promise<Harness> {
   return harness
 }
 
-function readSessionEvents(file: string): Array<{ type?: string; [key: string]: unknown }> {
+function readSessionEvents(file: string): Promise<Array<{ type?: string; [key: string]: unknown }>> {
   return fs
     .readFile(file, 'utf8')
     .then((raw) =>
@@ -184,12 +184,16 @@ describe('e2e: CLI smoke', () => {
     // Async spawn (not spawnSync) so the worker's loop keeps serving the mock
     // server the child talks to — spawnSync would deadlock the two.
     const server = await freshServer()
+    const directory = await freshTmpDir()
+    const workspace = path.join(directory, 'workspace'), home = path.join(directory, 'home')
+    await Promise.all([fs.mkdir(workspace), fs.mkdir(home)])
+    await fs.writeFile(path.join(workspace, 'sakura.yml'), 'pluginsDir: no-plugins\n')
     const child = spawn(
       process.execPath,
-      [path.join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'), 'src/cli.ts', '--base-url', server.url],
+      [path.join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'), path.join(REPO_ROOT, 'src', 'cli.ts'), '--base-url', server.url],
       {
-        cwd: REPO_ROOT,
-        env: { ...process.env, SAKURA_API_KEY: 'test-key', SAKURA_MODEL: 'mock-chat' },
+        cwd: workspace,
+        env: { ...process.env, HOME: home, USERPROFILE: home, SAKURA_API_KEY: 'test-key', SAKURA_MODEL: 'mock-chat', SAKURA_UPDATES_AUTO_CHECK: '0' },
       },
     )
     const stdout: string[] = []

@@ -170,10 +170,10 @@ describe('web server — update integration', () => {
 
   it('uses the injected fetch for the default feed and never reaches a real network', async () => {
     const used: string[] = []
-    const injected = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const injected: typeof fetch = (input, _init) => {
       used.push(String(input))
       return Promise.resolve(new Response(JSON.stringify({ tag_name: 'v0.0.1' }), { status: 200, headers: { 'content-type': 'application/json' } }))
-    }) as typeof fetch
+    }
     const handle = await boot({ fetch: injected, auto: true, initialDelay: 50, interval: 60_000 })
     const info = (await (await post(handle.url + 'api/updates/check')).json()) as UpdateInfo
     expect(info.hasUpdate).toBe(false)

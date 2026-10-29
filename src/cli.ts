@@ -19,7 +19,7 @@ import { isSessionId } from './core/session.js'
 import { estimateMessagesTokens, summarizeUsage } from './util/tokens.js'
 import { spawnExperts } from './experts.js'
 import { UpdateChecker } from './updates.js'
-const VERSION = '0.7.2'
+const VERSION = '1.0.0'
 
 interface ParsedArgs {
   print: boolean
@@ -364,7 +364,7 @@ async function main(): Promise<number> {
   })
   rl.prompt()
 
-  const updateChecker = new UpdateChecker(VERSION)
+  const updateChecker = new UpdateChecker(VERSION, process.env.SAKURA_UPDATES_URL)
   let updateTimer: ReturnType<typeof setTimeout> | undefined
   if (process.stdin.isTTY && process.env.SAKURA_UPDATES_AUTO_CHECK !== '0') {
     updateTimer = setTimeout(() => {
@@ -397,7 +397,16 @@ async function main(): Promise<number> {
     }
     return expertHandles.length > 0
   }
-  const deliverToExperts = (text: string) => Promise.all(expertHandles.map((handle) => handle.turn(text)))
+  const runTeam = async (text: string) => {
+    const main = harness.main()
+    const members = expertModeOn() ? [...expertHandles] : []
+    if (!members.length) return harness.run(text)
+    let resolveUser!: (record: { sessionId: string; userSeq: number } | undefined) => void
+    const sharedUser = new Promise<{ sessionId: string; userSeq: number } | undefined>(resolve => { resolveUser = resolve })
+    const turn = main.turn(text, { expertMode: true, onUserMessage: record => resolveUser(record) })
+    void turn.finally(() => resolveUser(undefined)).catch(() => {})
+    return Promise.all([turn, ...members.map(handle => handle.turn(text, { sharedUser, expertMode: true }))])
+  }
   interactiveConfirm = async (req, summary) => {
     confirming = true
     try {
@@ -409,6 +418,20 @@ async function main(): Promise<number> {
       confirming = false
     }
   }
+  const retry = harness.ctx.peek<import('./core/retry.js').RetryService>('retry')
+  if (retry && process.stdin.isTTY) retry.setConfirmHandler(async request => {
+    if (confirming) return false
+    confirming = true
+    try {
+      console.log(`\n自动重试已暂停（${request.retries}/${request.maxRetries} 次，${request.windowMs / 1000} 秒窗口）：${request.error}`)
+      const answer = await new Promise<string>(resolve => {
+        const abort = (): void => resolve('')
+        request.signal?.addEventListener('abort', abort, { once: true })
+        rl.question('确认再请求一次模型？不会重放已执行工具。[y/N] ', value => { request.signal?.removeEventListener('abort', abort); resolve(value) })
+      })
+      return /^y(es)?$/i.test(answer.trim())
+    } finally { confirming = false }
+  })
   // exit_plan: the model's plan proposals route through the same readline.
   type PlanReq = { id: string; plan: string }
   const planService = harness.ctx.peek<{
@@ -503,10 +526,7 @@ async function main(): Promise<number> {
       for (const miss of expansion.missing) console.log(`[mention] ${miss.mention}: ${miss.reason}`)
       return expansion.text
     })()
-      .then((expanded) => Promise.all([
-        harness.run(expanded),
-        expertModeOn() ? deliverToExperts(expanded) : Promise.resolve([]),
-      ]))
+      .then(runTeam)
       .then(() => {})
       .catch((error) => console.error(`[error] ${(error as Error).message}`))
       .finally(() => {
@@ -620,6 +640,7 @@ async function main(): Promise<number> {
         const sub = rest[0] ?? 'status'
         if (sub === 'off') {
           expertHandles.length = 0
+          harness.ctx.agents.setExpertMemoryMode(harness.main().id, false)
           console.log('专家协同模式已关闭；专家成员保留在 /agents 花名册中，可继续投递消息。')
           break
         }
@@ -633,6 +654,7 @@ async function main(): Promise<number> {
           break
         }
         const task = rest.slice(1).join(' ').trim()
+        harness.main()
         const { spawned, reused, skipped } = spawnExperts(harness.ctx.agents)
         expertHandles.splice(0, expertHandles.length, ...spawned, ...reused)
         if (!expertHandles.length) {
@@ -645,7 +667,7 @@ async function main(): Promise<number> {
           const { expandMentions } = await import('./mentions/index.js')
           const expansion = expandMentions(task, { cwd: process.cwd() })
           for (const miss of expansion.missing) console.log(`[mention] ${miss.mention}: ${miss.reason}`)
-          await Promise.all([harness.run(expansion.text), deliverToExperts(expansion.text)])
+          await runTeam(expansion.text)
         }
         break
       }
@@ -752,6 +774,12 @@ async function main(): Promise<number> {
         const files = pm?.files() ?? []
         if (!files.length) console.log('no AGENTS.md found from the working directory upward')
         for (const f of files) console.log(`${f.path}  (${f.chars} chars)`)
+        const memory = await harness.ctx.peek<import('./plugins/workspace-memory.js').WorkspaceMemoryService>('workspaceMemory')?.reload()
+        if (memory) {
+          console.log(`workspace memory: ${memory.enabled ? 'enabled' : 'disabled'} — ${memory.path} (${memory.content.length} chars)`)
+          if (memory.error) console.log(memory.error)
+          else if (memory.enabled && memory.content) console.log(memory.content)
+        }
         break
       }
       case '/hooks': {

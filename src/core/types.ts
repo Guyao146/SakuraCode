@@ -63,12 +63,16 @@ export interface ToolSchema {
 /** Capability class used by the approval gate. */
 export type ToolKind = 'read' | 'write' | 'execute' | 'agent'
 
+/** The original user turn whose file changes a delegation belongs to. */
+export interface CheckpointTarget { sessionId: string; turnSeq: number }
+
 export interface ToolContext {
   /** Session the calling agent is running in. */
   sessionId: string
   /** Agent that invoked the tool. */
   agentId: string
   signal: AbortSignal
+  checkpoint?: CheckpointTarget
 }
 
 export interface ToolResult {
@@ -105,6 +109,8 @@ export interface LLMRequest {
   temperature?: number
   /** Reasoning effort ('off' is normalized away by adapters). */
   thinking?: ThinkingLevel
+  /** Local-only retry routing; adapters never send these fields upstream. */
+  retryContext?: { agentId?: string; sessionId?: string; main?: boolean; purpose?: string; interactive?: boolean }
 }
 
 /**
@@ -120,13 +126,46 @@ export interface UsageStats {
   reasoningTokens?: number
 }
 
+/** Request accounting, not a billing statement. Missing provider fields use the local heuristic. */
+export interface TurnMetrics {
+  startedAt: string
+  endedAt: string
+  elapsedMs: number
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  usageSource: 'reported' | 'estimated' | 'mixed'
+  requests: number
+  retries: number
+  status: 'done' | 'error' | 'cancelled' | 'rejected'
+  scope: 'agent' | 'team'
+  members?: number
+  failedMembers?: number
+  cancelledMembers?: number
+  legacy?: boolean
+}
+
+/** A committed expert step. Peer tool calls are evidence, never outstanding calls owed by the reader. */
+export interface CollaborationRecord {
+  key: string
+  agentId: string
+  agentName: string
+  expert?: string
+  sourceSessionId: string
+  turnSeq: number
+  userSeq?: number
+  messages: ChatMessage[]
+  metrics?: TurnMetrics
+}
+
 export type StreamChunk =
   | { type: 'text'; delta: string }
   | { type: 'thinking'; delta: string }
   | { type: 'tool_call'; index: number; id?: string; name?: string; argsDelta?: string }
   | ({ type: 'usage' } & UsageStats)
   | { type: 'done'; reason: 'stop' | 'tool_calls' | 'length' | 'cancelled' }
-  | { type: 'error'; error: string }
+  | { type: 'error'; error: string; retryable?: boolean; retryAfterMs?: number }
+  | { type: 'reset'; error: string }
 
 /** Reasoning effort requested from the model; 'off' sends nothing. */
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high'
@@ -150,21 +189,23 @@ export interface StreamSummary {
   thinking?: string
   toolCalls: ToolCallId[]
   usage?: UsageStats
+  estimatedUsage?: { inputTokens: number; outputTokens: number }
   durationMs: number
 }
 
 export type SessionEventPayload =
   | { type: 'agent/meta'; payload: Record<string, unknown> }
   | { type: 'system/message'; payload: { content: string } }
-  | { type: 'user/message'; payload: { content: string; from?: string; images?: string[] } }
+  | { type: 'user/message'; payload: { content: string; originalText?: string; from?: string; source?: 'user' | 'agent' | 'expert-summary'; expertMode?: boolean; images?: string[]; attachments?: import('./attachments.js').ChatAttachment[] } }
   | { type: 'assistant/message'; payload: AssistantMessage & { stream: StreamSummary } }
-  | { type: 'assistant/attempt'; payload: { error: string } }
+  | { type: 'assistant/attempt'; payload: { error: string; stream?: StreamSummary; retry?: boolean } }
   | { type: 'tool/call'; payload: { id: string; name: string; arguments: string } }
   | {
       type: 'tool/result'
       payload: { id: string; name: string; output: string; isError?: boolean; durationMs: number; images?: string[] }
     }
   | { type: 'session/note'; payload: Record<string, unknown> }
+  | { type: 'collaboration/message'; payload: CollaborationRecord }
 
 export interface SessionEventRecordBase {
   seq: number

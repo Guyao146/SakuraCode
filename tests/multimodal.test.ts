@@ -24,6 +24,7 @@ describe('Session.deriveMessages — tool images', () => {
     const imageMsgs = msgs.filter((m) => m.role === 'user' && Array.isArray(m.content))
     expect(imageMsgs).toHaveLength(1)
     const parts = imageMsgs[0]!.content
+    if (!Array.isArray(parts)) throw new Error('image message must contain content parts')
     expect(parts[0]).toEqual({ type: 'text', text: 'Image(s) produced by tool "computer_screenshot":' })
     expect(parts[1]).toEqual({ type: 'image_url', image_url: { url: IMG_A } })
   })
@@ -46,6 +47,7 @@ describe('Session.deriveMessages — tool images', () => {
     const imageMsgs = msgs.filter((m) => m.role === 'user' && Array.isArray(m.content))
     expect(imageMsgs).toHaveLength(1)
     const parts = imageMsgs[0]!.content
+    if (!Array.isArray(parts)) throw new Error('image message must contain content parts')
     expect(parts[1]).toEqual({ type: 'image_url', image_url: { url: IMG_B } })
   })
 

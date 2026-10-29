@@ -61,7 +61,7 @@ export const subagentToolsPlugin: PluginModule<SubagentToolConfig> = {
         },
         required: ['description', 'prompt'],
       },
-      execute: async (args) => {
+      execute: async (args, tc) => {
         const description = String(args.description ?? '')
         const prompt = String(args.prompt ?? '')
         if (!prompt.trim()) return { output: 'error: prompt must be non-empty', isError: true }
@@ -90,7 +90,8 @@ export const subagentToolsPlugin: PluginModule<SubagentToolConfig> = {
           model: args.model ? String(args.model) : defModel,
           tools: defTools ?? 'full',
           background: Boolean(args.run_in_background),
-          meta: { description, ...(defName ? { agentType: defName } : {}), spawnedByTool: true },
+          meta: { description, ...(defName ? { agentType: defName } : {}), spawnedByTool: true,
+            parentAgent: tc.agentId, parentSession: tc.sessionId, checkpoint: tc.checkpoint },
           systemPrompt:
             (defSystemPrompt ? defSystemPrompt + '\n\n' : '') +
             `You are a subagent spawned to handle one delegated task: "${description}". ` +
@@ -158,12 +159,12 @@ export const subagentControlPlugin: PluginModule = {
         },
         required: ['agent_id', 'message'],
       },
-      execute: async (args) => {
+      execute: async (args, tc) => {
         const agentId = String(args.agent_id ?? '')
         const message = String(args.message ?? '')
         if (args.wait) {
           try {
-            const result = await agents.sendMessage(agentId, message)
+            const result = await agents.sendMessage(agentId, message, { checkpoint: tc.checkpoint, from: tc.agentId })
             return { output: result.output || result.error || '(no reply)' }
           } catch (error) {
             return { output: `error: ${(error as Error).message}`, isError: true }
@@ -172,7 +173,7 @@ export const subagentControlPlugin: PluginModule = {
         // Fire-and-forget: enqueue without awaiting the target's turn —
         // awaiting would deadlock when the target messages us back.
         try {
-          agents.deliver(agentId, message)
+          agents.deliver(agentId, message, { checkpoint: tc.checkpoint, from: tc.agentId })
           return { output: `delivered to ${agentId} (queued; check status with list_agents)` }
         } catch (error) {
           return { output: `error: ${(error as Error).message}`, isError: true }

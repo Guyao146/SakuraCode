@@ -111,7 +111,7 @@ export interface SessionTokenStats {
 export function summarizeUsage(events: ReadonlyArray<SessionEventRecord>): SessionTokenStats {
   const stats: SessionTokenStats = { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }
   for (const event of events) {
-    if (event.type !== 'assistant/message') continue
+    if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') continue
     const usage = (event.payload as { stream?: { usage?: UsageStats } }).stream?.usage
     if (!usage) continue
     stats.requests++

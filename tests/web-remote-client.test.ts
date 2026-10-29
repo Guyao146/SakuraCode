@@ -9,6 +9,7 @@ import type { PlanService } from '../src/tools/plan.js'
 import { resolveChromePath } from '../src/tools/browser.js'
 import { runWebServer, type WebServerHandle } from '../src/web/server.js'
 import { BrowserClient } from './browser-client.js'
+import { openSessionMenu, sessionAction } from './client-session-actions.js'
 
 const OPERATOR = 'remote-browser-operator-' + 'a'.repeat(40)
 const VIEWER = 'remote-browser-viewer-' + 'b'.repeat(40)
@@ -95,6 +96,7 @@ browserSuite('remote dashboard — real browser', () => {
     await browser.reload()
     await browser.waitFor("!document.getElementById('authDialog').open && document.getElementById('connectionLabel').textContent === '远端服务已连接'")
     await browser.waitFor("document.getElementById('chatCol').textContent.includes('检查远端工作区')")
+    await browser.click('#dashboardBtn')
     await browser.click('#logoutBtn')
     await browser.waitFor("document.getElementById('authDialog').open")
     expect(await browser.evaluate("document.getElementById('chatCol').textContent")).not.toContain('检查远端工作区')
@@ -118,12 +120,21 @@ browserSuite('remote dashboard — real browser', () => {
     ] }), tc)
     await login(browser, VIEWER)
     expect(await browser.evaluate("document.getElementById('dashboardRole').textContent")).toContain('只读访客')
+    await browser.evaluate("document.getElementById('settingsViewBtn').click()")
+    expect(await browser.evaluate("document.getElementById('workspaceMemoryCard').hidden && document.getElementById('desktopWindowControls').hidden")).toBe(true)
+    await browser.evaluate("document.getElementById('dashboardBtn').click()")
     expect(await browser.evaluate("['input', 'sendBtn', 'newSessionBtn', 'spawnBtn', 'modelSel', 'approvalSelBottom'].every(id => document.getElementById(id).disabled)")).toBe(true)
     expect(await browser.evaluate("document.querySelectorAll('#dashboardAgents img').length")).toBe(0)
     expect(await browser.evaluate("document.getElementById('dashTasks').textContent")).toBe('1/3')
     expect(await browser.evaluate("document.querySelectorAll('#taskBoard .task-card').length")).toBe(3)
     expect(await browser.evaluate("[...document.querySelectorAll('#dashboardAgents button')].every(button => button.disabled)")).toBe(true)
     expect(await browser.evaluate("fetch('/api/settings', {method:'POST',body:JSON.stringify({approvalMode:'yolo'})}).then(res => res.status)")).toBe(403)
+    await browser.click('#chatViewBtn')
+    await browser.click('#contextViewerBtn')
+    expect(await browser.evaluate("['contextSettings', 'contextCompact', 'contextClear'].every(id => document.getElementById(id).disabled)")).toBe(true)
+    expect(await browser.evaluate("document.getElementById('contextStatus').textContent")).toContain('只读访客')
+    await browser.key('Escape')
+    await browser.click('#dashboardBtn')
     await snapshot('remote-dashboard-desktop')
     for (const width of [1280, 1024, 768, 390, 320]) {
       await browser.resize(width, 844)
@@ -140,6 +151,33 @@ browserSuite('remote dashboard — real browser', () => {
     expect(server.harness.main().sessionId).not.toBe(oldId)
     await browser.click('#returnLiveBtn')
     await browser.waitFor("document.getElementById('chatCol').textContent.includes('当前协作会话')")
+  })
+
+  it('keeps remote quota appearance personal in browser storage without exposing account data or desktop APIs', async () => {
+    await login(browser, VIEWER)
+    await browser.evaluate("document.getElementById('settingsViewBtn').click(); document.getElementById('settings-generalTab').click()")
+    expect(await browser.evaluate("document.getElementById('quotaDisplaySelect').disabled")).toBe(false)
+    await browser.click('#quotaDisplaySelectTrigger')
+    await browser.key('End')
+    await browser.key('Enter')
+    await browser.waitFor("document.getElementById('quotaDisplaySelect').value === 'settings' && !document.getElementById('quotaDisplayMessage').hidden")
+    expect(await browser.evaluate("JSON.parse(localStorage.getItem('sakura-appearance'))")).toEqual({ quotaDisplay: 'settings' })
+    expect(await browser.evaluate("JSON.stringify(localStorage)")).not.toContain(VIEWER)
+    await browser.reload()
+    await browser.waitFor("document.getElementById('connectionLabel').textContent === '远端服务已连接'")
+    expect(await browser.evaluate("document.getElementById('quotaDisplaySelect').value")).toBe('settings')
+    expect(await browser.evaluate("['sakuraAccountStrip', 'sakuraQuotaBtn'].every(id => !document.getElementById(id).checkVisibility())")).toBe(true)
+    await browser.evaluate("document.getElementById('settingsViewBtn').click(); document.getElementById('settings-accountTab').click()")
+    expect(await browser.evaluate("document.getElementById('sakuraAccountMessage').textContent")).toContain('仅对本机操作员开放')
+    expect(await browser.evaluate("['sakuraLogin', 'sakuraPurchase', 'sakuraKeysPage'].every(id => document.getElementById(id).disabled)")).toBe(true)
+    expect(await browser.evaluate("fetch('/api/desktop/appearance').then(r => r.status)")).toBe(404)
+    expect(await browser.evaluate("document.getElementById('settingsUpdateSourceFields').hidden")).toBe(true)
+    expect(await browser.evaluate("fetch('/api/updates/settings').then(r => r.status)")).toBe(404)
+    expect(await browser.evaluate("fetch('/api/desktop/appearance', {method:'POST', headers:{'content-type':'application/json'}, body:'{\"quotaDisplay\":\"hover\"}'}).then(r => r.status)")).toBe(403)
+    await browser.evaluate("document.getElementById('settings-aboutTab').click()")
+    expect(await browser.evaluate("document.getElementById('accessLabel').textContent")).toBe('只读访客')
+    expect(await browser.evaluate("document.getElementById('workspaceStatusCard').checkVisibility()")).toBe(true)
+    await snapshot('remote-personal-appearance')
   })
 
   it('lets a viewer read an independent child session without changing the main session or roster', async () => {
@@ -218,6 +256,128 @@ browserSuite('remote dashboard — real browser', () => {
     expect(adapter.requests).toHaveLength(2)
   })
 
+  it('synchronizes confirmed deletion to another browser without disturbing unrelated live history or exposing viewer controls', async () => {
+    await server.harness.run('将删除的历史条目')
+    const oldId = server.harness.main().sessionId
+    const current = await server.harness.ctx.sessions.create()
+    server.harness.main({ resumeSessionId: current.id })
+    await server.harness.run('保留当前实时对话')
+    await login()
+    await browser.click('#chatViewBtn')
+    await browser.waitFor("document.getElementById('chatCol').textContent.includes('远端完成：保留当前实时对话')")
+    const observer = new BrowserClient()
+    try {
+      await observer.start()
+      await observer.navigate(server.url)
+      await observer.waitFor("document.getElementById('authDialog')?.open")
+      await login(observer, VIEWER)
+      await observer.waitFor("document.getElementById('chatCol').textContent.includes('远端完成：保留当前实时对话')")
+      await openSessionMenu(observer, oldId)
+      expect(await observer.evaluate("Array.from(document.querySelectorAll('#sessionContextMenu [data-session-action]'), button => button.dataset.sessionAction)")).toEqual(['export'])
+      await observer.key('Escape')
+      expect(await observer.evaluate("document.activeElement?.classList.contains('session-more')")).toBe(true)
+      expect(await observer.evaluate(`fetch('/api/sessions/${oldId}', {method: 'DELETE'}).then(response => response.status)`)).toBe(403)
+      await sessionAction(browser, 'delete', oldId)
+      await browser.click('#deleteSessionCancel')
+      await browser.waitFor("!document.getElementById('deleteSessionDialog')")
+      expect(await observer.evaluate(`!!document.querySelector('[data-session-id="${oldId}"]')`)).toBe(true)
+      await sessionAction(browser, 'delete', oldId)
+      await browser.click('#deleteSessionConfirm')
+      for (const client of [browser, observer]) {
+        await client.waitFor(`!document.querySelector('[data-session-id="${oldId}"]')`)
+        expect(await client.evaluate("document.getElementById('chatCol').textContent")).toContain('远端完成：保留当前实时对话')
+      }
+      expect(server.harness.main().sessionId).toBe(current.id)
+      await browser.waitFor("!document.getElementById('deleteSessionDialog')")
+      await sessionAction(browser, 'delete', current.id)
+      await browser.click('#deleteSessionConfirm')
+      for (const client of [browser, observer]) {
+        await client.waitFor("!document.querySelector('.session-item') && !document.getElementById('welcome').hidden")
+        expect(await client.evaluate("document.getElementById('chatCol').textContent")).not.toContain('远端完成：保留当前实时对话')
+      }
+      expect(await observer.evaluate("document.getElementById('input').disabled")).toBe(true)
+      expect(observer.errors).toEqual([])
+    } finally { await observer.close() }
+  })
+
+  it('discards delayed history after return-to-live and after another client deletes the previewed session', async () => {
+    await server.harness.run('DELAYED_PREVIEW_MUST_NOT_RETURN')
+    const oldId = server.harness.main().sessionId
+    const current = await server.harness.ctx.sessions.create()
+    server.harness.main({ resumeSessionId: current.id })
+    await server.harness.run('LIVE_HISTORY_MUST_REMAIN')
+    await login()
+    const observer = new BrowserClient()
+    try {
+      await observer.start()
+      await observer.navigate(server.url)
+      await observer.waitFor("document.getElementById('authDialog')?.open")
+      await login(observer, VIEWER)
+      await observer.waitFor("document.getElementById('chatCol').textContent.includes('远端完成：LIVE_HISTORY_MUST_REMAIN')")
+      await observer.evaluate(`(() => {
+        const nativeFetch = window.fetch.bind(window);
+        window.heldHistory = [];
+        window.finishedHistory = 0;
+        window.fetch = async function (url, options) {
+          const response = await nativeFetch(url, options);
+          if (String(url).includes('/api/sessions/${oldId}/records')) {
+            await new Promise(resolve => { window.heldHistory.push(resolve); });
+            window.finishedHistory++;
+          }
+          return response;
+        };
+      })()`)
+      const selector = `[data-session-id="${oldId}"] .session-open`
+      // First old response is held across a return-to-live action.
+      await observer.click(selector)
+      await observer.waitFor('window.heldHistory.length === 1')
+      await observer.click('#returnLiveBtn')
+      await observer.waitFor("document.getElementById('historyNotice').hidden && document.getElementById('chatCol').textContent.includes('远端完成：LIVE_HISTORY_MUST_REMAIN')")
+      await observer.evaluate('window.heldHistory.shift()()')
+      await observer.waitFor('window.finishedHistory === 1')
+      await observer.evaluate('new Promise(resolve => setTimeout(resolve, 100))')
+      expect(await observer.evaluate("document.getElementById('chatCol').textContent")).not.toContain('DELAYED_PREVIEW_MUST_NOT_RETURN')
+      // The next old response already contains records when deletion is broadcast.
+      await observer.click(selector)
+      await observer.waitFor('window.heldHistory.length === 1')
+      await sessionAction(browser, 'delete', oldId)
+      await browser.click('#deleteSessionConfirm')
+      await observer.waitFor(`!document.querySelector('[data-session-id="${oldId}"]') && document.getElementById('historyNotice').hidden`)
+      await observer.evaluate('window.heldHistory.shift()()')
+      await observer.waitFor('window.finishedHistory === 2')
+      await observer.waitFor("document.getElementById('chatCol').textContent.includes('远端完成：LIVE_HISTORY_MUST_REMAIN')")
+      expect(await observer.evaluate("document.getElementById('chatCol').textContent")).not.toContain('DELAYED_PREVIEW_MUST_NOT_RETURN')
+      expect(await observer.evaluate("document.body.classList.contains('history-view')")).toBe(false)
+      expect(server.harness.main().sessionId).toBe(current.id)
+      expect(observer.errors).toEqual([])
+    } finally { await observer.evaluate('window.heldHistory?.forEach(resolve => resolve())').catch(() => {}); await observer.close() }
+  })
+
+  it('reconciles a missed deletion on reconnect and clears history-preview state before a new login', async () => {
+    await server.harness.run('OFFLINE_PREVIEW_DELETED')
+    const oldId = server.harness.main().sessionId
+    const current = await server.harness.ctx.sessions.create()
+    server.harness.main({ resumeSessionId: current.id })
+    await server.harness.run('RECONNECTED_LIVE_HISTORY')
+    await login(browser, VIEWER)
+    await browser.click(`[data-session-id="${oldId}"] .session-open`)
+    await browser.waitFor("document.getElementById('chatCol').textContent.includes('远端完成：OFFLINE_PREVIEW_DELETED')")
+    await browser.send('Network.enable')
+    await browser.send('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 })
+    server.server.closeAllConnections()
+    await browser.waitFor("document.getElementById('connectionLabel').textContent.includes('断开')")
+    expect((await fetch(server.url + `api/sessions/${oldId}`, { method: 'DELETE', headers: { authorization: `Bearer ${OPERATOR}` } })).status).toBe(200)
+    await browser.send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 })
+    await browser.waitFor("document.getElementById('connectionLabel').textContent === '远端服务已连接' && document.getElementById('historyNotice').hidden && document.getElementById('chatCol').textContent.includes('远端完成：RECONNECTED_LIVE_HISTORY')")
+    expect(await browser.evaluate("document.getElementById('chatCol').textContent")).not.toContain('OFFLINE_PREVIEW_DELETED')
+    await browser.click(`[data-session-id="${current.id}"] .session-open`)
+    await browser.waitFor("document.body.classList.contains('history-view')")
+    await browser.click('#dashboardBtn') // Logout is on the dashboard, not the hidden chat DOM.
+    await browser.click('#logoutBtn')
+    await browser.waitFor("document.getElementById('authDialog').open")
+    expect(await browser.evaluate("document.body.classList.contains('history-view')")).toBe(false)
+  })
+
   it('recovers after an offline turn without resending it and restores outstanding requests', async () => {
     await login()
     await browser.click('#chatViewBtn')
@@ -228,8 +388,9 @@ browserSuite('remote dashboard — real browser', () => {
     await browser.send('Network.enable')
     await browser.send('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 })
     server.server.closeAllConnections()
-    await browser.waitFor("document.getElementById('connectionLabel').textContent.includes('断开') && document.getElementById('input').disabled")
-    expect(await browser.evaluate("document.getElementById('input').value")).toBe('保留这份未发送草稿')
+    await browser.waitFor("document.getElementById('connectionLabel').textContent.includes('断开') && !document.getElementById('input').disabled && document.getElementById('sendBtn').disabled")
+    await browser.typeText('#input', '；离线也可继续编辑')
+    expect(await browser.evaluate("document.getElementById('input').value")).toBe('保留这份未发送草稿；离线也可继续编辑')
     adapter.finish?.()
     await server.harness.main().wait()
     const question = server.harness.ctx.peek<InteractionService>('interaction')!.ask({ question: '断线期间的新问题', options: ['继续', '暂停'] })
@@ -237,7 +398,7 @@ browserSuite('remote dashboard — real browser', () => {
     await browser.waitFor("document.getElementById('connectionLabel').textContent === '远端服务已连接'")
     await browser.waitFor("document.getElementById('chatCol').textContent.includes('远端完成：[slow] 网络恢复检查') && document.querySelectorAll('.ask-card').length === 1")
     expect(adapter.requests).toHaveLength(1)
-    expect(await browser.evaluate("document.getElementById('input').value")).toBe('保留这份未发送草稿')
+    expect(await browser.evaluate("document.getElementById('input').value")).toBe('保留这份未发送草稿；离线也可继续编辑')
     expect(await browser.evaluate("document.querySelectorAll('.msg-user-row').length")).toBe(1)
     await browser.click('.ask-actions button')
     expect((await question).answer).toBe('继续')

@@ -154,7 +154,7 @@ export class WeixinClient implements WeixinTransport {
   }
 
   private botBody(body: Record<string, unknown>): Record<string, unknown> {
-    return { ...body, base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'SakuraCode/0.7.2' } }
+    return { ...body, base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'SakuraCode/1.0.0' } }
   }
 
   async getQr(signal: AbortSignal, tokens: string[] = []): Promise<WeixinQr> {

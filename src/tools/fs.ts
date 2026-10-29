@@ -7,6 +7,7 @@ import { promises as fs } from 'node:fs'
 import * as path from 'node:path'
 import type { PluginModule } from '../kernel/index.js'
 import type { ToolsService } from '../core/tools.js'
+import type { CheckpointService } from '../core/checkpoints.js'
 import { formatLineNumbers, resolvePath, truncate } from './util.js'
 
 export interface FsToolsConfig {
@@ -33,6 +34,8 @@ export const fsToolsPlugin: PluginModule<FsToolsConfig> = {
     const cwd = config?.cwd ?? process.cwd()
     const maxReadLines = config?.maxReadLines ?? 2000
     const readFiles = new Set<string>()
+    const checkpoints = ctx.peek<CheckpointService>('checkpoints')
+    ctx.on('session/branched', () => readFiles.clear())
 
     tools.register({
       name: 'read',
@@ -75,7 +78,7 @@ export const fsToolsPlugin: PluginModule<FsToolsConfig> = {
         },
         required: ['file_path', 'content'],
       },
-      execute: async (args) => {
+      execute: async (args, tc) => {
         const file = resolvePath(String(args.file_path), cwd)
         const exists = await fs
           .access(file)
@@ -87,9 +90,12 @@ export const fsToolsPlugin: PluginModule<FsToolsConfig> = {
             isError: true,
           }
         }
-        await fs.mkdir(path.dirname(file), { recursive: true })
         const content = String(args.content ?? '')
-        await fs.writeFile(file, content, 'utf8')
+        if (checkpoints) await checkpoints.write(file, Buffer.from(content, 'utf8'), tc)
+        else {
+          await fs.mkdir(path.dirname(file), { recursive: true })
+          await fs.writeFile(file, content, 'utf8')
+        }
         readFiles.add(readKey(file))
         return { output: `wrote ${content.split('\n').length} lines to ${file}`, ui: { file, bytes: Buffer.byteLength(content) } }
       },
@@ -111,7 +117,7 @@ export const fsToolsPlugin: PluginModule<FsToolsConfig> = {
         },
         required: ['file_path', 'old_string', 'new_string'],
       },
-      execute: async (args) => {
+      execute: async (args, tc) => {
         const file = resolvePath(String(args.file_path), cwd)
         if (!readFiles.has(readKey(file))) {
           return { output: `error: read ${file} before editing it.`, isError: true }
@@ -119,7 +125,8 @@ export const fsToolsPlugin: PluginModule<FsToolsConfig> = {
         const oldString = String(args.old_string ?? '')
         const newString = String(args.new_string ?? '')
         if (oldString === '') return { output: 'error: old_string must be non-empty.', isError: true }
-        const content = await fs.readFile(file, 'utf8')
+        const original = await fs.readFile(file)
+        const content = original.toString('utf8')
         const occurrences = content.split(oldString).length - 1
         if (occurrences === 0) {
           return { output: `error: old_string not found in ${file}.`, isError: true }
@@ -133,7 +140,8 @@ export const fsToolsPlugin: PluginModule<FsToolsConfig> = {
         const updated = args.replace_all
           ? content.split(oldString).join(newString)
           : content.replace(oldString, () => newString) // function replacement: literal, no $-pattern expansion
-        await fs.writeFile(file, updated, 'utf8')
+        if (checkpoints) await checkpoints.write(file, Buffer.from(updated, 'utf8'), tc, original)
+        else await fs.writeFile(file, updated, 'utf8')
         return { output: `edited ${file} (${occurrences === 1 ? 1 : occurrences} replacement(s))`, ui: { file } }
       },
     })

@@ -134,7 +134,7 @@ async function boot(options: { remote?: boolean; beforeReply?: (call: ModelCall)
   const base = `http://127.0.0.1:${handle.port}`
   allowedOrigins.add(base)
   cleanups.push(async () => {
-    const agents = handle.harness.ctx.agents.list()
+    const agents = handle.harness.ctx.isDisposed() ? [] : handle.harness.ctx.agents.list()
     await handle.close()
     await Promise.all(agents.map((agent) => agent.wait()))
     allowedOrigins.delete(base)
@@ -257,6 +257,63 @@ async function slowPost(fixture: Fixture, route: string, body: unknown, workspac
 }
 
 describe('expert session — offline REST integration', () => {
+  it('shares prior main context and peer evidence once per user task, and persists a team summary after all members finish', async () => {
+    const f = await boot()
+    expect((await f.post('/api/message', { text: 'PRIOR_USER_DIRECTION' })).status).toBe(202)
+    await f.settle()
+    const prior = f.calls[0]!
+    expect((await f.post('/api/experts/start', { task: 'TEAM_SHARED_TASK' })).status).toBe(200)
+    await f.settle()
+    const group = f.calls.slice(1)
+    expect(group).toHaveLength(4)
+    for (const call of group) {
+      expect(call.messages.filter(message => message.role === 'user').map(message => message.content)).toEqual(['PRIOR_USER_DIRECTION', 'TEAM_SHARED_TASK'])
+      expect(JSON.stringify(call.messages)).toContain(prior.answer)
+    }
+    const state = await f.state(), session = await f.handle.harness.ctx.sessions.open(state.sessionId!)
+    await vi.waitFor(() => expect(session.events.some(event => event.type === 'session/note' && event.payload.note === 'turn-summary' &&
+      (event.payload.metrics as { scope?: string })?.scope === 'team')).toBe(true))
+    expect(session.events.filter(event => event.type === 'user/message')).toHaveLength(2)
+    expect((await f.get<{ turnSummaries: Array<{ metrics: { scope: string; members?: number } }> }>(`/api/sessions/${session.id}/records`)).body.turnSummaries.at(-1)?.metrics)
+      .toMatchObject({ scope: 'team', members: 4 })
+    await f.post('/api/message', { text: 'NEXT_SHARED_TASK' }); await f.settle()
+    for (const call of f.calls.slice(5)) {
+      for (const peer of group.filter(row => row.expert)) expect(JSON.stringify(call.messages)).toContain(peer.answer)
+      expect(call.messages.filter(message => message.role === 'user').map(message => message.content)).toEqual(['PRIOR_USER_DIRECTION', 'TEAM_SHARED_TASK', 'NEXT_SHARED_TASK'])
+    }
+  })
+
+  it('groups expert records outside normal sessions, preserves their logs and keeps them readable after server restart', async () => {
+    const f = await boot()
+    await f.post('/api/experts/start', { task: 'internal expert task' })
+    await f.settle()
+    const initial = await f.get<State & { sessions: Array<{ id: string }>; expertSessions: Array<{ id: string }> }>('/api/state')
+    expect(initial.body.sessions.map(row => row.id)).toEqual([main(initial.body).sessionId])
+    const team = experts(initial.body)
+    expect(initial.body.expertSessions.map(row => row.id).sort()).toEqual(team.map(row => row.sessionId).sort())
+    const logs = await Promise.all(team.map(async agent => {
+      const session = await f.handle.harness.ctx.sessions.open(agent.sessionId)
+      expect(await f.users(agent.sessionId)).toEqual(['internal expert task'])
+      return { file: session.file, raw: await fs.readFile(session.file, 'utf8') }
+    }))
+    const collaboration = await f.get<{ workspaces: Array<{ sessions: Array<{ id: string }> }> }>('/api/collaboration')
+    expect(collaboration.body.workspaces[0]?.sessions.map(row => row.id)).toEqual(initial.body.sessions.map(row => row.id))
+    const ordinary = await f.handle.harness.ctx.sessions.create({ agent: '架构师', title: '架构师' })
+    const sessionDir = f.handle.harness.ctx.sessions.root
+    await f.handle.close()
+    const resumed = await runWebServer({ cwd: f.cwd, sessionDir, open: false, quiet: true, adapter: new MockAdapter([text('offline')]), updatesAutoCheck: false,
+      token: null, viewerToken: null })
+    const base = `http://127.0.0.1:${resumed.port}`; allowedOrigins.add(base)
+    cleanups.push(async () => { await resumed.close(); allowedOrigins.delete(base) })
+    const state = await (await fetch(base + '/api/state')).json() as { sessions: Array<{ id: string }>; expertSessions: Array<{ id: string }> }
+    expect(state.sessions.map(row => row.id)).toContain(ordinary.id)
+    expect(state.sessions).toHaveLength(2)
+    expect(state.expertSessions).toHaveLength(3)
+    for (const log of logs) expect(await fs.readFile(log.file, 'utf8')).toBe(log.raw)
+    const records = await (await fetch(base + '/api/sessions/' + team[0]!.sessionId + '/records')).json() as { records: unknown[] }
+    expect(records.records.length).toBeGreaterThan(0)
+  })
+
   it('enables without a task, stops future fan-out and reuses the same IDs and history on restart', async () => {
     const f = await boot()
     const started = await f.post<StartResult>('/api/experts/start')

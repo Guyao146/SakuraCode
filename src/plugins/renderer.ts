@@ -103,6 +103,13 @@ export const rendererPlugin: PluginModule<RendererConfig> = {
         answers.set(key, (answers.get(key) ?? '') + payload.delta)
       }
     })
+    _ctx.on('ui/stream/reset', (payload: { agentId?: string; main?: boolean }) => {
+      answers.delete(agentKey(payload.agentId))
+      if (mode === 'repl' && payload.main !== false) { endThinkingGap(); diag('\n[请求失败，正在重试；以上未完成残片不属于新回答]\n') }
+    })
+    _ctx.on('retry/status', (payload: { phase: string; retries: number; maxRetries: number; agentId?: string }) => {
+      if (payload.phase === 'exhausted') diag(`[自动重试已达上限，等待手动确认${payload.agentId ? ` · ${payload.agentId}` : ''}]\n`)
+    })
 
     _ctx.on('ui/tool/call', (payload: { name: string; argsRaw: string; main?: boolean }) => {
       endThinkingGap()

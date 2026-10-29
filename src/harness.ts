@@ -11,6 +11,7 @@ import { pathToFileURL } from 'node:url'
 import { HarnessContext, type TurnResult, type AgentHandle, type ModelAdapter } from './core/index.js'
 import {
   sessionPlugin,
+  checkpointsPlugin,
   systemPromptPlugin,
   approvalPlugin,
   llmPlugin,
@@ -43,7 +44,11 @@ import { rendererPlugin, type RendererConfig } from './plugins/renderer.js'
 import { compactionPlugin } from './plugins/compaction.js'
 import { interactionPlugin, askUserToolsPlugin } from './plugins/ask-user.js'
 import { projectMemoryPlugin } from './plugins/project-memory.js'
+import { workspaceMemoryPlugin } from './plugins/workspace-memory.js'
+import { memoryProcessingPlugin } from './plugins/memory-processing.js'
+import { workspaceMemoryToolsPlugin } from './tools/memory.js'
 import { modelProfilesPlugin } from './plugins/model-profiles.js'
+import { retryPlugin } from './core/retry.js'
 import { mcpPlugin } from './mcp/index.js'
 import { hooksPlugin } from './hooks/index.js'
 import { skillsPlugin } from './skills/index.js'
@@ -53,12 +58,15 @@ import { resolveProfile, type SakuraConfig } from './config.js'
 /** The shipped composition, in mount order (inject resolves the rest). */
 export const BASE_BUNDLE: Array<{ plugin: Plugin; name: string }> = [
   { name: 'core-session', plugin: sessionPlugin },
+  { name: 'core-checkpoints', plugin: checkpointsPlugin },
   { name: 'core-system-prompt', plugin: systemPromptPlugin },
   { name: 'core-plugin-registry', plugin: pluginRegistryPlugin },
   { name: 'core-identity', plugin: identityPlugin },
   { name: 'core-project-memory', plugin: projectMemoryPlugin },
+  { name: 'core-workspace-memory', plugin: workspaceMemoryPlugin },
   { name: 'core-approval', plugin: approvalPlugin },
   { name: 'core-hooks', plugin: hooksPlugin },
+  { name: 'core-retry', plugin: retryPlugin },
   { name: 'core-llm', plugin: llmPlugin },
   { name: 'core-model-profiles', plugin: modelProfilesPlugin },
   { name: 'core-tools', plugin: toolsPlugin },
@@ -66,10 +74,12 @@ export const BASE_BUNDLE: Array<{ plugin: Plugin; name: string }> = [
   { name: 'core-skills', plugin: skillsPlugin },
   { name: 'core-jobs', plugin: jobsPlugin },
   { name: 'core-agent', plugin: agentPlugin },
+  { name: 'core-memory-processing', plugin: memoryProcessingPlugin },
   { name: 'core-compaction', plugin: compactionPlugin },
   { name: 'core-interaction', plugin: interactionPlugin },
   { name: 'core-session-export', plugin: sessionExportPlugin },
   { name: 'tool-fs', plugin: fsToolsPlugin },
+  { name: 'tool-workspace-memory', plugin: workspaceMemoryToolsPlugin },
   { name: 'tool-fs-search', plugin: fsSearchPlugin },
   { name: 'tool-shell', plugin: shellToolsPlugin },
   { name: 'tool-jobs', plugin: jobToolsPlugin },
@@ -177,6 +187,8 @@ async function composeHarness(ctx: HarnessContext, opts: HarnessOptions): Promis
     setRow('core-skills', { cwd })
     setRow('core-agent-defs', { cwd })
     setRow('core-project-memory', { cwd })
+    setRow('core-workspace-memory', { cwd })
+    setRow('core-checkpoints', { cwd })
     setRow('tool-fs', { cwd })
     setRow('tool-fs-search', { cwd })
     setRow('tool-shell', { cwd })
