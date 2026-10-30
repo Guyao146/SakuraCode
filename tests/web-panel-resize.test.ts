@@ -110,12 +110,12 @@ browserSuite('resizable conversation sidebar and workbench — real browser', ()
     const cwd = await directory(); modelCalls = 0; windowActions.length = 0
     server = await runWebServer({ cwd, adapter: new MockAdapter([() => { modelCalls++; return text('RESIZE_CHAT_OK') }]),
       token: null, viewerToken: null, open: false, quiet: true, updatesAutoCheck: false, onPersistSettings() {},
-      onWindowAction: action => { windowActions.push(action) } })
+      onWindowAction: action => { if (action !== 'ready') windowActions.push(action) } })
     browser.errors.length = 0; await browser.resize(1440); await browser.navigate(server.url)
-    await browser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接'")
+    await browser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接' && document.documentElement.dataset.boot === 'ready' && document.getElementById('appBoot').hidden")
     await browser.evaluate(layout === undefined ? "localStorage.removeItem('sakura-layout')" : `localStorage.setItem('sakura-layout', ${JSON.stringify(JSON.stringify(layout))})`)
     await browser.reload()
-    await browser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接'")
+    await browser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接' && document.documentElement.dataset.boot === 'ready' && document.getElementById('appBoot').hidden")
     return { cwd, server }
   }
   function bounds() {

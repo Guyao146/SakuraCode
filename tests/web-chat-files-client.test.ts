@@ -33,8 +33,7 @@ suite('chat files and expert header — real browser', () => {
       await browser.evaluate(`(async () => { const response=await fetch('/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token:${JSON.stringify(loginToken)}})}); if(!response.ok) throw new Error('fixture login failed'); })()`)
       await browser.reload()
     }
-    await browser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接'")
-    await browser.evaluate('new Promise(resolve => setTimeout(resolve, 150))')
+    await browser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接' && document.documentElement.dataset.boot === 'ready' && document.getElementById('appBoot').hidden")
     return { cwd, server, requests }
   }
   function fileScript(name: string, contents: string | Buffer, type = '') {
@@ -72,7 +71,7 @@ suite('chat files and expert header — real browser', () => {
 
   async function createSession() {
     await browser.evaluate("(async()=>{const response=await fetch('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});if(!response.ok)throw new Error('fixture switch failed');window.fixtureSession=(await response.json()).sessionId;})()")
-    await browser.waitFor("document.querySelector('.session-item.active')?.dataset.sessionId===window.fixtureSession")
+    await browser.waitFor("document.querySelector('.session-item.active')?.dataset.sessionId===window.fixtureSession && !document.getElementById('chatCol').hasAttribute('aria-busy')")
   }
 
   it('clears pending files when the current session is deleted, without changing the text draft', async () => {
@@ -279,6 +278,7 @@ suite('chat files and expert header — real browser', () => {
     const { server, requests } = await boot()
     await browser.evaluate("(async()=>{const response=await fetch('/api/sessions',{method:'POST',body:'{}'});if(!response.ok)throw new Error('fixture session failed');})()")
     await browser.waitFor("(async()=> (await (await fetch('/api/state')).json()).sessionId !== null)()")
+    await browser.waitFor("document.querySelector('.session-item.active') && !document.getElementById('chatCol').hasAttribute('aria-busy')")
     await browser.evaluate("window.originalRead=FileReader.prototype.readAsDataURL;window.delayedReaders=[];FileReader.prototype.readAsDataURL=function(){window.delayedReaders.push(this)}")
     await drop([fileScript('stale.txt', 'NOT_FOR_NEXT_SESSION')])
     await browser.waitFor("document.querySelector('#attachRow [data-state=reading]')")

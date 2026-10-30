@@ -128,7 +128,7 @@ export async function startDesktopHost(
   launch: DesktopLaunch,
   onPersistSettings?: (settings: DesktopSettingsState) => void,
   onPersistWeixin?: (settings: WeixinSaved) => Promise<void>,
-  onWindowAction?: (action: 'minimize' | 'maximize' | 'close' | 'drag' | 'reflow') => void,
+  onWindowAction?: (action: 'minimize' | 'maximize' | 'close' | 'drag' | 'reflow' | 'ready') => void,
   onPersistSakuraApi?: (settings: SakuraApiSaved | null) => Promise<void>,
   onPersistContextBudget?: (settings: DesktopSettingsState) => Promise<void>,
   onPersistAppearance?: (settings: DesktopAppearance) => Promise<void>,

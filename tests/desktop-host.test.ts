@@ -98,6 +98,8 @@ describe('desktop host', () => {
       await vi.waitFor(async () => expect((await state()).desktopViewport).toEqual({ ...viewport, width: 1300, version: 3 }))
       expect((await fetch(url + 'api/desktop/window', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'reflow' }) })).status).toBe(200)
       expect(frames.find(frame => frame.type === 'desktop/window')).toMatchObject({ action: 'reflow' })
+      expect((await fetch(url + 'api/desktop/window', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'ready' }) })).status).toBe(200)
+      expect(frames.find(frame => frame.type === 'desktop/window' && frame.action === 'ready')).toMatchObject({ action: 'ready' })
     } finally { input.end('shutdown\n'); await host; output.destroy(); await fs.rm(workspace, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }) }
   })
 

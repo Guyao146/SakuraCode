@@ -220,9 +220,9 @@ browserSuite('web client — real browser', () => {
     browser.errors.length = 0
     await browser.resize(1440)
     await browser.navigate(server.url)
-    await browser.waitFor("document.getElementById('connectionLabel')?.textContent === '本地服务已连接' && document.querySelectorAll('.agent-row').length === 1")
-    // The first SSE connection schedules an initial history load after 80ms.
-    await browser.evaluate('new Promise(resolve => setTimeout(resolve, 150))')
+    await browser.waitFor("document.getElementById('connectionLabel')?.textContent === '本地服务已连接' && document.querySelectorAll('.agent-row').length === 1 && document.documentElement.dataset.boot === 'ready' && document.getElementById('appBoot').hidden")
+    // The readiness gate includes the first committed-history read; no sleep
+    // or hidden-control interaction substitutes for a genuinely ready view.
   })
 
   afterEach(async () => {
@@ -485,7 +485,7 @@ browserSuite('web client — real browser', () => {
     expect(await browser.evaluate("document.getElementById('changesPanel').hidden")).toBe(false)
     expect(await browser.evaluate("document.getElementById('changesTab').getAttribute('aria-selected')")).toBe('true')
     await browser.reload()
-    await browser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接'")
+    await browser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接' && document.documentElement.dataset.boot === 'ready' && document.getElementById('appBoot').hidden")
     expect(await browser.evaluate("document.getElementById('changesPanel').hidden")).toBe(false)
     await browser.evaluate("document.getElementById('changesTab').focus()")
     await browser.key('ArrowRight')
@@ -1796,7 +1796,7 @@ browserSuite('web client — real browser', () => {
       await browser.click('#desktopMaximize')
       await browser.evaluate("document.querySelector('.topbar').dispatchEvent(new PointerEvent('pointerdown', {button: 0, isPrimary: true, bubbles: true}))")
       await browser.click('#desktopClose')
-      await vi.waitFor(() => expect(actions).toEqual(['minimize', 'maximize', 'drag', 'close']))
+      await vi.waitFor(() => expect(actions).toEqual(['ready', 'minimize', 'maximize', 'drag', 'close']))
     } finally { await desktop.close() }
   })
 

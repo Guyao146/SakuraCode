@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="night">
+<html lang="zh-CN" data-theme="night" data-boot="loading">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
@@ -10,6 +10,7 @@
    instead of the browser's white default while the page is still booting. */
 html, body { background: #1a1c22; }
 html[data-theme='day'], html[data-theme='day'] body { background: #fcfbfd; }
+html:not([data-boot='ready']) body > :is(.sidebar, .main, .inspector) { visibility: hidden !important; }
 </style>
 <style>
 /* ============================================================
@@ -1177,7 +1178,7 @@ body.visible-compact.desktop-shell #themeBtn { display: none; }
 /* ---------- surface motion ---------- */
 /* Animate entrances, not live SSE list updates or input layout. No focus,
    hidden/inert state, or streaming content is delayed by an animation. */
-@keyframes surface-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes surface-enter { from { opacity: .94; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes dialog-enter { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes backdrop-enter { from { opacity: 0; } to { opacity: 1; } }
 .settings-category:not([hidden]), body.dashboard-view .dashboard-inner,
@@ -1191,7 +1192,47 @@ dialog[open] { animation: dialog-enter var(--motion-view) var(--motion-ease); }
 dialog[open]::backdrop { animation: backdrop-enter var(--motion-fast) ease-out; }
 .settings-nav-button, .settings-subtab, .panel-tab, .side-add, .workspace-item, .account-button,
 .account-key-groups .check-field { transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease, border-color var(--motion-fast) ease; }
-.welcome .welcome-sakura, .welcome .welcome-title, .welcome .welcome-sub { animation: surface-enter 320ms var(--motion-ease); }
+.welcome .welcome-sakura, .welcome .welcome-title, .welcome .welcome-sub { animation: surface-enter var(--motion-view) var(--motion-ease); }
+/* Keep the outgoing transcript still while reading, then crossfade only to a
+   prepared destination. Presentation never delays input or data readiness. */
+.chat-scroll { position: relative; overflow-anchor: none; }
+.conversation-loading { position: sticky; top: 12px; z-index: 8; display: flex; align-items: center; gap: 8px; width: fit-content; max-width: calc(100% - 32px); margin: 0 auto; padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-raised); color: var(--text-soft); font-size: 12px; box-shadow: var(--shadow); }
+.conversation-loading .icon { width: 14px; height: 14px; color: var(--accent); animation: conversation-spin 1400ms linear infinite; }
+.conversation-snapshot, .conversation-outgoing { position: fixed; z-index: 6; overflow: hidden; background: var(--page); pointer-events: none; }
+.conversation-snapshot, .conversation-snapshot *, .conversation-outgoing, .conversation-outgoing * { animation: none !important; transition: none !important; }
+.conversation-loading button { padding: 0 2px; border: 0; background: transparent; color: var(--accent); font: inherit; cursor: pointer; }
+.conversation-loading[data-error='true'] { border-color: var(--accent-border); }
+.conversation-loading[data-error='true'] .icon { animation: none; }
+@keyframes conversation-spin { to { transform: rotate(360deg); } }
+.app-boot { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 24px; background: var(--page); color: var(--text); }
+.boot-content { display: flex; flex-direction: column; align-items: center; gap: 12px; width: min(360px, 100%); text-align: center; animation: boot-content-enter 420ms var(--motion-ease); }
+.boot-mark { position: relative; display: grid; place-items: center; width: 80px; height: 80px; margin-bottom: 8px; border: 1px solid var(--accent-border); border-radius: 24px; background: var(--accent-soft); color: var(--accent); }
+.boot-mark::before { content: ''; position: absolute; inset: -8px; border: 1px solid var(--accent-border); border-radius: 30px; animation: boot-breathe 1600ms ease-in-out infinite; }
+.boot-mark svg { width: 42px; height: 42px; animation: boot-flower 2800ms ease-in-out infinite; }
+.boot-orbit { position: absolute; inset: -24px; pointer-events: none; animation: boot-orbit 14s linear infinite; }
+.boot-petal { position: absolute; width: 7px; height: 11px; border-radius: 80% 20% 75% 25%; background: var(--accent); opacity: .65; }
+.boot-petal:nth-child(1) { left: 60px; top: 0; transform: rotate(-20deg); }
+.boot-petal:nth-child(2) { right: 0; top: 60px; transform: rotate(70deg); opacity: .5; }
+.boot-petal:nth-child(3) { left: 60px; bottom: 0; transform: rotate(160deg); opacity: .4; }
+.boot-petal:nth-child(4) { left: 0; top: 60px; transform: rotate(250deg); opacity: .3; }
+.boot-title { margin: 0; color: var(--heading); font-size: 24px; font-weight: 650; letter-spacing: -.025em; }
+.boot-caption { margin: -6px 0 8px; color: var(--muted); font-size: 10px; letter-spacing: .16em; }
+.boot-progress { width: 120px; height: 3px; overflow: hidden; border-radius: 999px; background: var(--surface-soft); }
+.boot-progress::after { content: ''; display: block; width: 44px; height: 100%; border-radius: inherit; background: var(--accent); animation: boot-progress 1200ms ease-in-out infinite alternate; }
+.boot-status { min-height: 24px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.boot-error .boot-mark::before, .boot-error .boot-mark svg, .boot-error .boot-orbit, .boot-error .boot-progress::after { animation: none; }
+.boot-actions { display: flex; gap: 8px; }
+.app-boot.boot-done { pointer-events: none; animation: boot-exit var(--motion-view) ease-out forwards; }
+.boot-done .boot-content { animation: boot-content-exit var(--motion-view) var(--motion-ease) forwards; }
+.boot-done .boot-mark svg, .boot-done .boot-orbit { animation-play-state: paused; }
+html:not([data-boot='ready']) .desktop-window-controls { z-index: 121; }
+@keyframes boot-content-enter { from { opacity: 0; transform: translateY(10px) scale(.975); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes boot-content-exit { from { transform: translateY(0) scale(1); } to { transform: translateY(-6px) scale(1.025); } }
+@keyframes boot-breathe { 0%, 100% { opacity: .3; transform: scale(.97); } 50% { opacity: .8; transform: scale(1.03); } }
+@keyframes boot-flower { 0%, 100% { transform: rotate(-5deg) scale(1); } 50% { transform: rotate(5deg) scale(1.035); } }
+@keyframes boot-orbit { to { transform: rotate(360deg); } }
+@keyframes boot-progress { from { transform: translateX(0); } to { transform: translateX(76px); } }
+@keyframes boot-exit { to { opacity: 0; } }
 /* ---------- remote dashboard ---------- */
 .view-switch { display: flex; gap: 4px; padding: 0 16px 12px; }
 .view-switch button { flex: 1; }
@@ -1309,7 +1350,7 @@ html[data-theme='day'] { --accent: #b84d66; --accent-strong: #a33e59; --grad: li
 }
 .sidebar, .inspector { border: 0; }
 .sidebar-brand, .topbar, .inspector-head { height: 64px; }
-.sidebar-brand { padding: 0 16px; }
+.sidebar-brand { padding: 0 16px; border-bottom: 1px solid transparent; }
 .brand-toggle { padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .brand-toggle:hover .brand-mark { background: var(--accent-soft); }
 @media (min-width: 761px) {
@@ -1318,6 +1359,12 @@ html[data-theme='day'] { --accent: #b84d66; --accent-strong: #a33e59; --grad: li
 .brand-caption { letter-spacing: .12em; font-size: 9px; }
 .brand-mark, .project-icon, .welcome-sakura { border-radius: 12px; }
 .topbar { padding: 0 24px; gap: 12px; background: transparent; border-color: var(--border); }
+.brand-mark { flex: none; }
+#menuBtn { flex: none; height: 36px; }
+#menuBtn .brand-mark { width: 36px; height: 36px; }
+body.sidebar-collapsed:not(.settings-view) .topbar, body.visible-compact .topbar { padding-left: 16px; }
+body.visible-compact #menuBtn .brand-text { display: none; }
+@media (max-width: 760px) { .topbar, body.desktop-shell .topbar { padding-left: 16px; } #menuBtn .brand-text { display: none; } }
 .brand { animation: none; }
 .project-card { margin: 8px 12px 16px; padding: 12px; gap: 8px; background: var(--surface-soft); border: 0; box-shadow: none; }
 .project-picker { width: calc(100% - 24px); color: var(--text); text-align: left; cursor: pointer; }
@@ -1495,6 +1542,16 @@ html[data-theme='day'] .context-category[data-category='toolResults'] { color: #
 .tool-output-head .message-actions { margin: 0; }
 .tool-out-sec pre.expanded { max-height: none; }
 .tool-head .tool-chev { margin-left: 4px; }
+.tool-icon { width: 16px; height: 16px; color: var(--muted); }
+.tool-head:hover .tool-icon, .tool-card.open .tool-icon { color: var(--text-soft); }
+.thread-tool > summary { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.thread-tool > summary::before { content: '▸'; color: var(--muted); }
+.thread-tool[open] > summary::before { content: '▾'; }
+/* Folded and expanded experts share exactly the same header box. */
+.sub-card, .sub-card.message-folded { padding: 6px 12px; }
+.sub-card .message-fold-head { height: 20px; min-height: 20px; margin: 0; padding: 0; line-height: 20px; }
+.sub-card .message-fold-chev { width: 12px; text-align: center; }
+.sub-card > .sub-head, .sub-card > .md { margin-top: 10px; }
 .diff-line.add { color: var(--ok); background: var(--ok-soft); }
 .diff-line.del { color: var(--err); background: var(--err-soft); }
 .diff-h { padding: 4px 0; }
@@ -1635,6 +1692,9 @@ body.settings-view .settings-inner { max-width: 960px; padding-top: 42px; paddin
 .mcp-state { color: var(--muted); font-size: 12px; }
 .mcp-error-text { width: 100%; color: var(--err); font-size: 12px; overflow-wrap: anywhere; }
 .composer-status { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
+/* The visible loading pill already explains this transient state. Keep its
+   composer description accessible without growing/shrinking the input box. */
+.composer-status[data-loading='true'] { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (max-width: 600px) { .plugin-market-results { grid-template-columns: 1fr; } .plugin-market-search { flex-wrap: wrap; } .plugin-market-search .search-box { flex-basis: 100%; } }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 0; }
 .settings-row + .settings-row { border-top: 1px solid var(--border); }
@@ -1752,8 +1812,34 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></symbol>
     <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5.6 5.6l1.9 1.9M16.5 16.5l1.9 1.9M18.4 5.6l-1.9 1.9M7.5 16.5l-1.9 1.9"/></symbol>
     <symbol id="i-market" viewBox="0 0 24 24"><path d="M3.6 10 5.2 4.7A1 1 0 0 1 6.2 4h11.6a1 1 0 0 1 1 .7L20.4 10Z"/><path d="M5.5 10v9.5h13V10"/><path d="M9.5 19.5V14h5v5.5"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3m6 0h4"/></symbol>
+    <symbol id="i-file-read" viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Zm0 0v6h6M8 13h8M8 17h5"/></symbol>
+    <symbol id="i-file-write" viewBox="0 0 24 24"><path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6m1-18v6h6M14 18l5-5 2 2-5 5-3 1Z"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="m15 4 5 5M4 20l5-1L21 7a2 2 0 0 0-4-4L5 15Zm0 0 1-5m8 6h8"/></symbol>
+    <symbol id="i-files" viewBox="0 0 24 24"><rect x="8" y="7" width="12" height="14" rx="2"/><path d="M15 7V3H4v14h4m4-5h4m-4 4h4"/></symbol>
+    <symbol id="i-web" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18M5 7h14M5 17h14"/></symbol>
+    <symbol id="i-browser" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01m-3 6.5h10m-10 3h6"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 7h4l2-3h4l2 3h4v13H4Z"/><circle cx="12" cy="13" r="3.5"/></symbol>
+    <symbol id="i-pointer" viewBox="0 0 24 24"><path d="m5 3 14 9-7 1-3 7Zm7 10 5 7M3 22h7"/></symbol>
+    <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M10 14h8"/></symbol>
+    <symbol id="i-scroll" viewBox="0 0 24 24"><path d="M12 3v18m-4-14 4-4 4 4m-8 10 4 4 4-4M4 5v14m16-14v14"/></symbol>
+    <symbol id="i-memory" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4M10 10h4v4h-4Z"/></symbol>
+    <symbol id="i-plan" viewBox="0 0 24 24"><path d="M9 3H5v18h14V3h-4M9 2h6v4H9Zm0 9h6m-6 4h6m-6 4h3"/></symbol>
+    <symbol id="i-jobs" viewBox="0 0 24 24"><path d="M4 5h10M4 10h8M4 15h5"/><circle cx="16" cy="16" r="5"/><path d="M16 13v3l2 1"/></symbol>
+    <symbol id="i-plugin" viewBox="0 0 24 24"><path d="M8 3v5m8-5v5M5 8h14v5a7 7 0 0 1-7 7v2m-7-9a7 7 0 0 0 7 7"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
   </defs>
 </svg>
+<div class="app-boot" id="appBoot" role="status" aria-live="polite" aria-label="SakuraCode 启动加载">
+  <div class="boot-content">
+    <div class="boot-mark" aria-hidden="true"><span class="boot-orbit"><span class="boot-petal"></span><span class="boot-petal"></span><span class="boot-petal"></span><span class="boot-petal"></span></span><svg viewBox="0 0 24 24"><use href="#i-flower"/></svg></div>
+    <h1 class="boot-title">SakuraCode</h1><p class="boot-caption">AGENT WORKSPACE</p>
+    <div class="boot-progress" aria-hidden="true"></div>
+    <p class="boot-status" id="bootStatus">正在连接工作区…</p>
+    <div class="boot-actions" id="bootActions" hidden><button class="btn btn-soft compact-btn" id="bootRetry" type="button">重新连接</button></div>
+    <noscript><p class="boot-status">请启用 JavaScript 后重新打开工作区。</p></noscript>
+  </div>
+</div>
 <div class="scrim" id="scrim" aria-hidden="true"></div>
 <div class="desktop-window-controls" id="desktopWindowControls" aria-label="桌面窗口控制" hidden>
 <button class="icon-btn" id="desktopMinimize" type="button" aria-label="收起到托盘" title="收起到托盘 · 任务继续运行"><svg class="icon" aria-hidden="true"><use href="#i-minimize"/></svg></button>
@@ -1828,8 +1914,9 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
 
 <main class="main" id="mainWorkspace">
   <header class="topbar">
-    <button class="icon-btn" id="menuBtn" type="button" aria-label="恢复会话侧栏" aria-controls="sidebar" aria-expanded="true" title="点击 SakuraCode 标志恢复会话侧栏">
-      <svg class="brand-icon" aria-hidden="true"><use href="#i-flower"/></svg>
+    <button class="brand brand-toggle" id="menuBtn" type="button" aria-label="恢复会话侧栏" aria-controls="sidebar" aria-expanded="true" title="点击 SakuraCode 标志恢复会话侧栏">
+      <span class="brand-mark"><svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-flower"/></svg></span>
+      <span class="brand-text"><span class="brand-title">SakuraCode</span><span class="brand-caption">AGENT WORKSPACE</span></span>
     </button>
     <div class="workspace-heading">
       <span class="session-heading" id="sessionHeading">新会话</span>
@@ -2062,6 +2149,7 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
   </section>
 
   <div class="chat-scroll view-scroll" id="chatScroll" tabindex="0" aria-label="对话记录">
+    <div class="conversation-loading" id="conversationLoading" role="status" aria-live="polite" hidden><svg class="icon" aria-hidden="true"><use href="#i-flower"/></svg><span id="conversationLoadingText">正在读取会话…</span><button id="conversationReload" type="button" hidden>重试读取</button></div>
     <div class="mode-notice" id="expertModeNotice" role="status" aria-live="polite" hidden><span id="expertModeNoticeText"></span><button id="expertModeNoticeClose" type="button" aria-label="关闭专家模式提示">×</button></div>
     <p class="update-notification" id="updateNotification" role="status" hidden><span id="updateNotificationText"></span><button class="btn btn-soft compact-btn" id="updateNotificationOpen" type="button">查看更新</button></p>
     <div class="connection-note history-notice" id="historyNotice" hidden><span>正在只读查看历史，当前任务仍在后台运行。</span><button class="btn btn-soft compact-btn" id="resumeHistoryBtn" type="button" hidden>继续此会话</button><button class="btn btn-soft compact-btn" id="returnLiveBtn" type="button">返回实时会话</button></div>
@@ -2265,6 +2353,39 @@ function iconEl(name, cls) {
   const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
   use.setAttribute('href', '#' + name);
   svg.appendChild(use);
+  return svg;
+}
+
+/* Tool icon identities are fixed local symbols, never markup or remote URLs. */
+const TOOL_ICONS = Object.freeze({
+  bash: 'i-terminal', pwsh: 'i-terminal', shell: 'i-terminal',
+  read: 'i-file-read', write: 'i-file-write', edit: 'i-edit', glob: 'i-files', grep: 'i-search',
+  web_search: 'i-search', web_fetch: 'i-web', skill: 'i-flower', ask_user: 'i-message',
+  memory_read: 'i-memory', memory_write: 'i-memory', todo_write: 'i-check', exit_plan: 'i-plan',
+  job_list: 'i-jobs', job_output: 'i-terminal', job_kill: 'i-stop', plugin_manager: 'i-plugin',
+  subagent: 'i-agents', list_agents: 'i-agents', list_subagent_models: 'i-agents',
+  send_message: 'i-message', interrupt_agent: 'i-stop',
+  browser_navigate: 'i-browser', browser_screenshot: 'i-camera', browser_click: 'i-pointer',
+  browser_type: 'i-keyboard', browser_key: 'i-keyboard', browser_evaluate: 'i-code', browser_close: 'i-close',
+  computer_screenshot: 'i-camera', computer_click: 'i-pointer', computer_move: 'i-pointer',
+  computer_scroll: 'i-scroll', computer_type: 'i-keyboard', computer_key: 'i-keyboard'
+});
+function toolIconName(name, kind, source) {
+  if (Object.prototype.hasOwnProperty.call(TOOL_ICONS, name)) return TOOL_ICONS[name];
+  if (source === 'mcp' || /^mcp(?:__|[_.:])/.test(String(name))) return 'i-plugin';
+  if (kind === 'agent') return 'i-agents';
+  if (kind === 'read') return 'i-file-read';
+  if (kind === 'write') return 'i-file-write';
+  if (kind === 'execute') return 'i-terminal';
+  return 'i-plugin';
+}
+/* End pure tool icon identities. */
+function toolIconEl(name, kind, source) {
+  const registered = (app.state.tools || []).find(function (tool) { return tool.name === name; });
+  const icon = toolIconName(name, kind || registered && registered.kind, source || registered && registered.source);
+  const svg = iconEl(icon, 'tool-icon');
+  svg.dataset.toolName = String(name || 'tool');
+  svg.setAttribute('focusable', 'false');
   return svg;
 }
 
@@ -2496,13 +2617,14 @@ async function api(path, opts) {
   const workspaceAction = path === '/api/desktop/settings' || path.startsWith('/api/workspace/memor') || path === '/api/retry/settings' || path === '/api/skills/import' || path.startsWith('/api/context/') || path === '/api/sessions/batch-delete' || path.endsWith('/archive') || (init.method === 'DELETE' && path.startsWith('/api/sessions/'));
   const accountAction = path.startsWith('/api/account/sakura');
   const appearanceAction = path === '/api/desktop/appearance';
+  const sessionAction = path === '/api/sessions' || init.method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(path);
   const windowAction = path === '/api/desktop/window';
   const updateCheck = path === '/api/updates/check' && init.method === 'POST';
   const updateSettingsAction = path === '/api/updates/settings';
   const historyAction = /^\/api\/sessions\/[^/]+\/history\/(preview|edit|rewind)$/.test(path) || path === '/api/conversation/generate';
   // The history operation owns its own pending gate. Its request must not be
   // rejected by that same gate after the user has already confirmed the target.
-  const allowed = updateSettingsAction ? canOperate() && !app.auth.remote : appearanceAction ? canOperate() && !app.auth.remote && !!app.state.desktop : accountAction ? canOperate() && !app.auth.remote : windowAction ? app.auth.authenticated && app.auth.role === 'operator' && app.state.desktopWindow : updateCheck ? app.auth.authenticated && app.connected : workspaceAction || historyAction ? canOperate() : canControl();
+  const allowed = updateSettingsAction ? canOperate() && !app.auth.remote : appearanceAction ? canOperate() && !app.auth.remote && !!app.state.desktop : accountAction ? canOperate() && !app.auth.remote : windowAction ? app.auth.authenticated && app.auth.role === 'operator' && app.state.desktopWindow : updateCheck ? app.auth.authenticated && app.connected : workspaceAction || historyAction ? canOperate() : canControl(sessionAction);
   if (init.method !== 'GET' && !path.startsWith('/api/auth/') && !allowed) {
     const error = new Error(app.auth.role === 'viewer' ? '只读访客不能修改工作区' : '尚未连接，操作未发送');
     error.status = 403;
@@ -2718,6 +2840,7 @@ const app = {
   sending: false,
   sendVersion: 0,
   chatTargetVersion: 0,
+  sessionRequestVersion: 0,
   stopping: false,
   runStep: '',
   runOutcome: '',
@@ -2787,6 +2910,170 @@ const app = {
   subBlocks: new Map(),        // agentId -> 子智能体卡片
   turnStarts: new Map()        // agentId -> current persisted turn identity
 };
+
+const startupUi = { loading: true, version: 0, frame: 0, timer: 0, exitTimer: 0, nativeReady: false,
+  parts: { state: false, history: false, commands: false, account: false, assets: false } };
+const conversationUi = { pending: false, snapshot: null, outgoing: null, animations: [], scrollTop: 0 };
+const loadingMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+const documentLoaded = document.readyState === 'complete' ? Promise.resolve()
+  : new Promise(function (resolve) { window.addEventListener('load', resolve, { once: true }); });
+
+function startupStatus(message, error) {
+  if (!startupUi.loading) return;
+  $('bootStatus').textContent = message;
+  $('appBoot').classList.toggle('boot-error', !!error);
+  $('bootActions').hidden = !error;
+}
+function startupPart(name, epoch) {
+  if (!startupUi.loading || epoch !== connectionEpoch) return;
+  startupUi.parts[name] = true;
+  tryRevealStartup();
+}
+function startupReady() {
+  return startupUi.loading && app.connected && Object.values(startupUi.parts).every(Boolean);
+}
+function hideStartupOverlay() {
+  clearTimeout(startupUi.exitTimer); startupUi.exitTimer = 0;
+  $('appBoot').hidden = true;
+  $('appBoot').classList.remove('boot-done');
+}
+$('appBoot').addEventListener('animationend', function (event) {
+  if (event.target === this && event.animationName === 'boot-exit' && !startupUi.loading) hideStartupOverlay();
+});
+function tryRevealStartup() {
+  if (!startupReady() || startupUi.frame) return;
+  const epoch = connectionEpoch, version = startupUi.version;
+  const images = Array.from(document.images).filter(function (image) { return image.getAttribute('src') && image.loading !== 'lazy' && !image.complete && !image.closest('[hidden]'); });
+  if (images.length) {
+    startupUi.parts.assets = false;
+    Promise.all(images.map(function (image) { return image.decode().catch(function () { /* Decorative image failures do not trap startup. */ }); }))
+      .then(function () { startupPart('assets', epoch); });
+    return;
+  }
+  startupStatus('工作区已就绪');
+  // Give the existing renderer a layout/paint opportunity. Never restart it,
+  // manufacture a progress percentage, or wait for background agent tasks.
+  startupUi.frame = requestAnimationFrame(function () {
+    startupUi.frame = requestAnimationFrame(function () {
+      startupUi.frame = 0;
+      if (epoch !== connectionEpoch || version !== startupUi.version || !startupReady()) return;
+      startupUi.loading = false; clearTimeout(startupUi.timer);
+      document.documentElement.dataset.boot = 'ready';
+      syncPanels();
+      const overlay = $('appBoot');
+      if (loadingMotion.matches) hideStartupOverlay();
+      else {
+        overlay.classList.add('boot-done');
+        // Fallback for a backgrounded document with no animationend event.
+        startupUi.exitTimer = setTimeout(hideStartupOverlay, 280);
+      }
+    });
+  });
+}
+function startStartupAttempt(epoch) {
+  if (!startupUi.loading) return;
+  startupUi.version++;
+  cancelAnimationFrame(startupUi.frame); startupUi.frame = 0;
+  Object.keys(startupUi.parts).forEach(function (key) { startupUi.parts[key] = false; });
+  startupStatus('正在连接工作区…'); clearTimeout(startupUi.timer);
+  startupUi.timer = setTimeout(function () {
+    if (epoch === connectionEpoch && startupUi.loading) startupStatus('加载时间较长，正在等待工作区。可重新连接；不会重复发送任务。', true);
+  }, 15000);
+  Promise.all([documentLoaded, document.fonts ? document.fonts.ready : Promise.resolve()])
+    .then(function () { startupPart('assets', epoch); });
+}
+function notifyNativeSurfaceReady() {
+  if (startupUi.nativeReady || !app.state.desktopWindow || !app.auth.authenticated) return;
+  startupUi.nativeReady = true;
+  // The native splash hands over to this already parsed/styled loading page,
+  // which remains in place until the initial data and transcript are ready.
+  void api('/api/desktop/window', { method: 'POST', body: { action: 'ready' } }).catch(function () { startupUi.nativeReady = false; });
+}
+
+function syncConversationSnapshot() {
+  if (app.view !== 'chat') stopConversationMotion();
+  const snapshots = [conversationUi.snapshot, conversationUi.outgoing].filter(Boolean);
+  if (!snapshots.length) return;
+  const rect = chatScroll.getBoundingClientRect();
+  snapshots.forEach(function (snapshot) {
+    snapshot.hidden = app.view !== 'chat';
+    if (!snapshot.hidden) Object.assign(snapshot.style, { left: rect.left + 'px', top: rect.top + 'px', width: rect.width + 'px', height: rect.height + 'px' });
+  });
+}
+function stopConversationMotion() {
+  conversationUi.animations.forEach(function (animation) { animation.onfinish = null; animation.cancel(); });
+  conversationUi.animations = [];
+  if (conversationUi.outgoing) conversationUi.outgoing.remove();
+  conversationUi.outgoing = null;
+}
+function beginConversationLoad(message) {
+  // A rapid switch captures the now-current page at its canonical geometry,
+  // never a partially faded frame or an older animation's outgoing transcript.
+  stopConversationMotion();
+  if (!conversationUi.pending && !startupUi.loading && app.view === 'chat') {
+    const copy = chatScroll.cloneNode(true);
+    // Removing IDs must not lose the real view's ID-specific padding. Keep the
+    // outgoing first line at the exact same coordinates, including short/mobile layouts.
+    const originalContent = Array.from(chatScroll.querySelectorAll(':scope > .view-content'));
+    copy.querySelectorAll(':scope > .view-content').forEach(function (node, index) {
+      node.style.paddingTop = getComputedStyle(originalContent[index]).paddingTop;
+    });
+    copy.removeAttribute('id'); copy.removeAttribute('tabindex'); copy.removeAttribute('aria-label');
+    copy.querySelectorAll('[id]').forEach(function (node) { node.removeAttribute('id'); });
+    copy.querySelector('.conversation-loading')?.remove();
+    copy.setAttribute('aria-hidden', 'true'); copy.inert = true;
+    Object.assign(copy.style, { position: 'absolute', inset: '0', width: '100%', height: '100%', margin: '0', display: 'block' });
+    const snapshot = el('div', 'conversation-snapshot'); snapshot.setAttribute('aria-hidden', 'true'); snapshot.inert = true;
+    snapshot.appendChild(copy); document.body.appendChild(snapshot);
+    conversationUi.snapshot = snapshot; conversationUi.scrollTop = chatScroll.scrollTop;
+    syncConversationSnapshot(); copy.scrollTop = conversationUi.scrollTop;
+  }
+  conversationUi.pending = true;
+  chatCol.inert = true; chatCol.style.visibility = 'hidden'; chatCol.setAttribute('aria-busy', 'true');
+  $('conversationLoading').hidden = false; $('conversationLoading').dataset.error = 'false';
+  $('conversationLoadingText').textContent = (message || '正在读取会话…') + (canEditDraft() ? ' 草稿可继续编辑' : ''); $('conversationReload').hidden = true;
+  if (startupUi.loading) {
+    startupUi.parts.history = false; startupUi.version++;
+    cancelAnimationFrame(startupUi.frame); startupUi.frame = 0;
+    startupStatus('正在恢复会话…');
+  }
+}
+function finishConversationLoad() {
+  const changed = conversationUi.pending;
+  stopConversationMotion();
+  conversationUi.pending = false;
+  const snapshot = conversationUi.snapshot;
+  conversationUi.snapshot = null;
+  chatCol.inert = false; chatCol.style.removeProperty('visibility'); chatCol.removeAttribute('aria-busy');
+  $('conversationLoading').hidden = true;
+  if (changed && !startupUi.loading && app.auth.authenticated && app.view === 'chat' && !loadingMotion.matches) {
+    const timing = { duration: 240, easing: 'cubic-bezier(.22, 1, .36, 1)' };
+    if (snapshot) {
+      snapshot.classList.replace('conversation-snapshot', 'conversation-outgoing');
+      conversationUi.outgoing = snapshot;
+      conversationUi.animations.push(snapshot.animate([{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: 'translateY(-6px)' }], timing));
+    }
+    // Enter from above: a positive offset on this full-height scroll child
+    // would grow its scrollable overflow and shift the next snapshot by 1px.
+    const incoming = chatCol.animate([{ opacity: .24, transform: 'translateY(-8px)' }, { opacity: 1, transform: 'translateY(0)' }], timing);
+    conversationUi.animations.push(incoming);
+    incoming.onfinish = function () { if (conversationUi.animations.includes(incoming)) stopConversationMotion(); };
+  } else if (snapshot) snapshot.remove();
+  syncAccess();
+}
+loadingMotion.addEventListener('change', function (event) {
+  if (!event.matches) return;
+  stopConversationMotion();
+  if (!startupUi.loading) hideStartupOverlay();
+});
+function conversationLoadFailed(message) {
+  if (startupUi.loading) startupStatus('会话读取失败：' + message + '。可重新连接，历史不会被删除。', true);
+  if (!conversationUi.pending) return;
+  $('conversationLoading').dataset.error = 'true';
+  $('conversationLoadingText').textContent = '会话读取失败；仍显示上一页。'; $('conversationReload').hidden = false;
+}
+$('conversationReload').addEventListener('click', function () { void loadRecords(); });
+$('bootRetry').addEventListener('click', function () { void startConnection(); });
 
 /* Display preferences are personal in Web mode, launcher-persisted on desktop. */
 function renderRetrySettings() {
@@ -3250,6 +3537,7 @@ async function loadSakuraAccount(refresh, section) {
     if (version === app.account.version) {
       app.account.loading = false; renderSakuraAccount(); refreshSelectControls(); scheduleSakuraAccount();
       if (savedAccount && epoch === connectionEpoch) void loadSakuraAccount(true);
+      else startupPart('account', epoch);
     }
   }
 }
@@ -3470,8 +3758,8 @@ function canOperate() {
   return app.auth.authenticated && app.auth.role === 'operator' && app.connected && !!app.state.workspaceId;
 }
 
-function canControl() {
-  return canOperate() && !app.historySessionId && !app.deletingSession && !app.switchingWorkspace && !contextUi.pending && !historyUi.pending && !app.state.contextOperation && !app.state.memoryProcessing?.active;
+function canControl(allowHistoryLoading) {
+  return canOperate() && (allowHistoryLoading || !conversationUi.pending) && !app.historySessionId && !app.deletingSession && !app.switchingWorkspace && !contextUi.pending && !historyUi.pending && !app.state.contextOperation && !app.state.memoryProcessing?.active;
 }
 
 function canEditDraft() {
@@ -3491,8 +3779,10 @@ function syncComposerStatus() {
     : historyUi.pending ? '正在核对或回滚对话，可以先编辑草稿，完成后再发送。'
     : contextUi.pending || app.state.contextOperation ? '正在处理对话或上下文，可以先编辑草稿，完成后再发送。'
     : expertChip.dataset.submitting === 'true' ? '正在确认专家模式，可以先编辑草稿，确认完成后再发送。'
-    : !modelConfigured() ? '模型尚未配置，可以先编辑草稿；配置就绪后再发送。' : '';
+    : !modelConfigured() ? '模型尚未配置，可以先编辑草稿；配置就绪后再发送。'
+    : conversationUi.pending ? '正在读取会话，草稿可继续编辑；完成后再发送。' : '';
   $('composerStatus').textContent = reason;
+  $('composerStatus').dataset.loading = String(reason === '正在读取会话，草稿可继续编辑；完成后再发送。');
   $('composerStatus').hidden = !reason;
 }
 
@@ -4240,6 +4530,7 @@ function setView(view, section) {
   updateJumpLatest();
   syncBatchSelection();
   renderDashboard();
+  syncConversationSnapshot();
   if (!settings && inspectorVisible() && app.layout.panel === 'team') { renderCollaboration(); void loadCollaboration(false); }
 }
 /* ============================================================
@@ -4323,6 +4614,7 @@ async function applyWorkspaceSwitch() {
 }
 
 function onWorkspaceChanged(newCwd, previousCwd) {
+  beginConversationLoad('正在切换工作区…');
   clearPendingFiles('工作区已切换，未发送附件已移除；请在新工作区重新选择文件。');
   pluginMarketUi.version++; pluginMarketUi.loading = false; pluginMarketUi.result = null; pluginMarketUi.error = ''; renderMarket();
   skillsUi.signature = ''; inputComposing = false;
@@ -4348,7 +4640,7 @@ function onWorkspaceChanged(newCwd, previousCwd) {
   closeAgentReaderView();
   resetConversation();
   app.needsHistory = true;
-  addSystemLine('已切换工作区：' + workspaceName(newCwd) + '（原工作区 ' + workspaceName(previousCwd) + ' 的会话已保留在磁盘）');
+  startupStatus('正在加载「' + workspaceName(newCwd) + '」…');
 }
 
 function fillSettingsForm() {
@@ -5053,7 +5345,7 @@ function clearChat() {
   $('chatDisclosures').hidden = true;
   chatCol.textContent = '';
   chatCol.appendChild(welcome);
-  welcome.hidden = false;
+  welcome.hidden = conversationUi.pending || startupUi.loading;
   updateApprovalBanner();
   renderChanges();
   updateJumpLatest();
@@ -5303,7 +5595,7 @@ function decorateAssistant(wrap, rawText) {
     actions = el('div', 'message-actions');
     const copy = el('button', 'message-action', '复制回答');
     copy.type = 'button';
-    copy.addEventListener('click', function () { copyText(wrap.dataset.raw || '', copy, '复制回答'); });
+    copy.addEventListener('click', function () { copyText(copy.closest('.msg-assist').dataset.raw || '', copy, '复制回答'); });
     actions.appendChild(copy);
     wrap.appendChild(actions);
   }
@@ -5479,6 +5771,7 @@ function makeToolCard(opts) {
   const head = el('button', 'tool-head');
   head.type = 'button';
   head.setAttribute('aria-expanded', 'false');
+  head.appendChild(toolIconEl(opts.name, opts.kind));
   head.appendChild(el('span', 'tool-name', opts.name || 'tool'));
   if (opts.kind && opts.kind !== opts.name) {
     head.appendChild(el('span', 'tool-kind', String(opts.kind)));
@@ -5815,6 +6108,7 @@ function addApproval(f) {
 
   const card = el('div', 'approval-card');
   const head = el('div', 'ap-head');
+  head.appendChild(toolIconEl(f.toolName, f.kind));
   head.appendChild(el('span', 'tool-name', f.toolName || 'tool'));
   if (f.kind) head.appendChild(el('span', 'kind-badge', String(f.kind)));
   if (f.mode) head.appendChild(el('span', 'mode-badge', String(f.mode)));
@@ -6203,9 +6497,9 @@ document.addEventListener('click', function (e) {
 
 function loadCommands() {
   const epoch = connectionEpoch;
-  api('/api/commands').then(function (r) {
+  return api('/api/commands').then(function (r) {
     if (epoch === connectionEpoch && app.auth.authenticated) app.slashCommands = (r && Array.isArray(r.commands)) ? r.commands : [];
-  }).catch(function () { /* 无可用命令时菜单保持为空 */ });
+  }).catch(function () { /* 无可用命令时菜单保持为空 */ }).finally(function () { startupPart('commands', epoch); });
 }
 
 /* Typed @ references: the menu fetches metadata, never full memory/history bodies. */
@@ -7201,7 +7495,7 @@ function onSessionDeleted(result) {
   if (app.reader.sessionId === id) closeAgentReaderView();
   if (history || current && !app.historySessionId) {
     resetConversation();
-    if (app.state.sessionId) scheduleRecordsReload();
+    scheduleRecordsReload();
   }
   renderSessions();
   syncAccess();
@@ -7446,6 +7740,7 @@ function renderExtensions() {
   visibleTools.forEach(function (t) {
     const card = el('div', 'extension-card');
     const title = el('div', 'extension-title');
+    title.appendChild(toolIconEl(t.name, t.kind, t.source));
     title.appendChild(el('span', 'extension-name', t.name));
     title.appendChild(el('span', 'extension-badge', kindLabels[t.kind] || t.kind));
     card.appendChild(title);
@@ -7471,7 +7766,9 @@ function renderMcp() {
   const toolList = $('mcpToolList'); toolList.textContent = '';
   $('mcpToolCatalogSummary').textContent = 'MCP 工具 · ' + tools.length;
   tools.forEach(function (tool) {
-    const card = el('div', 'extension-card'); card.append(el('strong', 'extension-name', tool.name), el('p', 'extension-desc', tool.description || '')); toolList.appendChild(card);
+    const card = el('div', 'extension-card'), title = el('div', 'extension-title');
+    title.append(toolIconEl(tool.name, tool.kind, 'mcp'), el('strong', 'extension-name', tool.name));
+    card.append(title, el('p', 'extension-desc', tool.description || '')); toolList.appendChild(card);
   });
   if (!tools.length) toolList.appendChild(el('p', 'market-empty', query ? '没有匹配的 MCP 工具。' : '连接成功后在此显示 MCP 工具。'));
   $('mcpCount').textContent = String(servers.length);
@@ -7521,7 +7818,7 @@ function paintSendButton() {
 async function copyText(text, btn, label) {
   let copied = false;
   const restoreLabel = label || (btn && btn.textContent) || '复制';
-  if (btn) btn.disabled = true;
+  if (btn) { btn.disabled = true; btn.copyPending = true; }
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       await navigator.clipboard.writeText(text);
@@ -7530,11 +7827,14 @@ async function copyText(text, btn, label) {
   } catch (e) { /* Restricted contexts may still allow the selection-based fallback. */ }
   if (!copied) copied = fallbackCopy(text);
   if (btn) {
+    btn.copyPending = false;
     btn.disabled = false;
     clearTimeout(btn.copyTimer);
     btn.textContent = copied ? '已复制' : '复制失败';
     btn.title = copied ? '已复制到剪贴板' : '浏览器拒绝复制，请选中文本手动复制。';
-    btn.copyTimer = setTimeout(function () { btn.textContent = restoreLabel; btn.removeAttribute('title'); }, copied ? 1200 : 3000);
+    const duration = copied ? 1200 : 3000;
+    btn.copyUntil = Date.now() + duration;
+    btn.copyTimer = setTimeout(function () { btn.copyUntil = 0; btn.textContent = restoreLabel; btn.removeAttribute('title'); }, duration);
   }
   return copied;
 }
@@ -7661,7 +7961,8 @@ function paintAgentReader(records, summaries) {
     } else if (r.type === 'tool/result' || r.type === 'tool/call') {
       const det = el('details', 'thread-tool');
       const label = (r.type === 'tool/call' ? '调用 ' : '结果 ') + (p.name || 'tool') + (p.isError ? '（失败）' : '');
-      det.appendChild(el('summary', '', label));
+      const summary = el('summary'); summary.append(toolIconEl(p.name, p.kind), document.createTextNode(label));
+      det.appendChild(summary);
       const pre = el('pre');
       pre.textContent = r.type === 'tool/result' ? outputText(p.output) : prettyJson(p.arguments);
       det.appendChild(pre);
@@ -7706,7 +8007,12 @@ function setConnected(ok) {
   renderDashboard();
   renderCollaboration();
   renderSessions();
-  if (ok) { void loadCollaboration(false); void loadSakuraAccount(); }
+  if (ok) {
+    void loadCollaboration(false);
+    if (sakuraAccountAvailable()) void loadSakuraAccount();
+    else startupPart('account', connectionEpoch);
+    tryRevealStartup();
+  }
 }
 
 function applyState(st) {
@@ -7715,6 +8021,7 @@ function applyState(st) {
   const previousWorkspace = app.state.workspaceId;
   if (st.server && st.server.startedAt) {
     if (app.serverId && app.serverId !== st.server.startedAt) {
+      beginConversationLoad('正在恢复工作区连接…');
       clearPendingFiles('服务已重启，未发送附件已移除；请重新确认文件与会话。');
       app.revision = -1;
       app.state.sessionId = null;
@@ -7811,10 +8118,13 @@ function applyState(st) {
   syncAccess();
   renderDashboard();
   if (app.needsHistory && !app.state.busy) scheduleRecordsReload();
+  startupPart('state', connectionEpoch);
+  notifyNativeSurfaceReady();
 }
 
 function adoptSession(sid, opts) {
   if (!sid || app.state.sessionId === sid) return;
+  if (!(opts && opts.replay === false) && !app.historySessionId) beginConversationLoad('正在读取会话…');
   app.recordsVersion++;
   if (app.state.sessionId && app.state.sessionId !== sid) {
     clearPendingFiles('会话已切换，未发送附件已移除；请确认当前会话后重新添加。');
@@ -7841,6 +8151,7 @@ function scheduleRecordsReload() {
 }
 
 async function loadRecords() {
+  clearTimeout(reloadTimer); reloadTimer = 0;
   const sid = app.historySessionId || app.state.sessionId;
   const epoch = connectionEpoch;
   const workspace = app.state.workspaceId;
@@ -7853,17 +8164,34 @@ async function loadRecords() {
   if (!app.auth.authenticated) return;
   // Never overwrite an uncommitted streaming response with an older disk snapshot.
   // Reconcile the full history at turn end if a reconnect happened mid-stream.
-  if (!app.historySessionId && app.state.busy && app.everLive) { app.needsHistory = true; return; }
+  if (!app.historySessionId && app.state.busy && app.everLive) {
+    app.needsHistory = true;
+    // A running turn can outlive startup. Its received live content is already
+    // current; disk reconciliation still waits for the committed turn end.
+    if (chatCol.querySelector('.msg-user-row, .msg-assist, .msg-think, .tool-card, .sub-card, .approval-card, .ask-card, .plan-card, .retry-card')) {
+      finishConversationLoad(); startupPart('history', epoch);
+      return;
+    }
+    // A turn-start frame alone has no transcript to overwrite. Read committed
+    // history so startup cannot deadlock before a pending approval is visible.
+  }
   if (!sid) {
     if (!app.everLive) clearChat();
     syncPendingRequests();
+    app.needsHistory = false;
+    finishConversationLoad();
+    welcome.hidden = chatCol.childElementCount > 1;
+    startupPart('history', epoch);
     return;
   }
   let data = null;
   try {
     data = await api('/api/sessions/' + encodeURIComponent(sid) + '/records');
   } catch (e) {
-    if (stillCurrent() && e.status === 404) onSessionDeleted({ deletedId: sid });
+    if (stillCurrent()) {
+      if (e.status === 404) { onSessionDeleted({ deletedId: sid }); scheduleRecordsReload(); }
+      else conversationLoadFailed(e.message || '服务未响应');
+    }
     return;
   }
   if (!stillCurrent()) return;
@@ -7874,9 +8202,21 @@ async function loadRecords() {
   }
   app.needsHistory = false;
   replayRecords((data && Array.isArray(data.records)) ? data.records : [], data && data.turnSummaries || []);
+  finishConversationLoad();
+  welcome.hidden = chatCol.childElementCount > 1;
+  startupPart('history', epoch);
 }
 
 function replayRecords(records, summaries) {
+  // Copy is a local operation, not a reason to defer committed history. Carry
+  // its actual button into an identical replayed answer so in-flight/failure
+  // feedback and keyboard focus are not discarded by turn-end reconciliation.
+  const copyButtons = new Map(), focusedCopy = document.activeElement;
+  chatCol.querySelectorAll('.msg-assist').forEach(function (wrap) {
+    const raw = wrap.dataset.raw || '', button = wrap.querySelector('.message-actions .message-action');
+    if (!copyButtons.has(raw)) copyButtons.set(raw, []);
+    copyButtons.get(raw).push(button && (button === focusedCopy || button.copyPending || button.copyUntil > Date.now()) ? button : null);
+  });
   // Disk replay replaces only the main transcript. Live expert cards are not
   // in its log and must survive turn-end/reconnect reconciliation unchanged.
   const subCards = !app.historySessionId ? Array.from(chatCol.querySelectorAll('.sub-card[data-agent-id]:not([data-collaboration])')) : [];
@@ -8048,6 +8388,14 @@ function replayRecords(records, summaries) {
     subChanges.forEach(function (entry) { app.changes.set(entry[0], entry[1]); });
     renderChanges();
   }
+  chatCol.querySelectorAll('.msg-assist').forEach(function (wrap) {
+    const candidates = copyButtons.get(wrap.dataset.raw || ''), button = candidates && candidates.shift();
+    const replacement = wrap.querySelector('.message-actions .message-action');
+    if (button && replacement) {
+      replacement.replaceWith(button);
+      if (focusedCopy === button) button.focus({ preventScroll: true });
+    }
+  });
   app.runOutcome = outcome;
   renderRunState();
   syncPendingRequests();
@@ -8161,19 +8509,24 @@ $('newSessionForm').addEventListener('submit', function (e) {
 
 async function createNamedSession(title) {
   const confirmBtn = $('newSessionConfirm');
+  if (confirmBtn.disabled) return;
+  const epoch = connectionEpoch, workspace = app.state.workspaceId;
+  const version = ++app.sessionRequestVersion, targetVersion = app.chatTargetVersion;
+  confirmBtn.sessionRequestVersion = version;
   try {
     confirmBtn.disabled = true;
     confirmBtn.textContent = '创建中…';
     const r = await api('/api/sessions', { method: 'POST', body: title ? { title: title.slice(0, 60) } : {} });
+    if (epoch !== connectionEpoch || workspace !== app.state.workspaceId || version !== app.sessionRequestVersion ||
+        targetVersion !== app.chatTargetVersion && (!r || r.sessionId !== app.state.sessionId)) return;
     if (r && r.sessionId) {
       $('newSessionDialog').close();
       adoptSession(r.sessionId);
     }
   } catch (e) {
-    $('newSessionHint').textContent = '新建会话失败：' + e.message;
+    if (epoch === connectionEpoch && workspace === app.state.workspaceId && version === app.sessionRequestVersion && targetVersion === app.chatTargetVersion) $('newSessionHint').textContent = '新建会话失败：' + e.message;
   } finally {
-    confirmBtn.disabled = false;
-    confirmBtn.textContent = '创建会话';
+    if (confirmBtn.sessionRequestVersion === version) { confirmBtn.disabled = false; confirmBtn.textContent = '创建会话'; }
   }
 }
 
@@ -8210,6 +8563,7 @@ async function switchSession(id) {
   closeDrawer();
   setView('chat');
   if (app.auth.role === 'viewer' && id) {
+    beginConversationLoad('正在读取历史会话…');
     app.recordsVersion++;
     app.historySessionId = id;
     document.body.classList.add('history-view');
@@ -8222,17 +8576,20 @@ async function switchSession(id) {
   if (!id || id === app.state.sessionId) return;
   const epoch = connectionEpoch;
   const workspace = app.state.workspaceId;
+  const version = ++app.sessionRequestVersion, targetVersion = app.chatTargetVersion;
   try {
     const r = await api('/api/sessions', { method: 'POST', body: { id: id } });
-    if (epoch !== connectionEpoch || workspace !== app.state.workspaceId) return;
+    if (epoch !== connectionEpoch || workspace !== app.state.workspaceId || version !== app.sessionRequestVersion ||
+        targetVersion !== app.chatTargetVersion && app.state.sessionId !== ((r && r.sessionId) || id)) return;
     adoptSession((r && r.sessionId) || id);
   } catch (e) {
-    if (epoch !== connectionEpoch || workspace !== app.state.workspaceId) return;
+    if (epoch !== connectionEpoch || workspace !== app.state.workspaceId || version !== app.sessionRequestVersion || targetVersion !== app.chatTargetVersion) return;
     addNotice({ level: 'error', message: '切换会话失败：' + e.message });
   }
 }
 
 function returnToLive() {
+  beginConversationLoad('正在返回实时会话…');
   app.recordsVersion++;
   app.historySessionId = null;
   document.body.classList.remove('history-view');
@@ -8521,13 +8878,13 @@ function applyPanelWidth(name, value) {
   // Prefer the actively adjusted column when stored widths no longer both fit.
   // Passive window resizing never modifies either saved width.
   app.layout.widthPriority = name;
-  syncPanelSizes(); autoGrow();
+  syncPanelSizes(); autoGrow(); syncConversationSnapshot();
 }
 
 function resetPanelWidth(name) {
   app.layout[name + 'Width'] = PANEL_SIZE_LIMITS[name].defaultWidth;
   app.layout.widthPriority = name;
-  syncPanelSizes(); autoGrow(); saveLayout();
+  syncPanelSizes(); autoGrow(); syncConversationSnapshot(); saveLayout();
 }
 
 function movePanelResize(clientX) {
@@ -8660,10 +9017,14 @@ function syncPanels() {
   $('sidebar').inert = !side || rightOverlay;
   $('inspector').inert = !inspector || sideOverlay;
   $('mainWorkspace').inert = sideOverlay || rightOverlay;
+  if (startupUi.loading) {
+    $('sidebar').inert = $('mainWorkspace').inert = $('inspector').inert = true;
+  }
   if (panelResizeUi.drag && !panelResizeAllowed(panelResizeUi.drag.name)) finishPanelResize(false, false);
   syncPanelSizes();
   if (sideOverlay || rightOverlay) closeQuotaOverlay();
   autoGrow();
+  syncConversationSnapshot();
 }
 
 function setSidebar(open) {
@@ -8730,6 +9091,7 @@ let reconnectTimer = 0;
 let connectionEpoch = 0;
 
 function stopConnection() {
+  cancelAnimationFrame(startupUi.frame); startupUi.frame = 0; startupUi.version++;
   cancelAnimationFrame(viewportUi.frame); viewportUi.frame = 0;
   clearTimeout(viewportUi.retry); clearTimeout(viewportUi.settle); document.body.classList.remove('viewport-settling');
   finishPanelResize(false, false);
@@ -8792,6 +9154,7 @@ function showLogin(message) {
   clearPendingFiles();
   closeAgentReaderView();
   resetConversation();
+  finishConversationLoad();
   $('historyNotice').hidden = true;
   setBusy(false);
   setConnected(false);
@@ -8803,11 +9166,14 @@ function showLogin(message) {
   document.querySelectorAll('dialog[open]').forEach(function (dialog) { if (dialog.id !== 'authDialog') dialog.close(); });
   if (!$('authDialog').open) $('authDialog').showModal();
   $('authToken').focus();
+  startupStatus('请先连接工作区。');
+  clearTimeout(startupUi.timer);
 }
 
 function retryConnection(epoch) {
   if (epoch !== connectionEpoch) return;
   setConnected(false);
+  startupStatus('连接暂时不可用，正在重试。也可手动重新连接。', true);
   clearTimeout(reconnectTimer);
   reconnectTimer = setTimeout(startConnection, app.backoff);
   app.backoff = Math.min(app.backoff * 2, 15000);
@@ -8816,6 +9182,8 @@ function retryConnection(epoch) {
 async function startConnection() {
   stopConnection();
   const epoch = connectionEpoch;
+  setConnected(false);
+  startStartupAttempt(epoch);
   try {
     const auth = await api('/api/auth');
     if (epoch !== connectionEpoch) return;
@@ -8934,6 +9302,7 @@ function handleFrame(f) {
       onSessionArchived(f);
       break;
     case 'workspace/changed':
+      beginConversationLoad('正在切换工作区…');
       archivesUi.version++; archivesUi.loading = false; archivesUi.rows = []; archivesUi.workspace = ''; renderArchives(); closeSessionMenu();
       clearPendingFiles('工作区已切换，未发送附件已移除；请在新工作区重新选择文件。');
       closeContextViewer();

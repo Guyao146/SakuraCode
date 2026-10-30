@@ -53,7 +53,7 @@ import { CHAT_FILE_LIMITS, parseChatFiles, parseChatImages, ChatAttachmentError,
 import { recordedTurnSummaries, teamMetrics } from '../util/turn-metrics.js'
 import { parseDesktopViewport, type DesktopViewport } from '../util/viewport.js'
 
-const VERSION = '1.0.0'
+const VERSION = '1.1.0'
 
 /** Harness events mirrored verbatim to SSE clients ({ type, ...payload }). */
 const FORWARD_EVENTS = [
@@ -150,7 +150,7 @@ export interface WebServerOptions {
   retry?: RetryPolicy
   onPersistRetry?: (settings: RetryPolicy) => Promise<void>
   /** Private launcher bridge; absent on ordinary Web servers. */
-  onWindowAction?: (action: 'minimize' | 'maximize' | 'close' | 'drag' | 'reflow') => void
+  onWindowAction?: (action: 'minimize' | 'maximize' | 'close' | 'drag' | 'reflow' | 'ready') => void
   /** Private desktop channel; credentials are never included in public snapshots. */
   weixin?: WeixinSaved
   onPersistWeixin?: (settings: WeixinSaved) => Promise<void>
@@ -1735,10 +1735,10 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       }
       const body = await bodyJson(req, 1024)
       if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
-      if (typeof body.action !== 'string' || !['minimize', 'maximize', 'close', 'drag', 'reflow'].includes(body.action)) throw new HttpError(400, 'invalid window action')
+      if (typeof body.action !== 'string' || !['minimize', 'maximize', 'close', 'drag', 'reflow', 'ready'].includes(body.action)) throw new HttpError(400, 'invalid window action')
       // Window controls are app-scoped, not workspace/session-scoped. Keep
       // them before write locks so users can close during a save or switch.
-      opts.onWindowAction(body.action as 'minimize' | 'maximize' | 'close' | 'drag' | 'reflow')
+      opts.onWindowAction(body.action as 'minimize' | 'maximize' | 'close' | 'drag' | 'reflow' | 'ready')
       json(res, 200, { ok: true })
       return
     }

@@ -173,6 +173,10 @@ namespace SakuraCode.Desktop
         private readonly Options options;
         private readonly uint showMessage;
         private readonly System.Windows.Forms.Timer monitor = new System.Windows.Forms.Timer { Interval = 500 };
+        private readonly System.Windows.Forms.Timer startupAnimation = new System.Windows.Forms.Timer { Interval = 40 };
+        private readonly System.Windows.Forms.Timer browserReflow = new System.Windows.Forms.Timer { Interval = 80 };
+        private readonly Stopwatch startupClock = Stopwatch.StartNew();
+        private readonly TaskCompletionSource<bool> surfaceReady = new TaskCompletionSource<bool>();
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly Icon appIcon;
         private readonly object logLock = new object();
@@ -199,6 +203,10 @@ namespace SakuraCode.Desktop
         private bool busy;
         private bool trayHidden;
         private bool layingOutBrowser;
+        private bool browserAttached;
+        private bool showingStartup = true;
+        private bool startupMotion;
+        private string startupStage = "正在准备工作区…";
         private int viewportWidth, viewportHeight, viewportDpi, viewportVersion;
         private FormWindowState trayRestoreState = FormWindowState.Normal;
         private string activeSecret = "";
@@ -214,14 +222,18 @@ namespace SakuraCode.Desktop
             Icon = appIcon;
             Text = appTitle;
             Name = "SakuraCodeDesktopHost";
-            // Start hidden during the handshake, then host Chromium's content
-            // in this resizable borderless window (no extra browser caption).
-            ShowInTaskbar = false;
+            // Paint the startup animation immediately, before extracting or
+            // starting the engine. Chromium remains hidden until its loading
+            // page acknowledges readiness on the existing private bridge.
+            ShowInTaskbar = true;
             FormBorderStyle = FormBorderStyle.None;
             BackColor = Color.FromArgb(26, 28, 34);
+            DoubleBuffered = true;
             StartPosition = FormStartPosition.Manual;
-            Location = new Point(-32000, -32000);
-            ClientSize = new Size(0, 0);
+            Rectangle work = Screen.FromPoint(Cursor.Position).WorkingArea;
+            MinimumSize = new Size(480, 400);
+            ClientSize = new Size(Math.Min(1440, Math.Max(480, work.Width - 64)), Math.Min(960, Math.Max(400, work.Height - 64)));
+            Location = new Point(work.Left + (work.Width - Width) / 2, work.Top + (work.Height - Height) / 2);
             LoadSettings();
             BuildTray();
             FormClosing += async delegate(object sender, FormClosingEventArgs e)
@@ -240,16 +252,88 @@ namespace SakuraCode.Desktop
                 else if (browserWindow == IntPtr.Zero || !Native.IsWindow(browserWindow) || !Native.IsProcessAlive(browserOwnerId)) await ExitAsync();
                 else LayoutBrowser();
             };
-            // Start on the UI message loop, after the hidden native handle
-            // exists. Async continuations must stay on the WinForms thread.
-            Shown += async delegate { Hide(); await BeginLaunch(); };
+            startupMotion = Native.ClientAnimationsEnabled();
+            startupAnimation.Tick += delegate { if (showingStartup && startupMotion) Invalidate(); };
+            browserReflow.Tick += delegate { browserReflow.Stop(); LayoutBrowser(true); };
+            // Async continuations stay on the WinForms thread. No artificial
+            // minimum splash duration delays a genuinely ready workspace.
+            Shown += async delegate { if (startupMotion) startupAnimation.Start(); await BeginLaunch(); };
+        }
+
+        private void StartupStage(string message)
+        {
+            startupStage = message;
+            if (showingStartup) Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (!showingStartup) return;
+            Graphics g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            var saved = g.Save();
+            float scale = DeviceDpi / 96f;
+            g.TranslateTransform(ClientSize.Width / 2f, ClientSize.Height / 2f - 26 * scale);
+            g.ScaleTransform(scale, scale);
+            double phase = startupMotion ? startupClock.Elapsed.TotalSeconds : 0;
+            using (var soft = new SolidBrush(Color.FromArgb(42, 35, 43)))
+            using (var accent = new SolidBrush(Color.FromArgb(240, 173, 192)))
+            using (var border = new Pen(Color.FromArgb(86, 64, 74)))
+            using (var title = new SolidBrush(Color.FromArgb(244, 244, 248)))
+            using (var muted = new SolidBrush(Color.FromArgb(154, 158, 174)))
+            // Graphics already scales the whole surface for DPI. Pixel fonts
+            // avoid scaling point-size fonts a second time on HiDPI monitors.
+            using (var titleFont = new Font("Microsoft YaHei", 24, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (var captionFont = new Font("Segoe UI", 10, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (var statusFont = new Font("Microsoft YaHei", 12, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (var centered = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            using (var box = new System.Drawing.Drawing2D.GraphicsPath())
+            {
+                box.AddArc(-40, -80, 48, 48, 180, 90); box.AddArc(-8, -80, 48, 48, 270, 90);
+                box.AddArc(-8, -48, 48, 48, 0, 90); box.AddArc(-40, -48, 48, 48, 90, 90); box.CloseFigure();
+                g.FillPath(soft, box); g.DrawPath(border, box);
+                using (var pulse = new Pen(Color.FromArgb((int)(40 + 36 * (Math.Sin(phase * Math.PI * 1.25) + 1)), 240, 173, 192)))
+                    g.DrawEllipse(pulse, -48, -88, 96, 96);
+                // Match the Web loading brand: slow orbiting petals and a small
+                // flower breath. A zero phase is a fully painted static frame.
+                var orbit = g.Save();
+                g.TranslateTransform(0, -40);
+                g.RotateTransform((float)(phase * 360 / 14));
+                for (int i = 0; i < 4; i++)
+                {
+                    using (var floatingPetal = new SolidBrush(Color.FromArgb(166 - i * 30, 240, 173, 192)))
+                        g.FillEllipse(floatingPetal, -3.5f, -64, 7, 11);
+                    g.RotateTransform(90);
+                }
+                g.Restore(orbit);
+                var flower = g.Save();
+                g.TranslateTransform(0, -40);
+                g.RotateTransform((float)(-5 * Math.Cos(phase * Math.PI * 2 / 2.8)));
+                float breath = .63f * (1 + (float)(.035 * (1 - Math.Cos(phase * Math.PI * 2 / 2.8)) / 2));
+                g.ScaleTransform(breath, breath);
+                using (var petal = new System.Drawing.Drawing2D.GraphicsPath())
+                {
+                    petal.AddBezier(0, -2, -10, -11, -10, -25, 0, -33);
+                    petal.AddBezier(0, -33, 10, -25, 10, -11, 0, -2); petal.CloseFigure();
+                    for (int i = 0; i < 5; i++) { g.FillPath(accent, petal); g.RotateTransform(72); }
+                    g.FillEllipse(accent, -3, -3, 6, 6);
+                }
+                g.Restore(flower);
+                g.DrawString("SakuraCode", titleFont, title, new RectangleF(-220, 18, 440, 38), centered);
+                g.DrawString("AGENT WORKSPACE", captionFont, muted, new RectangleF(-220, 56, 440, 22), centered);
+                g.FillRectangle(soft, -60, 91, 120, 3);
+                g.FillRectangle(accent, -60 + (float)((1 - Math.Cos(phase * Math.PI / 1.2)) * 38), 91, 44, 3);
+                g.DrawString(startupStage, statusFont, muted, new RectangleF(-220, 106, 440, 48), centered);
+            }
+            g.Restore(saved);
         }
 
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            // ShowInTaskbar recreates the HWND during launch. Every new host
-            // needs the same border policy, not just the initial hidden one.
+            // Every host handle uses the same border policy. Startup/attach
+            // never toggles ShowInTaskbar or recreates an embedded child.
             Native.HideWindowBorder(Handle);
         }
 
@@ -294,10 +378,10 @@ namespace SakuraCode.Desktop
                 Show();
                 Native.SetForegroundWindow(Handle);
                 LayoutBrowser();
+                QueueBrowserReflow();
                 FocusBrowser();
             }
-            // No settings window exists anymore; with no app window there is
-            // nothing to surface (the monitor exits once the browser is gone).
+            else if (showingStartup && !exiting) { Show(); Native.SetForegroundWindow(Handle); }
         }
 
         private void MinimizeToTray()
@@ -312,7 +396,7 @@ namespace SakuraCode.Desktop
 
         private void FocusBrowser()
         {
-            if (!exiting && !trayHidden && Visible && IsHandleCreated && WindowState != FormWindowState.Minimized && Native.IsWindow(browserWindow))
+            if (browserAttached && !showingStartup && !exiting && !trayHidden && Visible && IsHandleCreated && WindowState != FormWindowState.Minimized && Native.IsWindow(browserWindow))
                 Native.FocusEmbeddedBrowser(Handle, browserWindow);
         }
 
@@ -323,6 +407,7 @@ namespace SakuraCode.Desktop
             // still processing kiosk/fullscreen bounds. Restore the embedded
             // surface on return, even when the host itself was never resized.
             LayoutBrowser();
+            QueueBrowserReflow();
             // Activation focuses the empty WinForms host, not its cross-process
             // Chromium child. Restore native keyboard/IME focus, without moving
             // the page's caret or taking focus from another foreground app.
@@ -369,7 +454,13 @@ namespace SakuraCode.Desktop
                 if (hit != 0) { message.Result = new IntPtr(hit); return; }
             }
             base.WndProc(ref message);
-            if (message.Msg == 0x0005 || message.Msg == 0x0047 || message.Msg == 0x02e0) LayoutBrowser(); // size, position, DPI: read native client, not cached WinForms geometry
+            if (message.Msg == 0x001a && showingStartup) // WM_SETTINGCHANGE: respect reduced motion without restarting startup.
+            {
+                startupMotion = Native.ClientAnimationsEnabled();
+                if (startupMotion) startupAnimation.Start(); else startupAnimation.Stop();
+                Invalidate();
+            }
+            if (message.Msg == 0x0005 || message.Msg == 0x0047 || message.Msg == 0x02e0) { LayoutBrowser(); QueueBrowserReflow(); } // size, position, DPI: read native client, not cached WinForms geometry
             if (message.Msg == 0x0007) FocusBrowser(); // WM_SETFOCUS, including keyboard navigation back to the host
             if (message.Msg == 0x031a || message.Msg == 0x031e) // theme / DWM composition changed
                 Native.HideWindowBorder(Handle);
@@ -388,7 +479,13 @@ namespace SakuraCode.Desktop
 
         private int FrameInset
         {
-            get { return WindowState == FormWindowState.Maximized ? 0 : Math.Max(5, (int)Math.Ceiling(DeviceDpi / 96.0 * 5)); }
+            get { return IsHandleCreated && Native.IsZoomed(Handle) ? 0 : Math.Max(5, (int)Math.Ceiling(DeviceDpi / 96.0 * 5)); }
+        }
+
+        private void QueueBrowserReflow()
+        {
+            if (exiting || !browserAttached) return;
+            browserReflow.Stop(); browserReflow.Start();
         }
 
         protected override void OnResize(EventArgs e)
@@ -399,7 +496,7 @@ namespace SakuraCode.Desktop
 
         private void LayoutBrowser(bool force = false)
         {
-            if (layingOutBrowser || exiting || trayHidden || !IsHandleCreated || browserWindow == IntPtr.Zero || WindowState == FormWindowState.Minimized || !Native.IsWindow(browserWindow)) return;
+            if (layingOutBrowser || !browserAttached || browserWindow == IntPtr.Zero || !IsHandleCreated || !Native.IsWindow(browserWindow) || WindowState == FormWindowState.Minimized) return;
             Native.NativeRect client, actual, browserClient;
             if (!Native.GetClientRect(Handle, out client) || client.Right <= client.Left || client.Bottom <= client.Top || Native.GetParent(browserWindow) != Handle) return;
             int inset = FrameInset;
@@ -443,13 +540,8 @@ namespace SakuraCode.Desktop
 
         private void AttachBrowser()
         {
-            // ShowInTaskbar can recreate the HWND. Configure the host FIRST;
-            // otherwise its recreation destroys an already-attached browser.
-            Rectangle work = Screen.FromPoint(Cursor.Position).WorkingArea;
-            MinimumSize = new Size(480, 400);
-            ClientSize = new Size(Math.Min(1440, Math.Max(480, work.Width - 64)), Math.Min(960, Math.Max(400, work.Height - 64)));
-            Location = new Point(work.Left + (work.Width - Width) / 2, work.Top + (work.Height - Height) / 2);
-            ShowInTaskbar = true;
+            // Do not reset the host bounds or recreate its HWND here: a user
+            // may already have resized/maximized the visible startup window.
             Native.ShowWindow(browserWindow, 0);
             long style = Native.GetWindowLongPtr(browserWindow, -16).ToInt64();
             Native.SetWindowLongPtr(browserWindow, -16, new IntPtr((style & ~0x80cf0000L) | 0x40000000L));
@@ -457,10 +549,16 @@ namespace SakuraCode.Desktop
             Native.SetParent(browserWindow, Handle);
             int error = Marshal.GetLastWin32Error();
             if (error != 0) throw new Win32Exception(error, "无法创建无标题栏工作区窗口。");
-            LayoutBrowser();
+            browserAttached = true;
+            LayoutBrowser(true);
+        }
+
+        private void RevealBrowser()
+        {
+            startupAnimation.Stop(); showingStartup = false;
             Native.ShowWindow(browserWindow, 5);
-            Show();
-            Activate();
+            if (!trayHidden) Show();
+            QueueBrowserReflow();
             FocusBrowser();
         }
 
@@ -469,10 +567,12 @@ namespace SakuraCode.Desktop
             if (exiting || IsDisposed || !IsHandleCreated) return;
             BeginInvoke(new Action(async delegate
             {
-                if (exiting || !Native.IsWindow(browserWindow)) return;
+                if (exiting) return;
+                if (action == "ready") { surfaceReady.TrySetResult(true); return; }
+                if (!Native.IsWindow(browserWindow)) return;
                 if (action == "minimize") MinimizeToTray();
                 else if (action == "reflow") LayoutBrowser(true);
-                else if (action == "maximize") WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized;
+                else if (action == "maximize") { WindowState = Native.IsZoomed(Handle) ? FormWindowState.Normal : FormWindowState.Maximized; LayoutBrowser(true); QueueBrowserReflow(); }
                 else if (action == "close") await ExitAsync();
                 else if (action == "drag")
                 {
@@ -515,11 +615,13 @@ namespace SakuraCode.Desktop
                 if (activeSecret.Length > 4096 || Regex.IsMatch(activeSecret, @"[\x00-\x20\x7f]")) throw new ArgumentException("API Key 包含无效空白或控制字符。");
                 string browserPath = Program.FindBrowser();
                 Log("Verifying the built-in runtime engine…");
+                StartupStage("正在校验内置运行引擎…");
                 string runtime = await Task.Run(() => Program.ExtractEngine(options.DataDir));
                 cancellation.ThrowIfCancellationRequested();
                 stopTask = null;
                 job = new ProcessJob();
                 Log("Starting the local workspace…");
+                StartupStage("正在加载工作区与插件…");
                 string url = await StartEngineAsync(runtime, cwd, endpoint, modelName, cancellation);
                 cancellation.ThrowIfCancellationRequested();
                 appTitle = workspaceName(cwd) + " — SakuraCode";
@@ -528,6 +630,7 @@ namespace SakuraCode.Desktop
                 Directory.CreateDirectory(profile);
                 {
                     Log("Opening the app window…");
+                    StartupStage("正在准备界面…");
                     var browserArgs = new List<string> {
                         "--app=" + url, "--user-data-dir=" + profile,
                         "--no-first-run", "--no-default-browser-check", "--disable-background-mode", "--disable-background-networking",
@@ -537,6 +640,7 @@ namespace SakuraCode.Desktop
                         // dedicated workspace needs none of those components;
                         // keep Chromium's renderer/network/GPU sandboxes intact.
                         "--disable-component-extensions-with-background-pages", "--window-size=1440,960",
+                        "--window-position=-32000,-32000",
                         // Kiosk affects only the embedded browser surface: it removes
                         // Chromium's own caption and prevents F11 from bringing it
                         // back. The resizable native host is NOT a kiosk/fullscreen app.
@@ -573,6 +677,13 @@ namespace SakuraCode.Desktop
                     // monitor can keep watching it after the root is gone.
                     browserOwnerId = Native.WindowOwner(browserWindow);
                     AttachBrowser();
+                    Task painted = await Task.WhenAny(surfaceReady.Task, Task.Delay(20000, cancellation));
+                    cancellation.ThrowIfCancellationRequested();
+                    if (painted != surfaceReady.Task) throw new TimeoutException("界面加载超时，请重新启动 SakuraCode。账号与会话数据未删除。");
+                    // The page now has its own loading layer. Swapping within
+                    // the same host leaves no browser default/initial frame.
+                    await Task.Delay(32, cancellation);
+                    RevealBrowser();
                 }
                 cancellation.ThrowIfCancellationRequested();
                 // Merely starting a newer release must not rewrite existing
@@ -1110,6 +1221,7 @@ namespace SakuraCode.Desktop
         {
             if (exiting) return;
             exiting = true;
+            startupAnimation.Stop(); browserReflow.Stop();
             Hide();
             if (launchCancellation != null) launchCancellation.Cancel();
             if (launchTask != null) await launchTask;
@@ -1193,6 +1305,7 @@ namespace SakuraCode.Desktop
                 if (job != null) job.Dispose();
                 if (launchCancellation != null) launchCancellation.Dispose();
                 monitor.Dispose();
+                startupAnimation.Dispose(); browserReflow.Dispose();
                 tray.Visible = false;
                 if (tray.ContextMenuStrip != null) tray.ContextMenuStrip.Dispose();
                 tray.Dispose();
@@ -1230,6 +1343,15 @@ namespace SakuraCode.Desktop
 
     internal static class Native
     {
+        internal static bool ClientAnimationsEnabled()
+        {
+            int enabled;
+            return SystemInformation.UIEffectsEnabled && (!SystemParametersInfo(0x1042, 0, out enabled, 0) || enabled != 0); // SPI_GETCLIENTAREAANIMATION; read-only.
+        }
+
+        [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
+        private static extern bool SystemParametersInfo(uint action, uint parameter, out int value, uint flags);
+
         internal static void HideWindowBorder(IntPtr window)
         {
             try
@@ -1300,6 +1422,7 @@ namespace SakuraCode.Desktop
         [DllImport("user32.dll", SetLastError = true)] internal static extern IntPtr SetWindowLongPtr(IntPtr window, int index, IntPtr value);
         [DllImport("user32.dll", SetLastError = true)] internal static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
         [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr window, out NativeRect rect);
+        [DllImport("user32.dll")] internal static extern bool IsZoomed(IntPtr window);
         [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
         [DllImport("user32.dll")] internal static extern bool ReleaseCapture();

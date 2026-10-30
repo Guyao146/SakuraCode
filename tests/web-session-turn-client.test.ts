@@ -29,7 +29,7 @@ suite('session and turn refinements — real browser', () => {
     const server = await runWebServer({ cwd, adapter: new MockAdapter([text('DONE')]), open: false, quiet: true, updatesAutoCheck: false,
       token: null, viewerToken: null, ...extra }); servers.push(server)
     browser.errors.length = 0; await browser.resize(1440, 900); await browser.navigate(server.url)
-    await browser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接'")
+    await browser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接' && document.documentElement.dataset.boot === 'ready' && document.getElementById('appBoot').hidden")
     return server
   }
   async function send(task: string) { await browser.fill('#input', task); await browser.click('#sendBtn') }

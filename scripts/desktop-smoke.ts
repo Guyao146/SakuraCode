@@ -103,14 +103,21 @@ async function actualViewport(client: BrowserClient, info: RuntimeInfo): Promise
   const deadline = Date.now() + 8000
   let native: WindowInfo
   let viewport: { width: number; height: number; scale: number }
+  let page: { width: number; height: number }
   do {
     native = await nativeWindow(info)
     viewport = await client.evaluate('({width:innerWidth,height:innerHeight,scale:devicePixelRatio})')
+    page = await client.evaluate('({width:document.body.getBoundingClientRect().width,height:document.body.getBoundingClientRect().height})')
+    const inset = native.maximized ? 0 : Math.max(5, Math.ceil(viewport.scale * 5))
     if (Math.abs(viewport.width * viewport.scale - native.browserWidth) <= 2 &&
-      Math.abs(viewport.height * viewport.scale - native.browserHeight) <= 2) return { native, viewport }
+      Math.abs(viewport.height * viewport.scale - native.browserHeight) <= 2 &&
+      Math.abs(native.browserWidth - (native.clientWidth - inset * 2)) <= 2 &&
+      Math.abs(native.browserHeight - (native.clientHeight - inset * 2)) <= 2 &&
+      Math.abs(page.width * viewport.scale - native.browserWidth) <= 2 &&
+      Math.abs(page.height * viewport.scale - native.browserHeight) <= 2) return { native, viewport }
     await delay(100)
   } while (Date.now() < deadline)
-  throw new Error('Native browser surface and page viewport differ: ' + JSON.stringify({ native, viewport }))
+  throw new Error('Native host/browser/client and visible page differ: ' + JSON.stringify({ native, viewport, page }))
 }
 
 async function layoutBounds(client: BrowserClient, selector: string): Promise<{ main: number[]; content: number[]; viewport: number[] }> {
@@ -249,10 +256,13 @@ async function attach(info: RuntimeInfo): Promise<BrowserClient> {
   await client.waitFor("document.getElementById('connectionLabel')?.textContent === '本地服务已连接'")
   await client.waitFor("document.getElementById('accountUsername')?.textContent === " + JSON.stringify(clientUser.username))
   await client.waitFor("!document.getElementById('sakuraRefresh').disabled")
+  await client.waitFor("document.documentElement.dataset.boot === 'ready' && document.getElementById('appBoot').hidden && !document.getElementById('chatCol').hasAttribute('aria-busy')")
   return client
 }
 
 try {
+  // Keep early storage/fixture failures visible as well as late GUI failures.
+  await fs.mkdir(previews, { recursive: true })
   await fs.writeFile(fixturePlugin, `const fs = require('node:fs');
 const original = globalThis.fetch;
 const key = ${JSON.stringify(authorizedKey)}, base = ${JSON.stringify(SAKURA_MODEL_BASE_URL)}, site = ${JSON.stringify(SAKURA_API_ORIGIN)};
@@ -359,6 +369,10 @@ module.exports = { name: 'synthetic-sakuraapi-transport', inject: ['jobs'], appl
   const storage = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
     path.join(root, 'scripts', 'desktop', 'account-storage-smoke.ps1'), '-Exe', exe, '-SeedDirectory', dataDir, '-SeedClientAccount'], { windowsHide: true, timeout: 30000 })
   console.log(storage.stdout.trim())
+  const startupPaint = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+    path.join(root, 'scripts', 'desktop', 'startup-paint-smoke.ps1'), '-Exe', exe, '-OutputDirectory', path.join(previews, 'native-startup')], { windowsHide: true, timeout: 15000 })
+  console.log(startupPaint.stdout.trim())
+  verifiedFeatures.push('compiled native startup paints a stable reduced-motion brand, animates only when enabled and stops painting after handover; render-only verification without engine/browser/physical input')
   await fs.mkdir(previews, { recursive: true })
   assert.equal(await fs.stat(verificationFile).then(() => true, () => false), false, 'completed desktop acceptance evidence must not be overwritten; choose a fresh output directory')
   const binary = await fs.readFile(exe)
@@ -538,9 +552,14 @@ module.exports = { name: 'synthetic-sakuraapi-transport', inject: ['jobs'], appl
   await browser.evaluate("document.getElementById('desktopMaximize').click()")
   await delay(250)
   assert.equal((await nativeWindow(first)).maximized, true)
+  const maximizeViewport = await actualViewport(browser, first)
+  await browser.screenshot(path.join(previews, 'desktop-maximized-full-client.png'))
   await browser.evaluate("document.getElementById('desktopMaximize').click()")
   await delay(250)
   assert.equal((await nativeWindow(first)).maximized, false)
+  const restoreViewport = await actualViewport(browser, first)
+  await fs.writeFile(path.join(previews, 'desktop-maximize-restore-full-client.json'), JSON.stringify({ maximizeViewport, restoreViewport,
+    hostClientMatchesBrowser: true, browserMatchesVisiblePage: true, noPhysicalInput: true }, null, 2))
   await browser.evaluate("document.getElementById('desktopMinimize').click()")
   await delay(250)
   const trayHidden = await nativeWindow(first)
@@ -884,7 +903,7 @@ module.exports = { name: 'synthetic-sakuraapi-transport', inject: ['jobs'], appl
   try {
     await responsiveBrowser.start()
     await responsiveBrowser.navigate(first.url)
-    await responsiveBrowser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接'")
+    await responsiveBrowser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接' && document.documentElement.dataset.boot === 'ready' && document.getElementById('appBoot').hidden")
     await responsiveBrowser.resize(390, 760)
     for (const [button, selector] of viewSelectors) {
       await responsiveBrowser.evaluate(`document.getElementById(${JSON.stringify(button)}).click()`)
@@ -1306,6 +1325,7 @@ module.exports = { name: 'synthetic-sakuraapi-transport', inject: ['jobs'], appl
   assert.ok(nativeSkillToken.includes('@[skill:native-imported]'))
   const referenceSession = await (await post(original.url + 'api/sessions', { title: 'Native referenced session' })).json() as { sessionId: string }
   const member = await (await post(original.url + 'api/agents', { name: 'Native helper', description: 'Synthetic reference target' })).json() as { agent: { id: string } }
+  await browser.waitFor("!document.getElementById('sendBtn').disabled && !document.getElementById('chatCol').hasAttribute('aria-busy')")
   const nativeTask = `NATIVE_RETRY_TASK ${nativeSkillToken} @[memory:${encodeURIComponent(other)}] @[session:${referenceSession.sessionId}] @[agent:${member.agent.id}]`
   await browser.fill('#input', nativeTask)
   await browser.click('#sendBtn')

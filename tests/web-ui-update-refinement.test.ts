@@ -30,7 +30,7 @@ suite('desktop UI/update refinements — real browser', () => {
       token: null, viewerToken: null, onPersistSettings() {}, updatesAutoCheck: false, ...extra })
     servers.push(server); browser.errors.length = 0
     await browser.resize(1440, 900); await browser.navigate(server.url)
-    await browser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接'")
+    await browser.waitFor("document.getElementById('connectionLabel').textContent === '本地服务已连接' && document.documentElement.dataset.boot === 'ready' && document.getElementById('appBoot').hidden")
     return server
   }
   async function settings(section: string) {
