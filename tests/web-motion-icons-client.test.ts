@@ -503,6 +503,10 @@ suite('startup, transitions and icons — real browser', () => {
     await browser.click('#settingsViewBtn'); await browser.click('#marketBtn')
     expect(await browser.evaluate("document.querySelectorAll('#toolList .extension-card').length > 0 && [...document.querySelectorAll('#toolList .extension-card')].every(card => card.querySelector('.tool-icon'))")).toBe(true)
     await browser.click('#settingsBack'); await browser.click('#inspectorBtn')
+    // Loading workspace history inserts cards above the agent list. Match the
+    // other reader regressions: wait for that real read before taking pointer
+    // coordinates, rather than clicking a button while its position changes.
+    await browser.waitFor("document.getElementById('inspectorBtn').getAttribute('aria-expanded') === 'true' && document.querySelector('#collaborationWorkspaces .collaboration-workspace') && !document.getElementById('collaborationRefresh').disabled")
     await browser.waitFor(`document.querySelector('#agentList [data-agent-id="${child.id}"] .agent-view')`)
     await browser.click(`#agentList [data-agent-id="${child.id}"] .agent-view`)
     await browser.waitFor("document.querySelector('#agentReaderBody .thread-tool .tool-icon') && !document.getElementById('agentReader').hasAttribute('aria-busy')")
