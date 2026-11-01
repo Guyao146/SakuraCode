@@ -94,11 +94,17 @@ export class BrowserClient {
   /** Attach to the real app window in opt-in desktop smoke tests, without launching a second browser. */
   async connect(webSocketDebuggerUrl: string, kind: 'page' | 'browser' = 'page'): Promise<void> {
     const socket = this.socket = new WebSocket(webSocketDebuggerUrl)
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('CDP connection timed out')), 5_000)
-      socket.onopen = () => { clearTimeout(timer); resolve() }
-      socket.onerror = () => { clearTimeout(timer); reject(new Error('CDP connection failed')) }
-    })
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('CDP connection timed out')), 5_000)
+        socket.onopen = () => { clearTimeout(timer); resolve() }
+        socket.onerror = () => { clearTimeout(timer); reject(new Error('CDP connection failed')) }
+      })
+    } catch (error) {
+      socket.close()
+      if (this.socket === socket) this.socket = undefined
+      throw error
+    }
     socket.onmessage = (event) => {
       const frame = JSON.parse(String(event.data))
       if (frame.id) {
@@ -330,10 +336,19 @@ export class BrowserClient {
     }
   }
 
+  /** Native launchers own their app window. Detach CDP without closing that browser. */
+  disconnect(): void {
+    const socket = this.socket
+    this.socket = undefined
+    for (const request of this.pending.values()) request.reject(new Error('browser disconnected'))
+    this.pending.clear()
+    socket?.close()
+  }
+
   async close(): Promise<void> {
     if (this.socket) {
       await this.send('Browser.close').catch(() => {})
-      this.socket.close()
+      this.disconnect()
     }
     const child = this.child
     if (child?.pid && child.exitCode === null && child.signalCode === null) {

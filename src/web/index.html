@@ -1982,6 +1982,13 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
           <button class="btn btn-accent" id="retrySave" type="button">保存重试策略</button><p class="settings-message" id="retryMessage" role="status" aria-live="polite"></p>
         </div>
         <div class="settings-card" id="layoutSettingsCard"><h2>面板布局</h2><p class="panel-note">对话侧栏与工作台可独立收起，拖动分隔线可调宽，双击恢复该栏默认宽度；也可用方向键微调。宽度与布局偏好在当前浏览器保存，窗口变窄会自动限宽，手机保留抽屉。恢复默认布局会重置两栏宽度。</p><div class="settings-actions"><button class="btn btn-soft" id="resetLayout" type="button">恢复默认布局</button></div></div>
+        <div class="settings-card" id="statisticsSettingsCard" hidden><h2>匿名使用统计</h2>
+          <p class="field-hint">默认启用，启动后自动记录，无需勾选或保存。仅发送随机安装标识、运行会话标识、事件时间、软件版本和平台，不发送账号、密钥、聊天、代码、文件名或项目路径；服务器仍可见连接 IP。只在真实交互时记录活跃，不用后台空闲计时冒充使用。</p>
+          <p class="field-hint">已保存的接收地址：<code id="statisticsDestination"></code></p>
+          <details><summary>统计连接设置</summary><label class="form-field" for="statisticsEndpoint"><span class="field-label">HTTPS 采集地址</span><input id="statisticsEndpoint" type="url" maxlength="2048" autocomplete="off" spellcheck="false"><span class="field-hint">必须以 /api/collect 结尾。仅使用可信服务；HTTP 只允许本机测试。</span></label><label class="form-field" for="statisticsAppId"><span class="field-label">桌面应用 ID</span><input id="statisticsAppId" type="text" maxlength="128" autocomplete="off" spellcheck="false"><span class="field-hint">这是公开应用标识，不是管理员密码。修改服务或应用 ID 会清理旧待发数据并重建随机身份。</span></label><div class="settings-actions"><button class="btn btn-soft" id="statisticsToggle" type="button">停止统计并清理本机数据</button></div></details>
+          <p class="field-hint">已保存的关闭状态或空应用 ID 仍会保留，不会自动重新启用。停止后不再采集或发送，并清理本机匿名标识及待发队列；已发出的请求和服务器历史不能在此撤回或删除。设置跨重启与工作区保留，不影响授权、模型请求或退出。</p>
+          <button class="btn btn-accent" id="statisticsSave" type="button">保存统计偏好</button><p class="settings-message" id="statisticsMessage" role="status" aria-live="polite"></p><p class="field-hint" id="statisticsStatus" role="status"></p>
+        </div>
       </section>
       <div id="desktopSettingsForm">
         <section class="settings-category" id="settings-modelsPanel" role="tabpanel" aria-labelledby="settings-modelsTab" tabindex="0" hidden>
@@ -2617,6 +2624,7 @@ async function api(path, opts) {
   const workspaceAction = path === '/api/desktop/settings' || path.startsWith('/api/workspace/memor') || path === '/api/retry/settings' || path === '/api/skills/import' || path.startsWith('/api/context/') || path === '/api/sessions/batch-delete' || path.endsWith('/archive') || (init.method === 'DELETE' && path.startsWith('/api/sessions/'));
   const accountAction = path.startsWith('/api/account/sakura');
   const appearanceAction = path === '/api/desktop/appearance';
+  const statisticsAction = path === '/api/desktop/statistics' || path === '/api/desktop/statistics/activity';
   const sessionAction = path === '/api/sessions' || init.method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(path);
   const windowAction = path === '/api/desktop/window';
   const updateCheck = path === '/api/updates/check' && init.method === 'POST';
@@ -2624,7 +2632,7 @@ async function api(path, opts) {
   const historyAction = /^\/api\/sessions\/[^/]+\/history\/(preview|edit|rewind)$/.test(path) || path === '/api/conversation/generate';
   // The history operation owns its own pending gate. Its request must not be
   // rejected by that same gate after the user has already confirmed the target.
-  const allowed = updateSettingsAction ? canOperate() && !app.auth.remote : appearanceAction ? canOperate() && !app.auth.remote && !!app.state.desktop : accountAction ? canOperate() && !app.auth.remote : windowAction ? app.auth.authenticated && app.auth.role === 'operator' && app.state.desktopWindow : updateCheck ? app.auth.authenticated && app.connected : workspaceAction || historyAction ? canOperate() : canControl(sessionAction);
+  const allowed = statisticsAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.statistics : updateSettingsAction ? canOperate() && !app.auth.remote : appearanceAction ? canOperate() && !app.auth.remote && !!app.state.desktop : accountAction ? canOperate() && !app.auth.remote : windowAction ? app.auth.authenticated && app.auth.role === 'operator' && app.state.desktopWindow : updateCheck ? app.auth.authenticated && app.connected : workspaceAction || historyAction ? canOperate() : canControl(sessionAction);
   if (init.method !== 'GET' && !path.startsWith('/api/auth/') && !allowed) {
     const error = new Error(app.auth.role === 'viewer' ? '只读访客不能修改工作区' : '尚未连接，操作未发送');
     error.status = 403;
@@ -2812,6 +2820,7 @@ const memoryCatalogUi = { rows: [], loading: false, workspace: '', version: 0 };
 const archivesUi = { rows: [], loading: false, workspace: '', version: 0 };
 let sessionMenuTarget = null;
 const retryUi = { saving: false, dirty: false };
+const statisticsUi = { saving: false, dirty: false, activityPending: false, lastActivity: -Infinity, lastDay: '' };
 const historyUi = { pending: false, dialog: null, preview: null, target: null };
 const skillsUi = { signature: '', reloading: false };
 const pluginMarketUi = { mode: 'local', loading: false, result: null, error: '', version: 0 };
@@ -2861,6 +2870,7 @@ const app = {
     memoryProcessing: null,
     retryPolicy: null,
     retries: [],
+    statistics: null,
     desktopWindow: false,
     model: '',
     modelStatus: null,
@@ -3107,6 +3117,67 @@ $('retrySave').addEventListener('click', async function () {
     }
   } finally { retryUi.saving = false; renderRetrySettings(); }
 });
+
+function renderStatisticsSettings() {
+  const status = app.state.statistics;
+  const available = !!status && app.auth.authenticated && !app.auth.remote && app.auth.role === 'operator';
+  $('statisticsSettingsCard').hidden = !available;
+  $('statisticsDestination').textContent = available ? status.settings.endpoint : '';
+  $('statisticsToggle').textContent = available && status.settings.enabled ? '停止统计并清理本机数据' : '恢复匿名统计';
+  if (available && !statisticsUi.dirty && !statisticsUi.saving) {
+    $('statisticsEndpoint').value = status.settings.endpoint;
+    $('statisticsAppId').value = status.settings.appId;
+  }
+  ['statisticsEndpoint', 'statisticsAppId', 'statisticsSave', 'statisticsToggle'].forEach(function (id) {
+    $(id).disabled = !available || !status.ready || !app.connected || statisticsUi.saving;
+  });
+  $('statisticsStatus').textContent = !available ? '' : !status.ready ? '正在读取本机偏好…'
+    : (status.settings.enabled ? status.settings.appId ? '已开启；待发 ' + status.pending + ' 条。' : '未配置应用 ID；不会采集或发送。' : '已关闭；不会采集或发送。') +
+      (status.dropped ? ' 已丢弃 ' + status.dropped + ' 条过期或超额数据。' : '') +
+      (status.rejected ? ' 服务拒绝 ' + status.rejected + ' 条。' : '') + (status.lastError ? ' ' + status.lastError : '');
+}
+['statisticsEndpoint', 'statisticsAppId'].forEach(function (id) {
+  $(id).addEventListener('input', function () { statisticsUi.dirty = true; });
+  $(id).addEventListener('change', function () { statisticsUi.dirty = true; });
+});
+async function saveStatisticsSettings(settings, preserveDraft) {
+  const epoch = connectionEpoch;
+  statisticsUi.saving = true; renderStatisticsSettings();
+  $('statisticsMessage').textContent = '正在保存…'; $('statisticsMessage').classList.remove('error');
+  try {
+    const saved = await api('/api/desktop/statistics', { method: 'POST', body: settings });
+    if (epoch !== connectionEpoch) return;
+    app.state.statistics = saved;
+    if (!preserveDraft) statisticsUi.dirty = false;
+    statisticsUi.lastActivity = -Infinity; statisticsUi.lastDay = '';
+    $('statisticsMessage').textContent = '统计偏好已保存，重启后保留。' + (settings.enabled ? '' : '本机匿名标识和待发数据已清理。');
+  } catch (error) {
+    if (epoch === connectionEpoch) {
+      $('statisticsMessage').textContent = '保存失败：' + error.message + ' 原设置仍有效，填写内容保留。'; $('statisticsMessage').classList.add('error');
+    }
+  } finally { statisticsUi.saving = false; renderStatisticsSettings(); }
+}
+$('statisticsSave').addEventListener('click', function () {
+  if ($('statisticsSave').disabled) return;
+  void saveStatisticsSettings({ enabled: app.state.statistics.settings.enabled, endpoint: $('statisticsEndpoint').value.trim(), appId: $('statisticsAppId').value.trim() }, false);
+});
+$('statisticsToggle').addEventListener('click', function () {
+  if ($('statisticsToggle').disabled) return;
+  void saveStatisticsSettings({ ...app.state.statistics.settings, enabled: !app.state.statistics.settings.enabled }, true);
+});
+function markStatisticsActivity(event) {
+  const status = app.state.statistics;
+  if (!event.isTrusted || document.hidden || !document.hasFocus() || !app.auth.authenticated || !app.connected || app.auth.remote || app.auth.role !== 'operator' ||
+      !status?.ready || !status.settings.enabled || !status.settings.appId || statisticsUi.saving || statisticsUi.activityPending) return;
+  const day = new Date(Date.now() + 28800000).toISOString().slice(0, 10), now = performance.now();
+  if (day === statisticsUi.lastDay && now - statisticsUi.lastActivity < 60000) return;
+  statisticsUi.lastActivity = now; statisticsUi.lastDay = day; statisticsUi.activityPending = true;
+  void api('/api/desktop/statistics/activity', { method: 'POST', body: {}, timeoutMs: 3000 }).catch(function () {
+    // Statistics never add a chat notice, interrupt input, or retry a user task.
+  }).finally(function () { statisticsUi.activityPending = false; });
+}
+document.addEventListener('pointerdown', markStatisticsActivity, { capture: true, passive: true });
+document.addEventListener('keydown', markStatisticsActivity, { capture: true, passive: true });
 
 const quotaStrip = $('sakuraAccountStrip');
 const quotaSurface = $('composerSurface');
@@ -4099,6 +4170,7 @@ function syncAccess() {
   settingsSave.disabled = !canOperate() || app.switchingWorkspace || settingsSave.dataset.saving === 'true';
   settingsCheckUpdates.disabled = !app.auth.authenticated || !app.connected || updateSourceUi.saving || settingsCheckUpdates.dataset.submitting === 'true';
   renderUpdatePreferences();
+  renderStatisticsSettings();
   document.querySelectorAll('.agent-view').forEach(function (node) {
     node.disabled = !app.auth.authenticated || !app.connected;
   });
@@ -8038,6 +8110,7 @@ function applyState(st) {
   if (st.version != null) app.state.version = st.version;
   app.state.cwd = st.cwd || '';
   app.state.desktop = st.desktop || null;
+  app.state.statistics = st.statistics || null;
   if (st.desktopViewport) adoptDesktopViewport(st.desktopViewport);
   if (!app.appearance.saving) restoreQuotaDisplay();
   app.state.sakuraApiOnly = st.sakuraApiOnly === true;
@@ -9422,6 +9495,9 @@ function handleFrame(f) {
       break;
     case 'update':
       if (f.update) { app.state.update = f.update; renderUpdateStatus(); }
+      break;
+    case 'desktop/statistics':
+      if (!app.auth.remote && f.status) { app.state.statistics = f.status; renderStatisticsSettings(); }
       break;
     default:
       break;

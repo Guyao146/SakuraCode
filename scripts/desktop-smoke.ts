@@ -18,6 +18,7 @@ import { clientAccessToken, clientKey, clientRefreshToken, clientStatistics, cli
 import type { ChatAttachment } from '../src/core/attachments.js'
 import type { TurnMetrics } from '../src/core/types.js'
 import type { DesktopViewport } from '../src/util/viewport.js'
+import { defaultStatisticsSettings, StatisticsFileStore } from '../src/desktop/statistics.js'
 
 const exec = promisify(execFile)
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -363,6 +364,10 @@ module.exports = { name: 'synthetic-sakuraapi-transport', inject: ['jobs'], appl
 `)
   await prepareWorkspace(cwd)
   await fs.mkdir(dataDir, { recursive: true })
+  // General GUI acceptance does not test statistics. Keep its isolated data
+  // explicitly opted out before the native engine captures its sender.
+  await new StatisticsFileStore(path.join(dataDir, 'usage-statistics')).write({ schemaVersion: 1,
+    settings: { ...defaultStatisticsSettings(), enabled: false }, anonymousId: null, events: [], dropped: 0, rejected: 0 })
   const legacy = { Workspace: cwd, RecentWorkspaces: [cwd], BaseUrl: 'https://ignored.example/v1',
     Model: 'ignored-legacy-model', ProtectedApiKey: 'SYNTHETIC_INVALID_LEGACY_DPAPI', RememberKey: true }
   await fs.writeFile(path.join(dataDir, 'settings.json'), JSON.stringify(legacy))

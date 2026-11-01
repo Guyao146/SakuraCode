@@ -6,7 +6,7 @@ import type { Readable, Writable } from 'node:stream'
 import { loadConfig } from '../config.js'
 import { APPROVAL_MODES, type ApprovalMode } from '../core/approval.js'
 import { isLoopbackHost } from '../web/access.js'
-import { runWebServer, type DesktopSettingsState, type WebServerHandle, type WorkspacePrefs } from '../web/server.js'
+import { runWebServer, WEB_VERSION, type DesktopSettingsState, type WebServerHandle, type WorkspacePrefs } from '../web/server.js'
 import { randomUUID } from 'node:crypto'
 import { parseWeixinSaved, type WeixinSaved } from '../integrations/weixin.js'
 import { parseSakuraApiSaved, type SakuraApiSaved } from '../integrations/sakuraapi.js'
@@ -15,6 +15,7 @@ import { parseQuotaDisplay, type DesktopAppearance } from '../util/appearance.js
 import { validateRetryPolicy, type RetryPolicy } from '../util/retry.js'
 import { parseUpdateSettings, type UpdateSettings } from '../updates.js'
 import { parseDesktopViewport, type DesktopViewport } from '../util/viewport.js'
+import { DesktopStatistics } from './statistics.js'
 
 export interface DesktopLaunch {
   cwd: string
@@ -36,6 +37,8 @@ export interface DesktopLaunch {
   appearance?: DesktopAppearance
   retry?: RetryPolicy
   updates?: UpdateSettings
+  /** Fixed by the native launcher on its private pipe, never by an HTTP or project setting. */
+  statisticsDir?: string
 }
 
 export function parseDesktopLaunch(value: unknown): DesktopLaunch {
@@ -116,6 +119,12 @@ export function parseDesktopLaunch(value: unknown): DesktopLaunch {
   }
   if (row.retry != null) result.retry = validateRetryPolicy(row.retry)
   if (row.updates != null) result.updates = parseUpdateSettings(row.updates)
+  if (row.statisticsDir != null) {
+    if (typeof row.statisticsDir !== 'string' || !path.isAbsolute(row.statisticsDir) || /[\x00-\x1f\x7f]/.test(row.statisticsDir)) {
+      throw new Error('statistics directory must be an absolute app-data path')
+    }
+    result.statisticsDir = path.resolve(row.statisticsDir)
+  }
   return result
 }
 
@@ -139,24 +148,33 @@ export async function startDesktopHost(
   const settings = parseDesktopLaunch(launch)
   if (!(await stat(settings.cwd)).isDirectory()) throw new Error('desktop workspace is not a directory')
   const config = await loadConfig({ cwd: settings.cwd })
-  return runWebServer({
-    ...settings,
-    // An old saved key/URL is preserved on disk but never used by this product.
-    sakuraApiOnly: true,
-    config: { ...config, web: undefined },
-    host: '127.0.0.1', port: 0, token: null, viewerToken: null,
-    open: false, quiet: true,
-    recentWorkspaces: settings.recentWorkspaces,
-    desktopRememberKey: settings.rememberKey,
-    onPersistSettings,
-    onPersistWeixin,
-    onWindowAction,
-    onPersistSakuraApi,
-    onPersistContextBudget,
-    onPersistAppearance,
-    onPersistRetry,
-    onPersistUpdates,
-  })
+  // The host owns one instance across all workspace remounts. Version comes
+  // from the same product constant as the server, not workspace package data.
+  const statistics = settings.statisticsDir ? new DesktopStatistics({ directory: settings.statisticsDir, appVersion: WEB_VERSION }) : undefined
+  try {
+    return await runWebServer({
+      ...settings,
+      // An old saved key/URL is preserved on disk but never used by this product.
+      sakuraApiOnly: true,
+      config: { ...config, web: undefined },
+      host: '127.0.0.1', port: 0, token: null, viewerToken: null,
+      open: false, quiet: true,
+      recentWorkspaces: settings.recentWorkspaces,
+      desktopRememberKey: settings.rememberKey,
+      onPersistSettings,
+      onPersistWeixin,
+      onWindowAction,
+      onPersistSakuraApi,
+      onPersistContextBudget,
+      onPersistAppearance,
+      onPersistRetry,
+      onPersistUpdates,
+      statistics,
+    })
+  } catch (error) {
+    statistics?.close()
+    throw error
+  }
 }
 
 /** A closed parent pipe is also a shutdown request, including during asynchronous startup. */

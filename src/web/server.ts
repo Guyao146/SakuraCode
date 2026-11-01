@@ -47,13 +47,15 @@ import { WorkspaceMemoryError, WorkspaceMemoryStore, validateMemoryProcessing, W
 import type { MemoryProcessingService } from '../plugins/memory-processing.js'
 import { activeMemoryContent, type MemoryEntryOperation } from '../plugins/memory-entries.js'
 import { SakuraApiAccount, SakuraApiError, type SakuraApiSaved } from '../integrations/sakuraapi.js'
+import { parseStatisticsSettings, type DesktopStatistics } from '../desktop/statistics.js'
 import { openSakuraApiPage, SAKURA_MODEL_BASE_URL, type SakuraOfficialPage, type SiteAuthorizationWindow } from '../integrations/sakuraapi-authorization.js'
 import { PluginMarketplace } from './plugin-marketplace.js'
 import { CHAT_FILE_LIMITS, parseChatFiles, parseChatImages, ChatAttachmentError, type ChatUploadFile, type StoredChatFiles } from '../core/attachments.js'
 import { recordedTurnSummaries, teamMetrics } from '../util/turn-metrics.js'
 import { parseDesktopViewport, type DesktopViewport } from '../util/viewport.js'
 
-const VERSION = '1.1.0'
+const VERSION = '1.1.2'
+export { VERSION as WEB_VERSION }
 
 /** Harness events mirrored verbatim to SSE clients ({ type, ...payload }). */
 const FORWARD_EVENTS = [
@@ -177,6 +179,8 @@ export interface WebServerOptions {
   pluginMarketplaceTimeoutMs?: number
   updatesInitialDelayMs?: number
   updatesIntervalMs?: number
+  /** App-scoped opt-in service from the desktop host, never imported from project config. */
+  statistics?: DesktopStatistics
 }
 
 export interface WebServerHandle {
@@ -381,6 +385,9 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   /** Real per-session usage (provider-reported), memoized like contextCache. */
   let statsCache: { key: string; stats: SessionTokenStats } | null = null
   const persistSettings = opts.onPersistSettings
+  if (opts.statistics && (!persistSettings || access.remote)) throw new Error('Anonymous usage statistics require a local desktop host')
+  const statistics = opts.statistics
+  let statisticsUpdating = false
   /**
    * Collaborative expert session: when on, every user message is delivered to
    * the main agent and each live expert. Cleared on workspace remount.
@@ -410,26 +417,32 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   const sakuraAccount = access.remote ? undefined : new SakuraApiAccount({ saved: opts.sakuraApi,
     persist: opts.onPersistSakuraApi, fetch: opts.sakuraApiFetch, openLogin: opts.sakuraApiOpenLogin })
   let weixin: WeixinBridge | undefined
+  const stateFor = (state: Record<string, unknown>, principal: WebPrincipal): Record<string, unknown> =>
+    principal.role === 'operator' ? state : { ...state, statistics: undefined }
   const broadcast = (event: Record<string, unknown>): void => {
     if (closed) return
     if (event.type === 'workspace/changed') weixin?.workspaceChanged()
     else weixin?.observe(event)
     if (event.type !== 'state') revision++
     const frame = `data: ${JSON.stringify({ ...event, revision })}\n\n`
+    const viewerFrame = event.type === 'state'
+      ? `data: ${JSON.stringify({ ...event, state: stateFor(event.state as Record<string, unknown>, { role: 'viewer' }), revision })}\n\n` : frame
     for (const [res, principal] of clients) {
       if (res.writableEnded || res.destroyed || !access.isActive(principal)) {
         clients.delete(res)
         res.destroy()
         continue
       }
+      if (event.type === 'desktop/statistics' && principal.role !== 'operator') continue
       try {
         if (res.writableLength > 1024 * 1024) { res.destroy(); clients.delete(res) }
-        else res.write(frame)
+        else res.write(principal.role === 'viewer' ? viewerFrame : frame)
       } catch {
         clients.delete(res)
       }
     }
   }
+  const stopStatisticsListener = statistics?.onChange(status => broadcast({ type: 'desktop/statistics', status }))
 
   let stateRefresh: Promise<void> | undefined
   let stateRefreshTimer: ReturnType<typeof setTimeout> | undefined
@@ -977,6 +990,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       /** Desktop mode: the settings view and workspace switching are mounted; absent on remote servers. */
       desktop: persistSettings && !access.remote ? currentDesktopState() : undefined,
       desktopWindow: !!opts.onWindowAction && !access.remote,
+      statistics: !access.remote ? statistics?.status() : undefined,
       desktopViewport: !access.remote ? desktopViewport : null,
       sakuraApiOnly,
       workspaceMemory: ctx.peek<WorkspaceMemoryService>('workspaceMemory')?.status(),
@@ -1665,6 +1679,29 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     }
     // Display preferences do not touch the harness or credentials. They remain
     // editable during a turn, but only a local operator can persist desktop data.
+    if ((pathname === '/api/desktop/statistics' && (method === 'GET' || method === 'POST')) ||
+        (pathname === '/api/desktop/statistics/activity' && method === 'POST')) {
+      if (!statistics || access.remote || principal.role !== 'operator') throw new HttpError(404, '匿名统计设置仅供本机桌面操作员使用。')
+      if (method === 'GET') { json(res, 200, statistics.status()); return }
+      const body = await bodyJson(req, 4096)
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      if (closed) throw new HttpError(503, 'server is shutting down')
+      if (pathname.endsWith('/activity')) {
+        if (Object.keys(body).length) throw new HttpError(400, '活跃通知不接受账号、路径或业务数据。')
+        statistics.markActive()
+        json(res, 200, { ok: true })
+        return
+      }
+      let settings
+      try { settings = parseStatisticsSettings(body) } catch (error) { throw new HttpError(400, (error as Error).message) }
+      if (!statistics.status().ready) throw new HttpError(409, '正在读取统计偏好，请稍后保存。')
+      if (statisticsUpdating) throw new HttpError(409, '正在保存统计偏好，请等待完成。')
+      statisticsUpdating = true
+      try { json(res, 200, await statistics.configure(settings)) }
+      catch (error) { throw new HttpError(500, error instanceof Error ? error.message : '匿名统计设置保存失败。') }
+      finally { statisticsUpdating = false }
+      return
+    }
     if (pathname === '/api/desktop/appearance' && (method === 'GET' || method === 'POST')) {
       if (!persistSettings || access.remote || principal.role !== 'operator') {
         throw new HttpError(404, 'desktop appearance is available only to a local operator')
@@ -1891,12 +1928,12 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       res.on('close', () => { clients.delete(res); clearTimeout(expiry) })
       const state = await stateSnapshot()
       if (!access.isActive(principal)) { res.destroy(); clients.delete(res); return }
-      res.write(`data: ${JSON.stringify({ type: 'state', state })}\n\n`)
+      res.write(`data: ${JSON.stringify({ type: 'state', state: stateFor(state, principal) })}\n\n`)
       return
     }
 
     if (pathname === '/api/state' && method === 'GET') {
-      json(res, 200, await stateSnapshot())
+      json(res, 200, stateFor(await stateSnapshot(), principal))
       return
     }
 
@@ -2947,6 +2984,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   const port = await new Promise<number>((resolve, reject) => {
     const failed = (error: Error): void => {
       clearInterval(heartbeat)
+      stopStatisticsListener?.()
+      statistics?.close()
       updateChecker.close()
       pluginMarketplace.close()
       access.dispose()
@@ -3013,6 +3052,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   }
 
   if (autoUpdateCheck()) scheduleUpdateCheck(updateInitialDelay)
+  // No readiness gate waits for statistics I/O/network. Saved opt-out remains effective.
+  void statistics?.start()
   if (opts.open !== false) openBrowser(url)
   if (!opts.quiet) {
     console.log(`SakuraCode Web GUI → ${url}  (cwd: ${workspaceCwd})`)
@@ -3046,6 +3087,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       if (closed) return
       closed = true
       shutdownController.abort()
+      stopStatisticsListener?.()
+      statistics?.close()
       clearInterval(heartbeat)
       if (stateRefreshTimer !== undefined) clearTimeout(stateRefreshTimer)
       if (updateTimer !== undefined) clearTimeout(updateTimer)

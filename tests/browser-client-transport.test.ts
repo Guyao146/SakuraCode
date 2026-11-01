@@ -7,6 +7,45 @@ import { BrowserClient, readCdpJson } from './browser-client.js'
 import { resolveChromePath } from '../src/tools/browser.js'
 
 describe('browser test driver CDP discovery', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('cleans up a failed WebSocket handshake without trying to close a browser', async () => {
+    const sockets: Array<{ close: ReturnType<typeof vi.fn>; send: ReturnType<typeof vi.fn> }> = []
+    class FailedSocket {
+      onopen: (() => void) | null = null
+      onerror: (() => void) | null = null
+      close = vi.fn()
+      send = vi.fn()
+      constructor() { sockets.push(this); queueMicrotask(() => this.onerror?.()) }
+    }
+    vi.stubGlobal('WebSocket', FailedSocket)
+    const browser = new BrowserClient()
+    await expect(browser.connect('ws://127.0.0.1/offline', 'browser')).rejects.toThrow('CDP connection failed')
+    expect(sockets[0]!.close).toHaveBeenCalledTimes(1)
+    await browser.close()
+    expect(sockets[0]!.send).not.toHaveBeenCalled()
+  })
+
+  it('disconnects a native app control connection without sending Browser.close and rejects pending commands', async () => {
+    const sockets: Array<{ close: ReturnType<typeof vi.fn>; send: ReturnType<typeof vi.fn> }> = []
+    class ConnectedSocket {
+      onopen: (() => void) | null = null
+      onerror: (() => void) | null = null
+      close = vi.fn()
+      send = vi.fn()
+      constructor() { sockets.push(this); queueMicrotask(() => this.onopen?.()) }
+    }
+    vi.stubGlobal('WebSocket', ConnectedSocket)
+    const browser = new BrowserClient()
+    await browser.connect('ws://127.0.0.1/offline', 'browser')
+    const pending = browser.send('Runtime.evaluate', { expression: '1' })
+    const rejected = expect(pending).rejects.toThrow('browser disconnected')
+    browser.disconnect(); await rejected; await browser.close()
+    expect(sockets[0]!.close).toHaveBeenCalledTimes(1)
+    expect(sockets[0]!.send).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(sockets[0]!.send.mock.calls[0]![0] as string).method).toBe('Runtime.evaluate')
+  })
+
   it('waits through an initial retiring execution context, but propagates unrelated errors', async () => {
     const browser = new BrowserClient()
     const evaluate = vi.spyOn(browser, 'evaluate')

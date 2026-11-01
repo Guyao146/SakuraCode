@@ -781,7 +781,7 @@ namespace SakuraCode.Desktop
             child.BeginOutputReadLine();
             child.BeginErrorReadLine();
             engineInput = new StreamWriter(child.StandardInput.BaseStream, new UTF8Encoding(false)) { AutoFlush = true };
-                engineInput.WriteLine(new JavaScriptSerializer().Serialize(new { cwd = cwd, baseURL = endpoint, model = modelName, apiKey = activeSecret, approvalMode = "default", recentWorkspaces = settings.RecentWorkspaces ?? new string[0], rememberKey = rememberKeyInput, newWorkspaceDir = settings.NewWorkspaceDir ?? "", workspacePrefs = settings.WorkspacePrefs ?? new Dictionary<string, Dictionary<string, object>>(), appearance = settings.Appearance, retry = settings.Retry, updates = settings.Updates, weixin = LoadWeixinSettings(), sakuraApi = LoadAccountSettings() }));
+                engineInput.WriteLine(new JavaScriptSerializer().Serialize(new { cwd = cwd, baseURL = endpoint, model = modelName, apiKey = activeSecret, approvalMode = "default", recentWorkspaces = settings.RecentWorkspaces ?? new string[0], rememberKey = rememberKeyInput, newWorkspaceDir = settings.NewWorkspaceDir ?? "", workspacePrefs = settings.WorkspacePrefs ?? new Dictionary<string, Dictionary<string, object>>(), appearance = settings.Appearance, retry = settings.Retry, updates = settings.Updates, statisticsDir = Path.Combine(options.DataDir, "usage-statistics"), weixin = LoadWeixinSettings(), sakuraApi = LoadAccountSettings() }));
             Task winner = await Task.WhenAny(ready.Task, Task.Delay(45000, cancellation));
             cancellation.ThrowIfCancellationRequested();
             if (winner != ready.Task) throw new TimeoutException("本机服务启动超时，请检查项目插件 / MCP 配置。启动日志位于 " + Path.Combine(options.DataDir, "desktop.log"));
