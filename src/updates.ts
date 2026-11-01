@@ -29,6 +29,8 @@ export interface UpdateCheckerOptions {
 }
 
 export const DEFAULT_UPDATES_URL = 'https://api.github.com/repos/Guyao146/SakuraCode/releases/latest'
+/** Human-facing official downloads. Its webpage is not a version-check JSON feed. */
+export const DEFAULT_UPDATES_PAGE_URL = 'https://download.sakuraapi.top/'
 const RELEASE_TAG_URL = 'https://github.com/Guyao146/SakuraCode/releases/tag/'
 const MAX_BODY_BYTES = 1024 * 1024
 export const MAX_UPDATE_DOWNLOAD_BYTES = 512 * 1024 * 1024

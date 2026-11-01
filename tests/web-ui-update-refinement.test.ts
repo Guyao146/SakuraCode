@@ -4,7 +4,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { runWebServer, type WebServerHandle, type WebServerOptions } from '../src/web/server.js'
-import { type UpdateSettings } from '../src/updates.js'
+import { DEFAULT_UPDATES_PAGE_URL, type UpdateSettings } from '../src/updates.js'
 import { resolveChromePath } from '../src/tools/browser.js'
 import { BrowserClient } from './browser-client.js'
 import { MockAdapter, text } from './helpers.js'
@@ -158,5 +158,134 @@ suite('desktop UI/update refinements — real browser', () => {
     await browser.waitFor('document.getElementById("settingsUpdateSource").value === "" && !document.getElementById("settingsUpdateSourceSave").disabled')
     expect(await browser.evaluate('document.getElementById("settingsUpdateDownload").hidden')).toBe(true)
     expect(await browser.evaluate('document.getElementById("settingsUpdateStatus").textContent')).toBe('尚未检查。')
+  })
+
+  it.each(['night', 'day'])('keeps the custom download label readable on hover (%s theme)', async theme => {
+    await boot({ updates: { feedUrl: source, autoCheck: false }, updatesOpenUrl: async () => {},
+      updatesFetch: async () => new Response(JSON.stringify({ schemaVersion: 1, project: 'SakuraCode', platform: 'windows-x64',
+        version: '99.0.0', releaseUrl: 'https://updates.example.test/sakuracode/99.0.0/',
+        downloadUrl: 'https://updates.example.test/sakuracode/99.0.0/SakuraCode%20Desktop.exe', sha256: 'a'.repeat(64), size: 98765432 })) })
+    await settings('about'); await browser.click('#settingsCheckUpdates')
+    await browser.waitFor('!document.getElementById("settingsUpdateDownload").hidden && !document.getElementById("settingsCheckUpdates").disabled')
+    const point = await browser.evaluate<{ x: number; y: number }>(`(() => {
+      document.documentElement.dataset.theme = ${JSON.stringify(theme)};
+      const link = document.getElementById('settingsUpdateDownload'); link.scrollIntoView({block:'center'});
+      const rect = link.getBoundingClientRect(); return {x:rect.x+rect.width/2,y:rect.y+rect.height/2};
+    })()`)
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point })
+    await browser.evaluate('new Promise(resolve => setTimeout(resolve, 200))')
+    const colors = await browser.evaluate<{ text: string; expected: string; background: string; hovered: boolean }>(`(() => {
+      const link = document.getElementById('settingsUpdateDownload'), probe = document.createElement('span');
+      probe.style.color = 'var(--on-accent)'; link.appendChild(probe);
+      const style = getComputedStyle(link), result = {text:style.color,expected:getComputedStyle(probe).color,background:style.backgroundColor,hovered:link.matches(':hover')};
+      probe.remove(); return result;
+    })()`)
+    expect(colors.hovered).toBe(true)
+    expect(colors.text).toBe(colors.expected)
+    expect(colors.text).not.toBe(colors.background)
+    expect(await browser.evaluate('document.getElementById("settingsUpdateDownload").textContent')).toBe('下载桌面新版 ↗')
+    await screenshot('settings-update-download-hover-' + theme)
+  })
+
+  it('opens the official download site before or after a failed check with visible native feedback and keyboard retry', async () => {
+    let acknowledge!: () => void
+    const opener = vi.fn<(url: string) => Promise<void>>().mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve }))
+      .mockRejectedValueOnce(new Error('synthetic OS failure with PRIVATE_SECRET')).mockResolvedValue(undefined)
+    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(new Error('offline fixture'))
+    const server = await boot({ updatesFetch: fetcher, updatesOpenUrl: opener })
+    await settings('about')
+    expect(await browser.evaluate('document.getElementById("settingsUpdateLink").href')).toBe(DEFAULT_UPDATES_PAGE_URL)
+    expect(await browser.evaluate('document.getElementById("settingsUpdateLink").hidden')).toBe(false)
+    await browser.click('#settingsUpdateLink')
+    await vi.waitFor(() => expect(opener).toHaveBeenCalledOnce())
+    expect(await browser.evaluate('document.getElementById("settingsUpdateLink").getAttribute("aria-busy")')).toBe('true')
+    expect(await browser.evaluate('document.getElementById("settingsUpdateLink").textContent')).toBe('正在打开…')
+    await browser.click('#settingsUpdateLink')
+    expect(opener).toHaveBeenCalledOnce()
+    acknowledge()
+    await browser.waitFor('!document.getElementById("settingsUpdateLink").hasAttribute("aria-busy") && document.getElementById("settingsUpdateOpenMessage").textContent.includes("已请求系统默认浏览器")')
+    expect(await browser.evaluate('document.getElementById("settingsUpdateOpenUrl").value')).toBe(DEFAULT_UPDATES_PAGE_URL)
+    expect(await browser.evaluate('location.href')).toBe(server.url)
+    expect(fetcher).not.toHaveBeenCalled()
+    await browser.click('#settingsCheckUpdates')
+    await browser.waitFor('document.getElementById("settingsUpdateHint").textContent.includes("检查失败") && !document.getElementById("settingsCheckUpdates").disabled')
+    expect(await browser.evaluate('document.getElementById("settingsUpdateLink").hidden')).toBe(false)
+    await browser.click('#settingsUpdateLink')
+    await browser.waitFor('document.getElementById("settingsUpdateOpenMessage").classList.contains("error") && !document.getElementById("settingsUpdateLink").hasAttribute("aria-busy")')
+    expect(await browser.evaluate('document.getElementById("settingsUpdateOpenMessage").textContent')).not.toContain('PRIVATE_SECRET')
+    expect(await browser.evaluate('document.getElementById("settingsUpdateOpenFallback").hidden')).toBe(false)
+    await screenshot('settings-update-browser-error')
+    await browser.evaluate('document.getElementById("settingsUpdateLink").focus()')
+    await browser.key('Enter')
+    await browser.waitFor('!document.getElementById("settingsUpdateOpenMessage").classList.contains("error") && !document.getElementById("settingsUpdateLink").hasAttribute("aria-busy")')
+    expect(opener.mock.calls).toEqual([[DEFAULT_UPDATES_PAGE_URL], [DEFAULT_UPDATES_PAGE_URL], [DEFAULT_UPDATES_PAGE_URL]])
+    expect(await browser.evaluate('location.href')).toBe(server.url)
+  })
+
+  it('opens checked custom download links, drops stale feedback on source reset, and reports a rejected clipboard', async () => {
+    const releaseUrl = 'https://updates.example.test/sakuracode/99.0.0/'
+    const downloadUrl = releaseUrl + 'SakuraCode%20Desktop.exe'
+    let acknowledge!: () => void
+    const opener = vi.fn<(url: string) => Promise<void>>().mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve }))
+    const server = await boot({ updates: { feedUrl: source, autoCheck: false }, updatesOpenUrl: opener,
+      updatesFetch: async () => new Response(JSON.stringify({ schemaVersion: 1, project: 'SakuraCode', platform: 'windows-x64',
+        version: '99.0.0', releaseUrl, downloadUrl, sha256: 'a'.repeat(64), size: 98765432 })) })
+    await settings('about'); await browser.click('#settingsCheckUpdates')
+    await browser.waitFor('!document.getElementById("settingsUpdateDownload").hidden && !document.getElementById("settingsCheckUpdates").disabled')
+    await browser.click('#settingsUpdateDownload')
+    await browser.waitFor('!document.getElementById("settingsUpdateDownload").hasAttribute("aria-busy") && !document.getElementById("settingsUpdateOpenFallback").hidden')
+    expect(await browser.evaluate('document.getElementById("settingsUpdateOpenUrl").value')).toBe(downloadUrl)
+    await browser.evaluate("Object.defineProperty(navigator, 'clipboard', {value:{writeText:async()=>{throw new Error('denied')}}, configurable:true}); document.execCommand=()=>false")
+    await browser.click('#settingsUpdateCopyUrl')
+    await browser.waitFor('document.getElementById("settingsUpdateCopyUrl").textContent === "复制失败"')
+    expect(await browser.evaluate('document.getElementById("settingsUpdateOpenUrl").readOnly')).toBe(true)
+    await browser.click('#settingsUpdateLink')
+    await vi.waitFor(() => expect(opener).toHaveBeenCalledTimes(2))
+    await browser.click('#settingsUpdateSourceReset')
+    await browser.waitFor('document.getElementById("settingsUpdateLink").href === ' + JSON.stringify(DEFAULT_UPDATES_PAGE_URL) + ' && !document.getElementById("settingsUpdateSourceSave").disabled')
+    acknowledge()
+    await browser.evaluate('new Promise(resolve => setTimeout(resolve, 100))')
+    expect(await browser.evaluate('document.getElementById("settingsUpdateOpenFallback").hidden')).toBe(true)
+    expect(await browser.evaluate('document.getElementById("settingsUpdateOpenMessage").hidden')).toBe(true)
+    expect(await browser.evaluate('location.href')).toBe(server.url)
+    expect(opener.mock.calls).toEqual([[downloadUrl], [releaseUrl]])
+  })
+
+  it('keeps ordinary Web links as new tabs without invoking the server-side system browser', async () => {
+    const opener = vi.fn<(url: string) => Promise<void>>().mockResolvedValue(undefined)
+    const server = await boot({ onPersistSettings: undefined, updatesOpenUrl: opener })
+    const controller = new BrowserClient(), documents: string[] = [], failures: string[] = []
+    await controller.connect(browser.browserDebuggerUrl, 'browser')
+    controller.onEvent('Target.attachedToTarget', event => {
+      void (async () => {
+        if (event.targetInfo.type === 'page') await controller.send('Fetch.enable', { patterns: [{ urlPattern: DEFAULT_UPDATES_PAGE_URL + '*' }] }, event.sessionId)
+        await controller.send('Runtime.runIfWaitingForDebugger', {}, event.sessionId)
+      })().catch(error => failures.push(String(error)))
+    })
+    controller.onEvent('Fetch.requestPaused', (event, session) => {
+      void (async () => {
+        documents.push(event.request.url)
+        await controller.send('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: 200,
+          responseHeaders: [{ name: 'content-type', value: 'text/html; charset=utf-8' }],
+          body: Buffer.from('<!doctype html><title>Offline official download page</title>').toString('base64') }, session)
+      })().catch(error => failures.push(String(error)))
+    })
+    try {
+      await controller.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true })
+      await settings('about'); await browser.click('#settingsUpdateLink')
+      await vi.waitFor(() => expect(documents).toContain(DEFAULT_UPDATES_PAGE_URL), { timeout: 8000 })
+      expect(opener).not.toHaveBeenCalled()
+      expect(await browser.evaluate('location.href')).toBe(server.url)
+      expect(await browser.evaluate('document.getElementById("settingsUpdateLink").target')).toBe('_blank')
+      expect(failures).toEqual([])
+    } finally {
+      const { targetInfos } = await controller.send('Target.getTargets')
+      for (const target of targetInfos) if (target.type === 'page' && target.url.startsWith(DEFAULT_UPDATES_PAGE_URL)) {
+        await controller.send('Target.closeTarget', { targetId: target.targetId })
+      }
+      await controller.send('Target.setAutoAttach', { autoAttach: false, waitForDebuggerOnStart: false, flatten: true })
+      controller.disconnect()
+    }
   })
 })

@@ -41,20 +41,20 @@ import type { ToolContext, TurnMetrics } from '../core/types.js'
 import type { TurnResult } from '../core/agent.js'
 import { WeixinBridge, WeixinBridgeError, type WeixinSaved } from '../integrations/weixin.js'
 import type { WeixinTransport } from '../integrations/weixin-client.js'
-import { DEFAULT_UPDATES_URL, parseUpdateSettings, UpdateChecker, type UpdateInfo, type UpdateSettings } from '../updates.js'
+import { DEFAULT_UPDATES_URL, DEFAULT_UPDATES_PAGE_URL, MAX_UPDATE_DOWNLOAD_BYTES, parseUpdateFeedUrl, parseUpdateSettings, UpdateChecker, type UpdateInfo, type UpdateSettings } from '../updates.js'
 import { buildExpertSummary, resolveExperts, spawnExperts } from '../experts.js'
 import { WorkspaceMemoryError, WorkspaceMemoryStore, validateMemoryProcessing, WORKSPACE_MEMORY_MAX_CHARS, type WorkspaceMemoryService } from '../plugins/workspace-memory.js'
 import type { MemoryProcessingService } from '../plugins/memory-processing.js'
 import { activeMemoryContent, type MemoryEntryOperation } from '../plugins/memory-entries.js'
 import { SakuraApiAccount, SakuraApiError, type SakuraApiSaved } from '../integrations/sakuraapi.js'
 import { parseStatisticsSettings, type DesktopStatistics } from '../desktop/statistics.js'
-import { openSakuraApiPage, SAKURA_MODEL_BASE_URL, type SakuraOfficialPage, type SiteAuthorizationWindow } from '../integrations/sakuraapi-authorization.js'
+import { openSakuraApiPage, openSystemBrowser, SAKURA_MODEL_BASE_URL, type SakuraOfficialPage, type SiteAuthorizationWindow } from '../integrations/sakuraapi-authorization.js'
 import { PluginMarketplace } from './plugin-marketplace.js'
 import { CHAT_FILE_LIMITS, parseChatFiles, parseChatImages, ChatAttachmentError, type ChatUploadFile, type StoredChatFiles } from '../core/attachments.js'
 import { recordedTurnSummaries, teamMetrics } from '../util/turn-metrics.js'
 import { parseDesktopViewport, type DesktopViewport } from '../util/viewport.js'
 
-const VERSION = '1.1.2'
+const VERSION = '1.1.3'
 export { VERSION as WEB_VERSION }
 
 /** Harness events mirrored verbatim to SSE clients ({ type, ...payload }). */
@@ -171,6 +171,8 @@ export interface WebServerOptions {
   /** Run background update checks; SAKURA_UPDATES_AUTO_CHECK=0 disables the default. */
   updatesAutoCheck?: boolean
   updatesFetch?: typeof globalThis.fetch
+  /** Native desktop links use the system browser, not the embedded kiosk's hidden tabs. */
+  updatesOpenUrl?: (url: string) => Promise<void>
   /** Global update preferences, separate from workspace/model credentials. */
   updates?: UpdateSettings
   onPersistUpdates?: (settings: UpdateSettings) => Promise<void>
@@ -401,6 +403,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   let updateSettings = parseUpdateSettings(opts.updates ?? { feedUrl: opts.updatesBaseUrl ?? process.env.SAKURA_UPDATES_URL ?? '', autoCheck: true })
   let updateChecker = new UpdateChecker(VERSION, updateSettings.feedUrl || DEFAULT_UPDATES_URL, { fetch: opts.updatesFetch })
   let updatesUpdating = false
+  let updateOpening = false
   const pluginMarketplace = new PluginMarketplace({ fetch: opts.pluginMarketplaceFetch, timeoutMs: opts.pluginMarketplaceTimeoutMs })
   const autoUpdateCheck = (): boolean => opts.updatesAutoCheck ?? (process.env.SAKURA_UPDATES_AUTO_CHECK !== '0' && updateSettings.autoCheck)
   const updateInterval = Math.max(10, opts.updatesIntervalMs ?? 6 * 60 * 60 * 1000)
@@ -1019,6 +1022,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       compactModel: compactionModel(),
       /** Cached update-check result; absent until the first check completes. */
       update: updateChecker.cached(),
+      /** Official download page stays available even before a successful version check. */
+      updatePageUrl: !updateSettings.feedUrl || updateSettings.feedUrl === DEFAULT_UPDATES_URL ? DEFAULT_UPDATES_PAGE_URL : undefined,
       updateSettings: !access.remote ? { ...updateSettings } : undefined,
       updateAutomatic: autoUpdateCheck(),
       /** Collaborative expert session: user messages also go to the expert team. */
@@ -1764,6 +1769,48 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       if (updatesUpdating) throw new HttpError(409, '正在保存更新设置，请稍后重试。')
       const info = await runUpdateCheck()
       json(res, 200, info)
+      return
+    }
+    if (pathname === '/api/updates/open' && method === 'POST') {
+      if (!persistSettings || access.remote || principal.role !== 'operator') {
+        throw new HttpError(404, '更新页面仅可由本机桌面操作员交给系统浏览器打开。')
+      }
+      const body = await bodyJson(req, 4096)
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      if (Object.keys(body).length !== 2 || Object.keys(body).some(key => !['target', 'url'].includes(key)) ||
+        typeof body.target !== 'string' || !['release', 'download'].includes(body.target) || typeof body.url !== 'string') {
+        throw new HttpError(400, '无效的更新页面打开请求。')
+      }
+      if (closed) throw new HttpError(503, 'server is shutting down')
+      if (updatesUpdating || updateOpening) throw new HttpError(409, '更新设置正在保存或浏览器正在打开，请稍后重试。')
+      const info = updateChecker.cached()
+      const officialPage = body.target === 'release' && (!updateSettings.feedUrl || updateSettings.feedUrl === DEFAULT_UPDATES_URL)
+      const expected = officialPage ? DEFAULT_UPDATES_PAGE_URL : body.target === 'release' ? info?.releaseUrl : info?.downloadUrl
+      if (!expected || body.url !== expected || !officialPage && !info?.hasUpdate) {
+        throw new HttpError(409, '更新结果已改变，请重新检查更新后再打开。')
+      }
+      // HTTP supplies a selector and the displayed URL, never an arbitrary OS destination.
+      // Revalidate the cached link and its selected source before handing it to the shell.
+      let destination: string
+      try {
+        destination = parseUpdateFeedUrl(expected)
+        if (!destination || destination !== expected) throw new Error('invalid link')
+        if (officialPage) {
+          if (destination !== DEFAULT_UPDATES_PAGE_URL) throw new Error('not the official download page')
+        } else if (info?.sourceUrl) {
+          if (info.sourceUrl !== updateSettings.feedUrl || new URL(destination).origin !== new URL(info.sourceUrl).origin) throw new Error('source changed')
+        } else if (body.target !== 'release' || !/^https:\/\/github\.com\/Guyao146\/SakuraCode\/releases\/tag\/[^/?#]+$/.test(destination)) {
+          throw new Error('not an official release')
+        }
+        if (body.target === 'download' && (!/^[a-f0-9]{64}$/.test(info?.sha256 ?? '') || !Number.isSafeInteger(info?.size) ||
+          (info?.size ?? 0) <= 0 || (info?.size ?? 0) > MAX_UPDATE_DOWNLOAD_BYTES)) throw new Error('missing download integrity')
+      } catch { throw new HttpError(400, '更新链接未通过安全校验，请重新检查更新。') }
+      updateOpening = true
+      try {
+        try { await (opts.updatesOpenUrl ?? openSystemBrowser)(destination) }
+        catch { throw new HttpError(502, '无法打开系统默认浏览器，请检查默认浏览器设置，或复制地址手动打开。') }
+        json(res, 200, { opened: true })
+      } finally { updateOpening = false }
       return
     }
     if (pathname === '/api/desktop/window' && method === 'POST') {

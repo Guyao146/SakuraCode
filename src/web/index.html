@@ -324,14 +324,14 @@ body.desktop-shell .topbar, body.desktop-shell .sidebar-brand { user-select: non
 .btn:active {
   transform: translateY(1px);
 }
-.btn:disabled {
+.btn:disabled, .btn[aria-disabled='true'] {
   opacity: .5; cursor: default; transform: none; box-shadow: none;
 }
 .btn .icon { width: 16px; height: 16px; }
 .btn-accent {
   background: var(--accent); color: var(--on-accent);
 }
-.btn-accent:hover { background: var(--accent-strong); box-shadow: var(--shadow); }
+.btn-accent:hover { background: var(--accent-strong); color: var(--on-accent); text-decoration: none; box-shadow: var(--shadow); }
 .btn-soft {
   background: var(--surface-soft); color: var(--text-soft);
 }
@@ -2112,11 +2112,13 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
         <h2 id="updateTitle">版本与更新</h2>
         <div class="form-field">
           <div class="field-row"><span class="field-hint" id="settingsUpdateStatus" role="status">尚未检查。</span><button class="btn btn-soft" id="settingsCheckUpdates" type="button" aria-label="检查 SakuraCode 新版本">检查更新</button></div>
-          <span class="field-hint" id="settingsUpdateHint">从 GitHub Releases 读取最新稳定版本；检查失败不影响其他功能。</span>
+          <span class="field-hint" id="settingsUpdateHint">从 GitHub Releases 检查版本，官网下载站提供说明与下载；检查失败仍可打开下载站。</span>
           <div class="settings-actions"><a class="btn btn-soft" id="settingsUpdateLink" target="_blank" rel="noopener noreferrer" hidden>查看发行说明与下载</a><a class="btn btn-accent" id="settingsUpdateDownload" target="_blank" rel="noopener noreferrer" hidden>下载桌面新版 ↗</a></div>
+          <p class="settings-message" id="settingsUpdateOpenMessage" role="status" aria-live="polite" hidden></p>
+          <div class="form-field" id="settingsUpdateOpenFallback" hidden><label class="field-label" for="settingsUpdateOpenUrl">网页地址（可复制到浏览器手动打开）</label><div class="field-row"><input id="settingsUpdateOpenUrl" type="text" readonly autocomplete="off" spellcheck="false"><button class="btn btn-soft" id="settingsUpdateCopyUrl" type="button">复制地址</button></div></div>
           <div class="update-details" id="settingsUpdateDetails" hidden><p class="update-notes" id="settingsUpdateNotes"></p><p class="update-integrity" id="settingsUpdateIntegrity"></p></div>
         </div>
-        <div id="settingsUpdateSourceFields" hidden><label class="form-field" for="settingsUpdateSource"><span class="field-label">更新源地址</span><input id="settingsUpdateSource" type="url" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="留空使用 GitHub；或填写你的 HTTPS latest.json 地址"><span class="field-hint" id="settingsUpdateSourceHelp">只使用你信任的 HTTPS 更新服务器；更新请求不携带账号授权、Key、工作区或聊天内容。</span></label><label class="check-field" for="settingsUpdateAuto"><input id="settingsUpdateAuto" type="checkbox" checked><span>启动后自动检查，之后每 6 小时检查一次</span></label><div class="settings-actions"><button class="btn btn-soft" id="settingsUpdateSourceSave" type="button">保存更新设置</button><button class="btn btn-soft" id="settingsUpdateSourceReset" type="button">恢复官方更新源</button></div><p class="settings-message" id="settingsUpdateSourceMessage" role="status" aria-live="polite"></p></div>
+        <div id="settingsUpdateSourceFields" hidden><label class="form-field" for="settingsUpdateSource"><span class="field-label">版本清单地址</span><input id="settingsUpdateSource" type="url" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="留空：GitHub 检查、官网下载；或 HTTPS latest.json"><span class="field-hint" id="settingsUpdateSourceHelp">只使用你信任的 HTTPS JSON 版本清单，不要填写下载站首页；更新请求不携带账号授权、Key、工作区或聊天内容。</span></label><label class="check-field" for="settingsUpdateAuto"><input id="settingsUpdateAuto" type="checkbox" checked><span>启动后自动检查，之后每 6 小时检查一次</span></label><div class="settings-actions"><button class="btn btn-soft" id="settingsUpdateSourceSave" type="button">保存更新设置</button><button class="btn btn-soft" id="settingsUpdateSourceReset" type="button">恢复官方更新源</button></div><p class="settings-message" id="settingsUpdateSourceMessage" role="status" aria-live="polite"></p></div>
         <p class="field-hint">更新不会静默安装或删除配置。下载后先退出旧程序，核对 SHA-256 并备份旧 EXE，再替换程序文件；已有账号、设置、会话与工作区数据保留。</p>
       </section>
       </section>
@@ -2628,17 +2630,18 @@ async function api(path, opts) {
   const sessionAction = path === '/api/sessions' || init.method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(path);
   const windowAction = path === '/api/desktop/window';
   const updateCheck = path === '/api/updates/check' && init.method === 'POST';
+  const updateOpenAction = path === '/api/updates/open';
   const updateSettingsAction = path === '/api/updates/settings';
   const historyAction = /^\/api\/sessions\/[^/]+\/history\/(preview|edit|rewind)$/.test(path) || path === '/api/conversation/generate';
   // The history operation owns its own pending gate. Its request must not be
   // rejected by that same gate after the user has already confirmed the target.
-  const allowed = statisticsAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.statistics : updateSettingsAction ? canOperate() && !app.auth.remote : appearanceAction ? canOperate() && !app.auth.remote && !!app.state.desktop : accountAction ? canOperate() && !app.auth.remote : windowAction ? app.auth.authenticated && app.auth.role === 'operator' && app.state.desktopWindow : updateCheck ? app.auth.authenticated && app.connected : workspaceAction || historyAction ? canOperate() : canControl(sessionAction);
+  const allowed = statisticsAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.statistics : updateOpenAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.desktop : updateSettingsAction ? canOperate() && !app.auth.remote : appearanceAction ? canOperate() && !app.auth.remote && !!app.state.desktop : accountAction ? canOperate() && !app.auth.remote : windowAction ? app.auth.authenticated && app.auth.role === 'operator' && app.state.desktopWindow : updateCheck ? app.auth.authenticated && app.connected : workspaceAction || historyAction ? canOperate() : canControl(sessionAction);
   if (init.method !== 'GET' && !path.startsWith('/api/auth/') && !allowed) {
     const error = new Error(app.auth.role === 'viewer' ? '只读访客不能修改工作区' : '尚未连接，操作未发送');
     error.status = 403;
     throw error;
   }
-  if (init.method !== 'GET' && !path.startsWith('/api/auth/') && app.state.workspaceId) {
+  if (init.method !== 'GET' && !path.startsWith('/api/auth/') && !updateOpenAction && app.state.workspaceId) {
     init.headers['X-Sakura-Workspace'] = app.state.workspaceId;
   }
   if (opts.body !== undefined) {
@@ -2803,6 +2806,7 @@ const settingsCheckUpdates = $('settingsCheckUpdates');
 const settingsUpdateStatus = $('settingsUpdateStatus');
 const settingsUpdateHint = $('settingsUpdateHint');
 const updateSourceUi = { dirty: false, saving: false };
+const updateOpenUi = { pending: null, target: '', url: '', epoch: 0, message: '', error: false };
 const marketBtn = $('marketBtn');
 const marketSearch = $('marketSearch');
 const marketBody = $('marketBody');
@@ -4829,6 +4833,80 @@ function safeUpdateLink(value, source) {
   } catch (_) { return ''; }
 }
 
+function currentUpdateLinks() {
+  const info = app.state.update;
+  const officialPage = app.state.updatePageUrl === 'https://download.sakuraapi.top/' ? app.state.updatePageUrl : '';
+  if (officialPage) return { release: officialPage, download: '' };
+  if (!info || !info.hasUpdate) return { release: '', download: '' };
+  const source = info.sourceUrl;
+  const customSource = source && (!app.state.updateSettings || app.state.updateSettings.feedUrl === source);
+  const release = typeof info.releaseUrl === 'string' ? source
+    ? customSource ? safeUpdateLink(info.releaseUrl, source) : ''
+    : /^https:\/\/github\.com\/Guyao146\/SakuraCode\/releases\/tag\/[^/?#]+$/.test(info.releaseUrl) ? info.releaseUrl : '' : '';
+  const download = customSource && /^[a-f0-9]{64}$/.test(info.sha256 || '') && Number.isSafeInteger(info.size) && info.size > 0 && info.size <= 536870912
+    ? safeUpdateLink(info.downloadUrl, source) : '';
+  return { release: release, download: download };
+}
+
+function defaultUpdatePage(settings) {
+  return !settings.feedUrl || settings.feedUrl === 'https://api.github.com/repos/Guyao146/SakuraCode/releases/latest' ? 'https://download.sakuraapi.top/' : '';
+}
+
+function nativeUpdateLinks() { return !!app.state.desktop && !app.auth.remote && app.auth.role === 'operator'; }
+
+function renderUpdateOpenStatus() {
+  const native = nativeUpdateLinks(), urls = currentUpdateLinks();
+  const active = native && updateOpenUi.url && updateOpenUi.epoch === connectionEpoch && urls[updateOpenUi.target] === updateOpenUi.url;
+  if (updateOpenUi.url && !active) {
+    updateOpenUi.pending = null; updateOpenUi.target = ''; updateOpenUi.url = ''; updateOpenUi.message = ''; updateOpenUi.error = false;
+  }
+  const disabled = native && (!app.auth.authenticated || !app.connected || updateSourceUi.saving || !!updateOpenUi.pending);
+  [['settingsUpdateLink', 'release', '查看发行说明与下载'], ['settingsUpdateDownload', 'download', '下载桌面新版 ↗']].forEach(function (row) {
+    const link = $(row[0]), busy = active && !!updateOpenUi.pending && updateOpenUi.target === row[1];
+    link.textContent = busy ? '正在打开…' : row[2];
+    if (disabled) link.setAttribute('aria-disabled', 'true'); else link.removeAttribute('aria-disabled');
+    if (busy) link.setAttribute('aria-busy', 'true'); else link.removeAttribute('aria-busy');
+    if (native) link.title = '在系统默认浏览器中打开'; else link.removeAttribute('title');
+  });
+  const message = $('settingsUpdateOpenMessage');
+  message.hidden = !active || !updateOpenUi.message;
+  message.textContent = active ? updateOpenUi.message : '';
+  message.classList.toggle('error', !!active && updateOpenUi.error);
+  $('settingsUpdateOpenFallback').hidden = !active;
+  $('settingsUpdateOpenUrl').value = active ? updateOpenUi.url : '';
+}
+
+async function openUpdateLink(target) {
+  const url = currentUpdateLinks()[target];
+  if (!nativeUpdateLinks() || !url || !app.auth.authenticated || !app.connected || updateSourceUi.saving || updateOpenUi.pending) return;
+  const operation = {}, epoch = connectionEpoch;
+  updateOpenUi.pending = operation; updateOpenUi.target = target; updateOpenUi.url = url; updateOpenUi.epoch = epoch;
+  updateOpenUi.message = '正在请求系统默认浏览器打开…'; updateOpenUi.error = false; renderUpdateOpenStatus();
+  const current = function () { return updateOpenUi.pending === operation && epoch === connectionEpoch && currentUpdateLinks()[target] === url; };
+  try {
+    const result = await api('/api/updates/open', { method: 'POST', body: { target: target, url: url } });
+    if (!result || result.opened !== true) throw new Error('系统浏览器未确认打开请求，可复制地址手动打开。');
+    if (current()) updateOpenUi.message = '已请求系统默认浏览器打开。若浏览器未出现或网页无法访问，可复制下方地址手动打开；不会自动安装。';
+  } catch (error) {
+    if (current()) { updateOpenUi.message = '打开失败：' + (error.message || '无法打开系统浏览器'); updateOpenUi.error = true; }
+  } finally {
+    if (updateOpenUi.pending === operation) updateOpenUi.pending = null;
+    renderUpdateOpenStatus();
+  }
+}
+
+[['settingsUpdateLink', 'release'], ['settingsUpdateDownload', 'download']].forEach(function (row) {
+  function activate(event) {
+    if (!nativeUpdateLinks() || event.type === 'auxclick' && event.button !== 1) return;
+    event.preventDefault(); void openUpdateLink(row[1]);
+  }
+  $(row[0]).addEventListener('click', activate);
+  $(row[0]).addEventListener('auxclick', activate);
+});
+$('settingsUpdateCopyUrl').addEventListener('click', function () {
+  if (!$('settingsUpdateOpenFallback').hidden && $('settingsUpdateOpenUrl').value) void copyText($('settingsUpdateOpenUrl').value, this, '复制地址');
+});
+
 function renderUpdatePreferences() {
   const settings = app.state.updateSettings;
   const visible = !app.auth.remote && app.auth.role === 'operator' && !!settings;
@@ -4840,9 +4918,10 @@ function renderUpdatePreferences() {
   const disabled = !visible || !canOperate() || updateSourceUi.saving || settingsCheckUpdates.dataset.submitting === 'true';
   settingsCheckUpdates.disabled = !app.auth.authenticated || !app.connected || updateSourceUi.saving || settingsCheckUpdates.dataset.submitting === 'true';
   ['settingsUpdateSource', 'settingsUpdateAuto', 'settingsUpdateSourceSave', 'settingsUpdateSourceReset'].forEach(function (id) { $(id).disabled = disabled; });
-  $('settingsUpdateSourceHelp').textContent = '只使用你信任的 HTTPS 更新服务器；不携带账号授权、Key、工作区或聊天内容。' +
+  $('settingsUpdateSourceHelp').textContent = '只使用你信任的 HTTPS JSON 版本清单，不要填写下载站首页；不携带账号授权、Key、工作区或聊天内容。' +
     (app.state.desktop ? '设置由桌面程序保存，重启与切换工作区后保留。' : '普通 Web 设置仅在当前服务进程生效；持久部署可设置 SAKURA_UPDATES_URL。') +
     (settings && settings.autoCheck && !app.state.updateAutomatic ? '当前服务已禁用后台轮询，仍可手动检查。' : '');
+  renderUpdateOpenStatus();
 }
 
 function renderUpdateStatus() {
@@ -4859,32 +4938,27 @@ function renderUpdateStatus() {
   const download = $('settingsUpdateDownload'); download.hidden = true; download.removeAttribute('href');
   $('settingsUpdateDetails').hidden = true; $('settingsUpdateNotes').textContent = ''; $('settingsUpdateIntegrity').textContent = '';
   const source = info && info.sourceUrl;
-  const customSource = source && (!app.state.updateSettings || app.state.updateSettings.feedUrl === source);
-  const pageUrl = available && typeof info.releaseUrl === 'string' ? customSource ? safeUpdateLink(info.releaseUrl, source)
-    : /^https:\/\/github\.com\/Guyao146\/SakuraCode\/releases\/tag\/[^/?#]+$/.test(info.releaseUrl) ? info.releaseUrl : '' : '';
+  const urls = currentUpdateLinks(), pageUrl = urls.release;
   if (pageUrl) {
     link.href = pageUrl;
     link.hidden = false;
   }
-  if (available && customSource && /^[a-f0-9]{64}$/.test(info.sha256 || '') && Number.isSafeInteger(info.size) && info.size > 0 && info.size <= 536870912) {
-    const downloadUrl = safeUpdateLink(info.downloadUrl, source);
-    if (downloadUrl) {
-      download.href = downloadUrl; download.hidden = false;
-      $('settingsUpdateIntegrity').textContent = 'SHA-256: ' + info.sha256 + '\n大小：' + (info.size / 1048576).toFixed(2) + ' MiB（服务端声明，下载后请核对）';
-      $('settingsUpdateDetails').hidden = false;
-    }
+  if (urls.download) {
+    download.href = urls.download; download.hidden = false;
+    $('settingsUpdateIntegrity').textContent = 'SHA-256: ' + info.sha256 + '\n大小：' + (info.size / 1048576).toFixed(2) + ' MiB（服务端声明，下载后请核对）';
+    $('settingsUpdateDetails').hidden = false;
   }
   if (available && typeof info.notes === 'string') { $('settingsUpdateNotes').textContent = info.notes; $('settingsUpdateDetails').hidden = false; }
   if (!info) {
     settingsUpdateStatus.textContent = '尚未检查。';
-    settingsUpdateHint.textContent = app.state.updateSettings && app.state.updateSettings.feedUrl ? '从已保存的自建更新源读取稳定版本；检查失败不影响其他功能。' : '从 GitHub Releases 读取最新稳定版本；检查失败不影响其他功能。';
+    settingsUpdateHint.textContent = app.state.updatePageUrl ? '从 GitHub Releases 检查版本，官网下载站提供说明与下载；检查失败仍可打开下载站。' : '从已保存的自建更新源读取稳定版本；检查失败不影响其他功能。';
     return;
   }
   settingsUpdateStatus.textContent = '当前 v' + info.current + (info.latest ? ' · ' + (info.error ? '上次发现 v' : '最新 v') + info.latest : '');
   if (info.error) {
-    settingsUpdateHint.textContent = '检查失败：' + info.error + (info.latest ? '。已保留上次检查结果，可稍后重试。' : '。可稍后重试。');
+    settingsUpdateHint.textContent = '检查失败：' + info.error + (info.latest ? '。已保留上次检查结果，可稍后重试。' : '。可稍后重试。') + (app.state.updatePageUrl ? ' 仍可打开官网下载站获取发行说明与下载。' : '');
   } else {
-    settingsUpdateHint.textContent = (available ? '有新版本可用。' + (source ? '可查看自建服务器上的说明并下载，先核对哈希再替换 EXE；' : '打开官方发行页面查看说明并下载；') + '不会自动安装。' : '当前没有可用的更新。') + (info.checkedAt ? ' 最近检查：' + new Date(info.checkedAt).toLocaleString() : '');
+    settingsUpdateHint.textContent = (available ? '有新版本可用。' + (source ? '可查看自建服务器上的说明并下载，先核对哈希再替换 EXE；' : '打开官网下载站查看说明并下载；') + '不会自动安装。' : '当前没有可用的更新。' + (app.state.updatePageUrl ? ' 仍可打开官网下载站。' : '')) + (info.checkedAt ? ' 最近检查：' + new Date(info.checkedAt).toLocaleString() : '');
   }
 }
 
@@ -4901,7 +4975,12 @@ async function saveUpdatePreferences(reset) {
     const saved = await api('/api/updates/settings', { method: 'POST', body: candidate });
     if (epoch !== connectionEpoch) return;
     const previous = app.state.updateSettings;
-    if (!previous || previous.feedUrl !== saved.feedUrl) app.state.update = null;
+    if (!previous || previous.feedUrl !== saved.feedUrl) {
+      app.state.update = null;
+      // Derive only the fixed allowlisted page from the acknowledged preferences;
+      // a follow-up snapshot failure must not pretend a successful save failed.
+      app.state.updatePageUrl = defaultUpdatePage(saved);
+    }
     app.state.updateSettings = saved; updateSourceUi.dirty = false;
     message.textContent = app.state.desktop ? '更新设置已保存，重启后保留。' : '更新设置已应用到当前服务进程。';
     renderUpdateStatus();
@@ -8139,6 +8218,7 @@ function applyState(st) {
   if (Array.isArray(st.models)) app.state.models = st.models;
   if (Array.isArray(st.providers)) app.state.providers = st.providers;
   app.state.update = st.update || null;
+  app.state.updatePageUrl = st.updatePageUrl || '';
   app.state.updateSettings = st.updateSettings || null;
   app.state.updateAutomatic = !!st.updateAutomatic;
   app.state.tokenStats = st.tokenStats || null;
