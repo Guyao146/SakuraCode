@@ -38,6 +38,8 @@ export interface SakuraConfig {
     tokenEnv?: string
     viewerTokenEnv?: string
   }
+  /** Optional self-hosted sharing relay. Credentials are read only when sharing starts. */
+  workspaceSharing?: { relayOrigin?: string; registrationTokenEnv?: string }
   profile?: string
   profiles?: Record<string, { bundles?: string[]; plugins?: Record<string, PluginRow> }>
   /** Out-of-tree plugin module specifiers (file paths or package names). */

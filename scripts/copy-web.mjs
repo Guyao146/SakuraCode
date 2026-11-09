@@ -4,4 +4,5 @@ import { copyFileSync, cpSync, mkdirSync } from 'node:fs'
 const target = new URL('../dist/web/', import.meta.url)
 mkdirSync(target, { recursive: true })
 copyFileSync(new URL('../src/web/index.html', import.meta.url), new URL('index.html', target))
+copyFileSync(new URL('../src/web/mobile.html', import.meta.url), new URL('mobile.html', target))
 cpSync(new URL('../src/web/assets/', import.meta.url), new URL('assets/', target), { recursive: true })

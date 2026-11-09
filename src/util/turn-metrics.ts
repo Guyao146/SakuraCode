@@ -1,7 +1,7 @@
 /** Per-attempt token estimates and per-turn wall time. Provider usage frames are cumulative, not deltas. */
 import { performance } from 'node:perf_hooks'
-import type { SessionEventRecord, StreamSummary, TurnMetrics, UsageStats } from '../core/types.js'
-import { estimateTokens } from './tokens.js'
+import type { CacheCoverage, SessionEventRecord, StreamSummary, TurnMetrics, UsageStats } from '../core/types.js'
+import { emptyCacheCoverage, estimateTokens, recordCacheCoverage, validCacheCoverage } from './tokens.js'
 
 const valid = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0
 
@@ -19,6 +19,7 @@ export class TurnMeter {
   private estimated = 0
   private requests = 0
   private retries = 0
+  private readonly cacheCoverage: CacheCoverage = emptyCacheCoverage()
   usage?: UsageStats
 
   attempt(stream: StreamSummary, inputEstimate: number, retry = false): void {
@@ -36,6 +37,7 @@ export class TurnMeter {
         if (valid(value)) this.usage[field] = (this.usage[field] ?? 0) + value
       }
     }
+    recordCacheCoverage(this.cacheCoverage, stream.usage)
     this.requests++
     if (retry) this.retries++
   }
@@ -44,7 +46,7 @@ export class TurnMeter {
     return { startedAt: this.startedAt, endedAt: new Date().toISOString(), elapsedMs: Math.max(0, Math.round(performance.now() - this.start)),
       inputTokens: this.input, outputTokens: this.output, totalTokens: this.input + this.output,
       usageSource: this.reported ? this.estimated ? 'mixed' : 'reported' : 'estimated',
-      requests: this.requests, retries: this.retries, status, scope: 'agent' }
+      requests: this.requests, retries: this.retries, status, scope: 'agent', cacheCoverage: { ...this.cacheCoverage } }
   }
 }
 
@@ -58,11 +60,18 @@ export function teamMetrics(rows: readonly TurnMetrics[]): TurnMetrics {
   const cancelled = rows.filter(row => row.status === 'cancelled').length
   const inputTokens = rows.reduce((total, row) => total + row.inputTokens, 0)
   const outputTokens = rows.reduce((total, row) => total + row.outputTokens, 0)
+  const cacheCoverage = emptyCacheCoverage()
+  for (const row of rows) {
+    const coverage = validCacheCoverage(row.cacheCoverage) ? row.cacheCoverage : undefined
+    cacheCoverage.requests += coverage?.requests ?? (Number.isSafeInteger(row.requests) && row.requests >= 0 ? row.requests : 0)
+    if (!coverage) continue
+    for (const field of ['reportedRequests', 'rateRequests', 'inputTokens', 'cachedTokens'] as const) cacheCoverage[field] += coverage[field]
+  }
   return { startedAt: new Date(start).toISOString(), endedAt: new Date(end).toISOString(), elapsedMs: Math.max(0, end - start),
     inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, requests: rows.reduce((total, row) => total + row.requests, 0),
     retries: rows.reduce((total, row) => total + row.retries, 0), usageSource: reported ? estimated ? 'mixed' : 'reported' : 'estimated',
     scope: 'team', members: rows.length, failedMembers: failed, cancelledMembers: cancelled,
-    status: failed ? 'error' : cancelled ? 'cancelled' : 'done' }
+    status: failed ? 'error' : cancelled ? 'cancelled' : 'done', cacheCoverage }
 }
 
 export interface RecordedTurnSummary { userSeq: number; metrics: TurnMetrics; teamSize?: number }
@@ -76,9 +85,11 @@ export function recordedTurnSummaries(events: readonly SessionEventRecord[]): Re
   const flush = (): void => {
     if (!user || summaries.has(user.seq) || !streams.length) return
     let inputTokens = 0, outputTokens = 0, reported = 0, estimated = 0
+    const cacheCoverage = emptyCacheCoverage()
     for (const event of streams) {
       const stream = event.payload.stream
       if (!stream) continue
+      recordCacheCoverage(cacheCoverage, stream.usage)
       for (const field of ['inputTokens', 'outputTokens'] as const) {
         const real = stream.usage?.[field]
         const fallback = stream.estimatedUsage?.[field] ?? (field === 'outputTokens' ? streamOutputTokens(stream) : estimateTokens(user.payload.content))
@@ -94,7 +105,7 @@ export function recordedTurnSummaries(events: readonly SessionEventRecord[]): Re
       elapsedMs: Math.max(0, Date.parse(end?.time ?? last.time) - Date.parse(user.time)) || 0,
       inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
       usageSource: reported ? estimated ? 'mixed' : 'reported' : 'estimated', requests: streams.filter(row => row.payload.stream).length,
-      retries: streams.filter(row => row.type === 'assistant/attempt' && row.payload.retry).length, status, scope: 'agent', legacy: true } })
+      retries: streams.filter(row => row.type === 'assistant/attempt' && row.payload.retry).length, status, scope: 'agent', legacy: true, cacheCoverage } })
   }
   // Explicit notes can arrive after the following user turn (parallel experts), so collect them first.
   for (const event of events) {

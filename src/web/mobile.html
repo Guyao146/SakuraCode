@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>SakuraCode · 手机工作区</title>
+<style>
+:root { color-scheme: light dark; --page:#f4f1f3; --surface:#fff; --soft:#eee9ec; --text:#30272d; --muted:#786c74; --accent:#b84d66; --line:#ddd5da; --error:#b13f4c; }
+@media (prefers-color-scheme:dark) { :root { --page:#18151a; --surface:#242027; --soft:#302a33; --text:#f0e8ed; --muted:#b5a8b1; --accent:#ef9aab; --line:#423944; --error:#ffadb5; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--page); color:var(--text); font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif; }
+button,input,textarea,select { font:inherit; }
+button { min-height:40px; border:0; border-radius:8px; padding:8px 14px; background:var(--soft); color:var(--text); cursor:pointer; }
+button.primary { background:var(--accent); color:var(--page); font-weight:600; }
+button:disabled { opacity:.5; cursor:not-allowed; }
+:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+[hidden] { display:none!important; }
+header { display:flex; align-items:center; gap:12px; padding:16px; background:var(--surface); border-bottom:1px solid var(--line); }
+.brand { color:var(--accent); font-size:22px; }
+header strong { font-size:16px; }
+header small { display:block; color:var(--muted); }
+header button { margin-left:auto; white-space:nowrap; }
+main { max-width:880px; margin:auto; padding:20px 16px 40px; }
+h1 { font-size:20px; margin:0 0 8px; }
+h2 { font-size:15px; margin:0 0 12px; }
+p { margin:8px 0; }
+.card { padding:18px; border-radius:12px; background:var(--surface); margin-bottom:16px; min-width:0; }
+label { display:flex; flex-direction:column; gap:6px; margin:12px 0; color:var(--muted); }
+input,textarea,select { width:100%; min-width:0; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--page); color:var(--text); }
+textarea { min-height:92px; resize:vertical; }
+.note { color:var(--muted); font-size:12px; }
+.error { color:var(--error); overflow-wrap:anywhere; }
+.row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.badge { background:var(--soft); border-radius:999px; padding:2px 9px; font-size:12px; }
+#workspaceName { overflow-wrap:anywhere; }
+#connectionStatus { margin:0; }
+.messages { display:flex; flex-direction:column; gap:12px; }
+.message { padding:14px; border-radius:12px; background:var(--surface); }
+.message.user { background:var(--soft); }
+.message .meta { display:flex; gap:8px; color:var(--muted); font-size:12px; margin-bottom:6px; }
+.message .body { white-space:pre-wrap; overflow-wrap:anywhere; }
+.message.tool,.message.note { padding:8px 14px; color:var(--muted); font-size:12px; }
+#agents,#todos { margin:8px 0; padding-left:20px; overflow-wrap:anywhere; }
+.actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+#composer { margin-top:18px; }
+#historyStatus { font-size:12px; color:var(--muted); }
+footer { color:var(--muted); text-align:center; font-size:12px; padding:12px; }
+@media (max-width:400px) { main { padding:12px; } header { padding:12px; gap:8px; } .card { padding:14px; } .message { padding:12px; } }
+@media (prefers-reduced-motion:no-preference) { button { transition:opacity 160ms; } }
+</style>
+</head>
+<body>
+<header><span class="brand" aria-hidden="true">✿</span><div><strong>SakuraCode</strong><small>手机工作区 · 自建中转</small></div><button id="logout" type="button" hidden>断开</button></header>
+<main>
+<section class="card" id="pairing">
+<h1>连接工作区</h1><p>使用电脑生成的限时邀请链接。默认只读，控制权限需在电脑授予。</p>
+<form id="joinForm"><label for="deviceName">设备名称<input id="deviceName" maxlength="60" autocomplete="off" value="我的手机" required></label><button class="primary" id="join" type="submit" disabled>连接工作区</button></form>
+<p id="pairingStatus" class="note" role="status">正在检查邀请…</p>
+<p class="note">邀请仅能使用一次。此页面使用 HTTPS 和你信任的中转，不是端到端加密；工作区聊天可能包含敏感信息。</p>
+</section>
+<section id="workspace" hidden>
+<div class="card"><div class="row"><h1 id="workspaceName">工作区</h1><span id="permission" class="badge">只读</span></div><p id="connectionStatus" role="status" aria-live="polite">等待电脑连接</p><div class="actions"><button id="reconnect" type="button">重新连接</button><button id="refresh" type="button">刷新工作区</button></div><p id="expiry" class="note"></p></div>
+<div class="card"><label for="sessions">会话（只读选择，不切换电脑会话）<select id="sessions"></select></label><h2>协作成员与任务</h2><ul id="agents"></ul><ul id="todos"></ul><p id="emptyTasks" class="note">暂无任务状态。</p></div>
+<div class="row"><h2>对话记录</h2><span id="historyStatus" role="status"></span></div><div id="messages" class="messages" aria-live="polite"></div>
+<form class="card" id="composer"><h2>发送任务</h2><p id="readonlyNote" class="note">当前为只读。请在电脑“连接工作区”弹窗中允许此设备控制。</p><label for="task">任务内容<textarea id="task" maxlength="8000" placeholder="需要审批时请回到电脑" disabled></textarea></label><div class="actions"><button class="primary" id="send" type="submit" disabled>发送任务</button><button id="stop" type="button" disabled>停止当前轮</button></div><p class="note">任务遵循电脑的审批模式。不能通过此页操作账号、设置、工作区切换、会话删除或任意文件接口。</p></form>
+</section>
+<p id="message" class="error" role="alert" hidden></p>
+</main>
+<footer>分享停止、过期或电脑切换工作区后，访问会失效。</footer>
+<script>
+(function () {
+'use strict';
+const $ = id => document.getElementById(id);
+const room = location.pathname.match(/^\/connect\/([0-9a-f]{32})\/?$/)?.[1];
+const fragment = new URLSearchParams(location.hash.slice(1));
+let invite = fragment.get('invite') || '';
+history.replaceState(null, '', location.pathname);
+const base = '/api/rooms/' + (room || '') + '/';
+let auth = null, snapshot = null, stream = null, selected = '', historyGeneration = 0, connectionGeneration = 0, refreshing = null, dirty = false, sending = false;
+function showError(text) { $('message').textContent = text || ''; $('message').hidden = !text; }
+function id() { return crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '') : Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''); }
+async function call(path, body) {
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const response = await fetch(base + path, { method: body === undefined ? 'GET' : 'POST', credentials:'same-origin', cache:'no-store', redirect:'error', signal:controller.signal,
+      ...(body === undefined ? {} : { headers:{'content-type':'application/json'}, body:JSON.stringify(body) }) });
+    const data = await response.json();
+    if (!response.ok) { const error = new Error(typeof data.error === 'string' ? data.error : '请求失败，请明确重试。'); error.status = response.status; throw error; }
+    return data;
+  } finally { clearTimeout(timer); }
+}
+function request(kind, extra) { return call('request', { operationId:id(), kind, ...(extra || {}) }); }
+function controls() {
+  const active = auth && auth.authenticated && auth.online && auth.device?.role === 'controller' && !sending;
+  $('task').disabled = !active;
+  const activeSession = selected ? selected === snapshot?.sessionId : !snapshot?.sessionId;
+  $('send').disabled = !active || !activeSession;
+  $('stop').disabled = !active || !activeSession || !snapshot?.busy;
+  $('readonlyNote').hidden = auth?.device?.role === 'controller';
+  $('permission').textContent = auth?.device?.role === 'controller' ? '允许控制' : '只读';
+  $('refresh').disabled = !auth?.authenticated || !auth.online;
+}
+function status(value) {
+  auth = value;
+  $('pairing').hidden = !!value.authenticated;
+  $('workspace').hidden = !value.authenticated;
+  $('logout').hidden = !value.authenticated;
+  $('connectionStatus').textContent = value.online ? '电脑已连接 · ' + (value.device?.name || '手机') : '电脑或中转离线，任务不会自动重发。';
+  $('expiry').textContent = value.expiresAt ? '分享截止 ' + new Date(value.expiresAt).toLocaleString() : '';
+  if (!value.authenticated) { connectionGeneration++; historyGeneration++; selected = ''; dirty = false; refreshing = null; sending = false;
+    stream?.close(); stream = null; snapshot = null; $('messages').replaceChildren(); $('pairingStatus').textContent = '未连接或访问已撤销。请在电脑重新生成邀请。'; }
+  controls();
+}
+function render(value) {
+  snapshot = value;
+  $('workspaceName').textContent = value.name || '当前工作区';
+  const options = [], available = new Set();
+  for (const row of value.sessions || []) { const option = document.createElement('option'); option.value = row.id; option.textContent = row.title || row.id; options.push(option); available.add(row.id); }
+  $('sessions').replaceChildren(...options);
+  if (!available.has(selected)) selected = available.has(value.sessionId) ? value.sessionId : options[0]?.value || '';
+  $('sessions').value = selected;
+  $('agents').replaceChildren();
+  for (const row of value.agents || []) { const li = document.createElement('li'); li.textContent = (row.name || '成员') + ' · ' + row.status; $('agents').appendChild(li); }
+  $('todos').replaceChildren();
+  for (const row of value.todos || []) { const li = document.createElement('li'); li.textContent = (row.status === 'completed' ? '✓ ' : row.status === 'in_progress' ? '◷ ' : '○ ') + row.content; $('todos').appendChild(li); }
+  $('emptyTasks').hidden = !!(value.todos?.length || value.agents?.length);
+  controls();
+}
+async function loadHistory() {
+  const generation = ++historyGeneration, connection = connectionGeneration, session = selected;
+  if (!session || !auth?.online) { $('messages').replaceChildren(); $('historyStatus').textContent = session ? '电脑离线' : '还没有会话'; return; }
+  $('historyStatus').textContent = '正在读取…';
+  try {
+    const result = await request('history', { sessionId:session });
+    if (generation !== historyGeneration || connection !== connectionGeneration || session !== selected || !auth?.authenticated) return;
+    const nodes = [];
+    for (const entry of result.entries || []) {
+      const article = document.createElement('article'); article.className = 'message ' + entry.kind;
+      const meta = document.createElement('div'); meta.className = 'meta'; meta.textContent = (entry.label || ({user:'用户',assistant:'SakuraCode',expert:'专家',tool:'工具',note:'提示'}[entry.kind] || '记录')) + (entry.time ? ' · ' + new Date(entry.time).toLocaleTimeString() : '');
+      const body = document.createElement('div'); body.className = 'body'; body.textContent = entry.text || '';
+      article.append(meta, body); nodes.push(article);
+    }
+    $('messages').replaceChildren(...nodes);
+    $('historyStatus').textContent = result.truncated ? '最新记录（较早或过长内容已省略）' : nodes.length ? '已更新' : '还没有消息';
+  } catch (error) { if (generation === historyGeneration) $('historyStatus').textContent = error.message; }
+}
+function refresh() {
+  dirty = true;
+  if (refreshing || !auth?.authenticated || !auth.online) return;
+  const connection = connectionGeneration;
+  const work = (async () => {
+    let passes = 0;
+    while (dirty && auth?.online && connection === connectionGeneration && passes++ < 2) { dirty = false; try {
+      const value = await request('state'); if (!auth?.authenticated || connection !== connectionGeneration) break;
+      render(value); await loadHistory();
+    } catch (error) { if (connection === connectionGeneration) showError(error.message); break; } }
+  })().finally(() => { if (refreshing === work) refreshing = null; if (dirty && auth?.online && connection === connectionGeneration) setTimeout(refresh, 250); });
+  refreshing = work;
+}
+function connectStream() {
+  stream?.close();
+  const connection = connectionGeneration, currentStream = new EventSource(base + 'events');
+  stream = currentStream;
+  currentStream.onmessage = event => { if (connection !== connectionGeneration || stream !== currentStream) return; try {
+    const frame = JSON.parse(event.data);
+    if (frame.type === 'status') { status(frame); if (frame.authenticated && frame.online) refresh(); }
+    else if (frame.type === 'snapshot' && auth?.authenticated) { render(frame.snapshot); void loadHistory(); }
+    else if (frame.type === 'event') refresh();
+  } catch { showError('收到无效的连接数据，请重新连接。'); } };
+  currentStream.onerror = () => { if (connection === connectionGeneration && stream === currentStream && auth?.authenticated) {
+    auth.online = false; $('connectionStatus').textContent = '连接已中断，正在恢复只读连接；任务不会自动重发。'; controls();
+  } };
+}
+async function reconnect() {
+  if (sending && !auth?.authenticated) return;
+  const connection = ++connectionGeneration;
+  historyGeneration++; stream?.close(); stream = null; dirty = false; refreshing = null;
+  if (auth?.authenticated) { auth.online = false; controls(); }
+  showError('');
+  try {
+    const value = await call('session');
+    if (connection !== connectionGeneration) return;
+    status(value);
+    if (auth.authenticated) { invite = ''; connectStream(); refresh(); }
+  } catch (error) { if (connection === connectionGeneration) showError(error.message); }
+}
+$('joinForm').addEventListener('submit', async event => {
+  event.preventDefault(); if (!/^[0-9a-f]{64}$/.test(invite)) return;
+  const connection = connectionGeneration;
+  $('join').disabled = true; showError('');
+  try {
+    await call('join', { token:invite, name:$('deviceName').value.trim() || '我的手机' });
+    if (connection !== connectionGeneration) return;
+    invite = ''; await reconnect();
+  } catch (error) { if (connection === connectionGeneration) { $('pairingStatus').textContent = '连接未完成。邀请可能已使用，请重新连接检查或回到电脑生成新邀请。'; showError(error.message); } }
+});
+$('reconnect').addEventListener('click', reconnect);
+$('refresh').addEventListener('click', refresh);
+$('sessions').addEventListener('change', () => { selected = $('sessions').value; controls(); void loadHistory(); });
+$('composer').addEventListener('submit', async event => {
+  event.preventDefault(); const task = $('task').value.trim(); if (!task || sending || !auth?.online || auth.device?.role !== 'controller') return;
+  const connection = connectionGeneration;
+  sending = true; controls(); showError('');
+  try {
+    const result = await request('message', { text:task, ...(snapshot?.sessionId ? { sessionId:snapshot.sessionId } : {}) });
+    if (connection !== connectionGeneration || !auth?.authenticated) return;
+    if ($('task').value.trim() === task) $('task').value = '';
+    showError(result.message || '任务已提交。'); refresh();
+  } catch (error) { if (connection === connectionGeneration) showError(error.message + ' 未自动重发；请先查看工作区确认结果。'); }
+  finally { if (connection === connectionGeneration) { sending = false; controls(); } }
+});
+$('stop').addEventListener('click', async () => {
+  if (sending || !auth?.online || auth.device?.role !== 'controller') return;
+  const connection = connectionGeneration;
+  sending = true; controls();
+  try {
+    const result = await request('stop', snapshot?.sessionId ? { sessionId:snapshot.sessionId } : {});
+    if (connection === connectionGeneration && auth?.authenticated) { showError(result.message || '已请求停止。'); refresh(); }
+  } catch (error) { if (connection === connectionGeneration) showError(error.message); }
+  finally { if (connection === connectionGeneration) { sending = false; controls(); } }
+});
+$('logout').addEventListener('click', async () => {
+  status({ authenticated:false,online:false }); invite = ''; sending = true;
+  const connection = connectionGeneration;
+  try { await call('logout', {}); } catch {}
+  if (connection === connectionGeneration) { sending = false; showError('已断开设备。'); }
+});
+if (!room) { $('pairingStatus').textContent = '无效的工作区链接。'; return; }
+$('join').disabled = !/^[0-9a-f]{64}$/.test(invite);
+$('pairingStatus').textContent = invite ? '邀请已从地址栏移除，点击连接即可兑换。' : '没有新邀请。若已有设备会话，可恢复连接；否则请回到电脑获取新链接。';
+void reconnect();
+})();
+</script>
+</body>
+</html>

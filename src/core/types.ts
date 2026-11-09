@@ -73,6 +73,14 @@ export interface ToolContext {
   agentId: string
   signal: AbortSignal
   checkpoint?: CheckpointTarget
+  /** Shared main context that was visible when this step's request was built. */
+  sharedContext?: { sessionId: string; throughSeq: number; userSeq: number }
+}
+
+/** Fixed model-visible preview; the full output remains in the session log. */
+export interface ToolOutputPreview {
+  reference: string
+  content: string
 }
 
 export interface ToolResult {
@@ -126,6 +134,15 @@ export interface UsageStats {
   reasoningTokens?: number
 }
 
+/** Coverage of provider cache reporting; rate totals include only paired reports. */
+export interface CacheCoverage {
+  requests: number
+  reportedRequests: number
+  rateRequests: number
+  inputTokens: number
+  cachedTokens: number
+}
+
 /** Request accounting, not a billing statement. Missing provider fields use the local heuristic. */
 export interface TurnMetrics {
   startedAt: string
@@ -135,6 +152,7 @@ export interface TurnMetrics {
   outputTokens: number
   totalTokens: number
   usageSource: 'reported' | 'estimated' | 'mixed'
+  cacheCoverage?: CacheCoverage
   requests: number
   retries: number
   status: 'done' | 'error' | 'cancelled' | 'rejected'
@@ -155,6 +173,8 @@ export interface CollaborationRecord {
   turnSeq: number
   userSeq?: number
   messages: ChatMessage[]
+  /** Preview metadata keyed by source tool-call id; archived messages retain the full text. */
+  toolPreviews?: Record<string, ToolOutputPreview>
   metrics?: TurnMetrics
 }
 
@@ -202,7 +222,7 @@ export type SessionEventPayload =
   | { type: 'tool/call'; payload: { id: string; name: string; arguments: string } }
   | {
       type: 'tool/result'
-      payload: { id: string; name: string; output: string; isError?: boolean; durationMs: number; images?: string[] }
+      payload: { id: string; name: string; output: string; modelPreview?: ToolOutputPreview; isError?: boolean; durationMs: number; images?: string[] }
     }
   | { type: 'session/note'; payload: Record<string, unknown> }
   | { type: 'collaboration/message'; payload: CollaborationRecord }

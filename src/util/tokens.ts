@@ -11,7 +11,7 @@
  * thresholds, never for billing.
  */
 
-import type { ChatMessage, SessionEventRecord, UsageStats } from '../core/types.js'
+import type { CacheCoverage, ChatMessage, SessionEventRecord, UsageStats } from '../core/types.js'
 
 const CJK_RANGES: Array<[number, number]> = [
   [0x4e00, 0x9fff], // CJK Unified Ideographs
@@ -91,34 +91,75 @@ export function estimateMessagesTokens(messages: ChatMessage[]): number {
 }
 
 
+/** Cache reporting and cache-rate coverage are separate: cache-only reports have no valid rate denominator. */
+export function emptyCacheCoverage(): CacheCoverage {
+  return { requests: 0, reportedRequests: 0, rateRequests: 0, inputTokens: 0, cachedTokens: 0 }
+}
+
+export function validTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+/** Validate persisted coverage before using its counts or paired token totals. */
+export function validCacheCoverage(value: unknown): value is CacheCoverage {
+  if (!value || typeof value !== 'object') return false
+  const coverage = value as CacheCoverage
+  return [coverage.requests, coverage.reportedRequests, coverage.rateRequests].every(count => Number.isSafeInteger(count) && count >= 0)
+    && coverage.rateRequests <= coverage.reportedRequests && coverage.reportedRequests <= coverage.requests
+    && validTokenCount(coverage.inputTokens) && validTokenCount(coverage.cachedTokens)
+    && coverage.cachedTokens <= coverage.inputTokens
+    && (coverage.rateRequests > 0 || coverage.inputTokens === 0 && coverage.cachedTokens === 0)
+}
+
+/** Record one attempt, including attempts without usage. Explicit zero is a report. */
+export function recordCacheCoverage(coverage: CacheCoverage, usage?: UsageStats): void {
+  coverage.requests++
+  if (!validTokenCount(usage?.cachedTokens)) return
+  coverage.reportedRequests++
+  if (!validTokenCount(usage?.inputTokens) || usage.cachedTokens > usage.inputTokens) return
+  coverage.rateRequests++
+  coverage.inputTokens += usage.inputTokens
+  coverage.cachedTokens += usage.cachedTokens
+}
+
+/** Unknown or zero-input denominators have no meaningful percentage, not a synthetic 0%. */
+export function cacheHitRate(coverage: unknown): number | undefined {
+  return validCacheCoverage(coverage) && coverage.rateRequests > 0 && coverage.inputTokens > 0
+    ? coverage.cachedTokens / coverage.inputTokens * 100 : undefined
+}
+
 /**
- * Session token accounting — real usage logged on each assistant/message
- * (stream.usage), not an estimate. Counts every model request the session
- * made, so a multi-step turn contributes one row per step.
+ * Session token accounting — real usage logged on each assistant/message or
+ * assistant/attempt (stream.usage), not an estimate. A multi-step turn
+ * contributes one row per step; cache coverage also counts unreported attempts.
  */
 export interface SessionTokenStats {
-  /** assistant/message events carrying usage (≈ model requests answered). */
+  /** assistant events carrying usage; unreported attempts only enter cacheCoverage.requests. */
   requests: number
   inputTokens: number
   outputTokens: number
-  /** Tokens served from the provider's prompt cache, when the provider reports them. */
+  /** A subset of inputTokens, not an additional charge; may also contain cache-only reports. */
   cachedTokens: number
   /** Reasoning tokens inside outputTokens, when the provider reports them. */
   reasoningTokens: number
+  cacheCoverage: CacheCoverage
 }
 
-/** Sum the usage rows of a session log; events without usage are skipped. */
+/** Sum reported usage once per logged attempt; never add cache/reasoning subsets to input/output. */
 export function summarizeUsage(events: ReadonlyArray<SessionEventRecord>): SessionTokenStats {
-  const stats: SessionTokenStats = { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }
+  const stats: SessionTokenStats = { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0, cacheCoverage: emptyCacheCoverage() }
   for (const event of events) {
     if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') continue
-    const usage = (event.payload as { stream?: { usage?: UsageStats } }).stream?.usage
+    const stream = event.payload.stream
+    if (!stream) continue
+    const usage = stream.usage
+    recordCacheCoverage(stats.cacheCoverage, usage)
     if (!usage) continue
     stats.requests++
-    stats.inputTokens += usage.inputTokens ?? 0
-    stats.outputTokens += usage.outputTokens ?? 0
-    stats.cachedTokens += usage.cachedTokens ?? 0
-    stats.reasoningTokens += usage.reasoningTokens ?? 0
+    for (const field of ['inputTokens', 'outputTokens', 'cachedTokens', 'reasoningTokens'] as const) {
+      const value = usage[field]
+      if (validTokenCount(value)) stats[field] += value
+    }
   }
   return stats
 }

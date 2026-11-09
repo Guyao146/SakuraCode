@@ -6,7 +6,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { Script } from 'node:vm'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { LLMRequest, ModelAdapter, StreamChunk } from '../src/core/types.js'
+import type { CacheCoverage, LLMRequest, ModelAdapter, StreamChunk, TurnMetrics, UsageStats } from '../src/core/types.js'
 import { resolveChromePath } from '../src/tools/browser.js'
 import { runWebServer, type DesktopSettingsState, type WebServerHandle } from '../src/web/server.js'
 import { BrowserClient } from './browser-client.js'
@@ -17,6 +17,23 @@ import { clientAccessToken, clientAuthorization, clientDraft, clientSaved, clien
   clientSubscriptions, noClientSecrets, sakuraClientResponse } from './sakuraapi-client-fixture.js'
 
 const html = readFileSync(new URL('../src/web/index.html', import.meta.url), 'utf8')
+
+type UsageChipState = { hidden: boolean; textContent: string; title: string }
+type UsageFrame = { usage?: UsageStats; metrics?: TurnMetrics; cacheCoverage?: CacheCoverage }
+function tokenDisplay() {
+  const chip: UsageChipState = { hidden: false, textContent: 'PREVIOUS_TURN_TOKENS', title: 'PREVIOUS_TURN_USAGE' }
+  const scope: Record<string, unknown> & { paintTurnUsage?: (frame: UsageFrame) => void; clearUsageChip?: () => void; paintCtxChip?: () => void;
+    onTurnStart?: (frame: Record<string, unknown>) => void; onTurnEnd?: (frame: Record<string, unknown>) => void } = { usageChip: chip }
+  const start = html.indexOf('function validUsageToken('), end = html.indexOf('const ctxChip =', start)
+  expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start)
+  new Script(html.slice(start, end)).runInNewContext(scope)
+  return { chip, scope, paint: (frame: UsageFrame) => scope.paintTurnUsage!(frame) }
+}
+const cacheCoverage = (requests: number, reportedRequests: number, rateRequests: number, inputTokens: number, cachedTokens: number): CacheCoverage => ({ requests, reportedRequests, rateRequests, inputTokens, cachedTokens })
+const usageMetrics = (inputTokens: number, outputTokens: number, usageSource: TurnMetrics['usageSource'], coverage: CacheCoverage): TurnMetrics => ({
+  startedAt: new Date(0).toISOString(), endedAt: new Date(1).toISOString(), elapsedMs: 1, inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
+  usageSource, requests: coverage.requests, retries: 0, status: 'done', scope: 'agent', cacheCoverage: coverage,
+})
 
 describe('web client — single-file contract', () => {
   it('contains valid JavaScript and unique static element IDs', () => {
@@ -57,6 +74,112 @@ describe('web client — single-file contract', () => {
     }
     expect(html).not.toContain('id="settingsClose"')
     expect(html).not.toContain('id="extensionsPanel"')
+  })
+
+  it('keeps token display honest for missing cache, explicit zero, partial coverage and mixed estimates', () => {
+    const view = tokenDisplay()
+    view.paint({ usage: { inputTokens: 100, outputTokens: 10 }, metrics: usageMetrics(100, 10, 'reported', cacheCoverage(1, 0, 0, 0, 0)) })
+    expect(view.chip.textContent).toContain('接口报告 110 tokens')
+    expect(view.chip.textContent).toContain('缓存未报告')
+    expect(view.chip.textContent).not.toContain('0%')
+    view.paint({ usage: { inputTokens: 100, outputTokens: 10, cachedTokens: 0 }, metrics: usageMetrics(100, 10, 'reported', cacheCoverage(1, 1, 1, 100, 0)) })
+    expect(view.chip.textContent).toContain('缓存 0%')
+    expect(view.chip.title).toContain('缓存命中 0（0%）')
+    expect(view.chip.title).toContain('比例覆盖 1/1 请求')
+    view.paint({ usage: { inputTokens: 1000, outputTokens: 30, cachedTokens: 80, reasoningTokens: 5 },
+      metrics: usageMetrics(1000, 30, 'reported', cacheCoverage(3, 2, 1, 100, 50)) })
+    expect(view.chip.textContent).toContain('接口报告 1.0k tokens')
+    expect(view.chip.textContent).toContain('缓存 50%（部分报告）')
+    expect(view.chip.title).toContain('缓存命中 80（50%）')
+    expect(view.chip.title).toContain('报告覆盖 2/3 请求')
+    expect(view.chip.title).toContain('比例覆盖 1/3 请求')
+    expect(view.chip.title).toContain('输入分母 100 tokens')
+    expect(view.chip.title).toContain('推理 5（包含在输出中）')
+    view.paint({ usage: { outputTokens: 5, cachedTokens: 0 }, metrics: usageMetrics(200, 5, 'mixed', cacheCoverage(1, 1, 0, 0, 0)) })
+    expect(view.chip.textContent).toContain('mixed · ≈估算（含接口报告） 205 tokens')
+    expect(view.chip.textContent).toContain('缓存比例未报告')
+    expect(view.chip.title).toContain('缓存命中 0（比例未报告）')
+    expect(view.chip.textContent).not.toContain('0%')
+    view.paint({ metrics: usageMetrics(20, 4, 'estimated', cacheCoverage(1, 0, 0, 0, 0)) })
+    expect(view.chip.textContent).toContain('≈估算 24 tokens')
+    expect(view.chip.textContent).toContain('缓存未报告')
+    view.paint({ usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0 }, metrics: usageMetrics(0, 0, 'reported', cacheCoverage(1, 1, 1, 0, 0)) })
+    expect(view.chip.hidden).toBe(false)
+    expect(view.chip.textContent).toContain('接口报告 0 tokens')
+    expect(view.chip.textContent).toContain('比例未报告')
+  })
+
+  it('degrades malformed persisted coverage safely in labels, briefs and turn-summary titles', () => {
+    const view = tokenDisplay(), good = cacheCoverage(1, 1, 1, 100, 50)
+    const label = view.scope.cacheUsageLabel as (coverage: unknown, cachedTokens?: number) => string
+    const summary = { dataset: {} as Record<string, string>, textContent: '', title: '' }
+    const root = { querySelectorAll: () => [summary] }
+    Object.assign(view.scope, { app: { state: { sessionId: 'fixture-session' } } })
+    const start = html.indexOf('function renderTurnSummary('), end = html.indexOf('function onTurnEnd(', start)
+    new Script(html.slice(start, end)).runInNewContext(view.scope)
+    const render = view.scope.renderTurnSummary as (frame: UsageFrame, parent: unknown, root: unknown) => void
+    const malformed = [null, {}, { requests: 1, reportedRequests: 1, rateRequests: 0 },
+      { ...good, inputTokens: null }, { ...good, cachedTokens: undefined }, { ...good, cachedTokens: Infinity },
+      { ...good, cachedTokens: 150 }, { ...good, requests: '1' }, { ...good, reportedRequests: 2 },
+      { ...good, rateRequests: -1 }, { ...good, rateRequests: 0.5 }, { ...good, rateRequests: 0 }]
+    for (const coverage of malformed) {
+      expect(() => label(coverage)).not.toThrow()
+      expect(label(coverage)).toContain('比例未报告 · 覆盖信息未报告')
+      const metrics = { ...usageMetrics(100, 10, 'reported', good), cacheCoverage: coverage } as TurnMetrics
+      view.paint({ usage: { inputTokens: 100, outputTokens: 10, cachedTokens: 0 }, metrics })
+      expect(view.chip.hidden).toBe(false)
+      expect(view.chip.textContent).toContain('接口报告 110 tokens · 缓存比例未报告')
+      expect(view.chip.title).toContain('缓存命中 0（比例未报告 · 覆盖信息未报告）')
+      expect(view.chip.textContent + view.chip.title).not.toMatch(/NaN|Infinity|undefined|\\d+%|PREVIOUS_TURN/)
+      summary.dataset.turnKey = 'fixture-session:main:0'
+      expect(() => render({ metrics }, null, root)).not.toThrow()
+      expect(summary.title).toContain('比例未报告 · 覆盖信息未报告')
+    }
+    view.paint({ metrics: usageMetrics(100, 10, 'reported', good) })
+    expect(view.chip.textContent).toContain('缓存 50%')
+  })
+
+  it('clears previous turn usage on main start and missing-usage completion, but not on a peer start', () => {
+    const view = tokenDisplay()
+    const app = { turnStarts: new Map(), subBlocks: new Map(), state: { sessionId: 'fixture-session' }, textBlock: null, lastWasTool: false,
+      mainTurnsStarted: 0, needsHistory: false, localQueued: 0, runOutcome: '', stopping: false, runStep: '' }
+    Object.assign(view.scope, { app, findAgent: () => ({ role: 'main' }), adoptSession: () => {}, setBusy: () => {}, syncAccess: () => {}, collapseThinkBlock: () => {},
+      renderTurnSummary: () => {}, renderSessions: () => {}, scheduleRecordsReload: () => {} })
+    let start = html.indexOf('function onTurnStart('), end = html.indexOf('function onToolCall(', start)
+    new Script(html.slice(start, end)).runInNewContext(view.scope)
+    view.scope.onTurnStart!({ agentId: 'peer', main: false, sessionId: 'fixture-session' })
+    expect(view.chip.textContent).toBe('PREVIOUS_TURN_TOKENS')
+    view.scope.onTurnStart!({ agentId: 'main', main: true, sessionId: 'fixture-session' })
+    expect(view.chip).toEqual({ hidden: true, textContent: '', title: '' })
+    view.paint({ usage: { inputTokens: 20, outputTokens: 4 } })
+    start = html.indexOf('function onTurnEnd('); end = html.indexOf('/* ============================================================', start)
+    new Script(html.slice(start, end)).runInNewContext(view.scope)
+    view.scope.onTurnEnd!({ agentId: 'main', main: true, ok: true })
+    expect(view.chip).toEqual({ hidden: true, textContent: '', title: '' })
+    view.paint({ usage: { inputTokens: NaN, outputTokens: -1, cachedTokens: 0 } })
+    expect(view.chip).toEqual({ hidden: true, textContent: '', title: '' })
+    view.paint({ usage: { inputTokens: 100, outputTokens: 2, cachedTokens: 0 } })
+    expect(view.chip.textContent).toContain('缓存比例未报告')
+    expect(view.chip.title).toContain('缓存命中 0（比例未报告 · 覆盖信息未报告）')
+    expect(view.chip.textContent).not.toContain('0%')
+  })
+
+  it('shows cumulative cache coverage even when usage totals are zero or entirely unreported', () => {
+    const view = tokenDisplay(), ctxChip = { hidden: false, textContent: '', title: '' }, meter = { hidden: false, title: '', value: 0, max: 1 }
+    const app = { state: { contextTokens: 10, contextBudget: null, tokenStats: { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0,
+      reasoningTokens: 0, cacheCoverage: cacheCoverage(1, 0, 0, 0, 0) } } }
+    Object.assign(view.scope, { app, ctxChip, $: () => meter, renderContextViewer: () => {} })
+    const start = html.indexOf('function paintCtxChip('), end = html.indexOf('const cwdEl =', start)
+    new Script(html.slice(start, end)).runInNewContext(view.scope)
+    view.scope.paintCtxChip!()
+    expect(ctxChip.title).toContain('累计 1 次请求（0 次带 usage）')
+    expect(ctxChip.title).toContain('缓存未报告（报告覆盖 0/1 请求）')
+    expect(ctxChip.title).not.toContain('0%')
+    app.state.tokenStats = { requests: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0, cacheCoverage: cacheCoverage(1, 1, 1, 0, 0) }
+    view.scope.paintCtxChip!()
+    expect(ctxChip.title).toContain('缓存命中 0（比例未报告）')
+    expect(ctxChip.title).toContain('报告覆盖 1/1 请求')
+    expect(ctxChip.title).not.toContain('0%')
   })
 
   it('does not schedule recurring account queries for the client-account grant', () => {
@@ -182,7 +305,9 @@ class GuiAdapter implements ModelAdapter {
     }
     yield { type: 'thinking', delta: '先梳理上下文，再验证结论。' }
     yield { type: 'text', delta: '已完成：' + message }
-    yield { type: 'usage', inputTokens: 120, outputTokens: 32, cachedTokens: 90, reasoningTokens: 8 }
+    if (!message.includes('[no-usage]')) yield message.includes('[usage-no-cache]')
+      ? { type: 'usage', inputTokens: 120, outputTokens: 32 }
+      : { type: 'usage', inputTokens: 120, outputTokens: 32, cachedTokens: 90, reasoningTokens: 8 }
     yield { type: 'done', reason: 'stop' }
   }
 }
@@ -1449,6 +1574,27 @@ browserSuite('web client — real browser', () => {
     expect(await browser.evaluate("document.getElementById('sessionList').textContent")).toContain('没有匹配')
     await browser.fill('#sessionSearch', '')
     await snapshot('workspace-chat')
+  })
+
+  it('replaces cached usage with unknown/estimated current-turn metrics without retaining stale totals', async () => {
+    const submit = async (message: string) => {
+      await browser.fill('#input', message)
+      await browser.click('#sendBtn')
+      await browser.waitFor(`document.getElementById('chatCol').textContent.includes(${JSON.stringify('已完成：' + message)}) && !document.getElementById('sendBtn').classList.contains('busy')`)
+    }
+    await submit('CACHE_REPORTED_FIRST')
+    expect(await browser.evaluate("document.getElementById('usageChip').textContent")).toContain('缓存 75%')
+    await submit('[usage-no-cache] CACHE_UNKNOWN_SECOND')
+    expect(await browser.evaluate("document.getElementById('usageChip').textContent")).toContain('缓存未报告')
+    expect(await browser.evaluate("document.getElementById('usageChip').textContent")).not.toContain('75%')
+    await browser.waitFor("document.getElementById('ctxChip').title.includes('报告覆盖 1/2 请求')")
+    await submit('[no-usage] ESTIMATED_THIRD')
+    expect(await browser.evaluate("document.getElementById('usageChip').textContent")).toContain('≈估算')
+    expect(await browser.evaluate("document.getElementById('usageChip').textContent")).not.toContain('接口报告 152')
+    expect(await browser.evaluate("document.getElementById('usageChip').title")).toContain('缓存未报告')
+    await browser.waitFor("document.getElementById('ctxChip').title.includes('报告覆盖 1/3 请求')")
+    await browser.resize(320, 760)
+    expect(await browser.evaluate('document.documentElement.scrollWidth <= innerWidth')).toBe(true)
   })
 
   it('pins compaction to a dedicated model and restores follow-selection', async () => {

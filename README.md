@@ -21,6 +21,7 @@
 - **配置**：profile / bundle / plugin rows / `--patch` 多层组合，`--dump-config` 查看最终生效组合。
 - **CLI**：交互式 REPL（斜杠命令）+ one-shot（`-p`）两种用法。
 - **远端运行看板**：`/dashboard` 查看智能体、三列任务进度和待审批事项；支持独立操作员／只读访客令牌、跨设备实时同步与断线恢复，默认仍仅监听本机。
+- **扫码连接工作区**：侧栏“连接工作区”生成限时二维码／链接，手机经你部署的自建 HTTPS 中转查看聊天和任务；默认只读，电脑逐设备授予发送／停止权限。不开放电脑公网端口、不转发完整桌面接口。部署与安全边界见 [工作区连接说明](docs/workspace-sharing.md)。
 
 ## v1.1.3 更新
 
@@ -401,11 +402,30 @@ REPL 也接受管道喂入（`echo "任务" | sakura`）：stdin 到达 EOF 时�
 
 ## Token 计量与缓存命中率（v0.7.2 增补）
 
-- **解析上游真实用量**：OpenAI 兼容适配器现在读取用量帧里的缓存与推理明细——OpenAI 风格的 `prompt_tokens_details.cached_tokens` / `completion_tokens_details.reasoning_tokens`、DeepSeek 风格的顶层 `prompt_cache_hits` / `reasoning_tokens`，以及 Responses API 的 `input_tokens_details` / `output_tokens_details`。不报告这些字段的服务商不受影响（字段保持 undefined，不计零）。
+- **解析上游真实用量**：OpenAI 兼容适配器读取用量帧里的缓存与推理明细——`prompt_tokens_details.cached_tokens` / `completion_tokens_details.reasoning_tokens`、兼容别名 `prompt_cache_hits` / `prompt_cache_hit_tokens` / `reasoning_tokens`，以及 Responses API 的 `input_tokens_details` / `output_tokens_details`。明确的零保留；不报告这些字段的服务商标记为未知，而不是当作零命中。
 - **回合级聚合**：`ui/turn/end` 的 `usage` 是**整回合所有步的累加**（此前只保留最后一步，多步工具回合的用量被丢弃）；每步的用量仍随 `assistant/message.stream.usage` 落盘，会话重放后可复算。
 - **会话与每轮收尾**：会话前置真实状态；专家模式提示原位替换。主回答下方显示本轮 tokens 与墙钟总耗时（接口报告／本地估算明确区分），失败／取消／重试也计入；专家与有归属的成员通信全部结束后原位更新整轮总计，刷新与分支可还原。专家共享一次 canonical 用户任务及带来源的已提交步骤，不串入后续排队用户消息；长期记忆仅采集用户调整方向，不采集成员发言／生成汇总。桌面浏览器返回／resize 用实际原生可见客户区证据约束页面，原地 reflow 与减少动态效果兼容。边界与安全限制见 `D:\VSProject\SakuraCode\docs\desktop-conversation-refinements.md`。
-- **会话级统计**：`state.tokenStats`（`{requests, inputTokens, outputTokens, cachedTokens, reasoningTokens}`）从会话日志派生，刷新页面/重连后不丢失；GUI 输入框上方的「本轮 N tokens」在有缓存命中时显示占比（如「本轮 1.5k tokens（缓存 62%）」），把鼠标悬停在「上下文 ≈」上可看累计输入/输出/缓存命中率与推理 token；REPL 新增 `/usage` 打印同样的汇总（含上下文估算）。
-- **缓存友性的请求结构**：提高缓存命中率是结构问题，SakuraCode 已经按前缀稳定原则构造请求——系统提示始终是 `messages[0]` 且只在内容变化时追加；历史严格按日志顺序追加、从不重写旧消息；工具声明按插件挂载顺序稳定导出；旧截图只保留最近一组（更早的降级为文本），大输出工具统一 30k 字符截断。会话级实测：**不要中途手工编辑历史、保持系统提示稳定、别在长会话里频繁切换模型**（换模型不改变历史前缀，但工具/温度等请求字段变化仍可能让服务商视为不同请求）。多数上游（OpenAI、DeepSeek、Moonshot、GLM 等）对 ≥1k token 的重复前缀自动启用缓存，无需任何请求参数。
+- **会话级统计**：`state.tokenStats` 从会话日志派生真实报告用量，附 `cacheCoverage`（总请求、报告缓存的请求、可计算比例的请求及其输入/缓存 token 总量）。缓存比例只用同一请求同时报告输入和缓存的样本计算；未报告显示「未报告」，部分覆盖明确标注。缓存 tokens 已包含在输入中，推理 tokens 已包含在输出中，不再额外相加。GUI 每轮开始清除上一轮用量，结束按接口报告／混合／本地估算标注；悬停「上下文 ≈」或使用 `/usage` 可看累计。CLI 上下文估算计入当前智能体可见的工具声明。
+- **缓存友好的请求结构**：系统提示保持在 `messages[0]`，历史由追加式日志派生；发给模型的工具声明按名称确定性排序，不改变界面顺序、权限或参数数组。相同工具集合以不同顺序注册／MCP 重连不会单纯因为顺序变化而破坏声明前缀。系统提示改动、旧截图降级、上下文压缩和工具集合变化仍可能改变前缀。具体命中条件、最低长度和保留时间取决于上游；不会向所有兼容服务自动发送未声明支持的缓存参数，也不保证命中。
+
+### 可回读的工具输出节省模式
+
+默认关闭，按工作区配置启用：
+
+```yaml
+plugins:
+  core-tools:
+    config:
+      outputPreviewChars: 12000
+```
+
+- `outputPreviewChars` 为 **0（关闭）或 1,024～1,000,000 UTF-16 字符**。只有超出预算的工具文本才生成固定预览，保留开头、结尾、错误标识和明确的省略说明；小结果、技能指令、用户／助手原文与图片不受影响。
+- 原始工具 `output` 完整保存在 session JSONL，GUI 和导出仍使用原文；模型投影只重放固定预览。更改配置不会重新裁剪旧记录，重启后预览一致。专家协作的模型证据也使用预览，但完整成员结果保留在归档。
+- 模型可用只读工具 `tool_output_read {reference, offset?, limit?}` 回读录制文本，偏移从 0 开始，每页最多 12,000 UTF-16 字符。引用由本地生成，不接受任意路径或 session ID；只能读取本会话及已关联专家协作的指定结果。压缩后可回读已记录引用，显式清空上下文后不恢复旧引用。
+- 原工具仍真正执行，不跳过文件读取、不缓存旧模型答案。`read`、shell、grep 等原有入库前截断仍适用；只能回读**实际记录**的输出，不能恢复这些工具已经丢弃的内容。未允许或未挂载回读工具的智能体不新建预览。
+- 离线固定长文本夹具（含工具声明）输入估算从 36,858 降到 7,850 tokens（约 78.7%），回读能拼回原文。这不是上游计费／缓存命中实测；真实节省取决于结果长度、后续回合数和回读次数。
+
+Responses 协议另修复了多段参数重复拼接工具名和带工具调用的 `incomplete` 长度状态，避免错误工具调用引发额外模型回合。
 
 ## 统一页面尺寸与安全删除会话
 

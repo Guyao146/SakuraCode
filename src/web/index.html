@@ -809,6 +809,25 @@ body.visible-compact.desktop-shell #themeBtn { display: none; }
 }
 .spawn-panel h3 { margin: 0; font-size: 19px; font-weight: 650; color: var(--heading); }
 .spawn-panel h1 { margin: 0; font-size: 22px; font-weight: 650; color: var(--heading); }
+.share-entry { width: 100%; justify-content: flex-start; margin-bottom: 8px; }
+.share-modal { width: min(780px, calc(100vw - 32px)); }
+.share-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.share-head h1 { margin: 0; }
+.share-columns { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 18px; }
+.share-section { min-width: 0; padding: 16px; border-radius: 12px; background: var(--surface-soft); }
+.share-section h2 { font-size: 14px; margin: 0 0 12px; }
+.share-qr { display: flex; align-items: center; justify-content: center; min-height: 280px; margin: 16px 0; border: 1px dashed var(--border); border-radius: 12px; }
+.share-qr img { width: min(260px, 100%); height: auto; border-radius: 8px; background: #fff; }
+.share-empty { color: var(--muted); text-align: center; font-size: 13px; padding: 20px; }
+.share-status { line-height: 1.6; font-size: 13px; overflow-wrap: anywhere; }
+.share-device { padding: 12px; border-radius: 8px; background: var(--surface-raised); margin-top: 8px; }
+.share-device strong { display: block; overflow-wrap: anywhere; font-size: 13px; }
+.share-device .field-hint { margin: 4px 0 8px; }
+.share-device-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.share-privacy { padding: 12px; border-radius: 8px; background: var(--surface-soft); font-size: 12px; line-height: 1.7; color: var(--text-soft); }
+.share-confirm { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.6; }
+.spawn-panel .share-confirm input { width: auto; flex: none; margin-top: 4px; }
+@media (max-width: 620px) { .share-columns { grid-template-columns: minmax(0, 1fr); } .share-modal .spawn-panel { padding: 18px; } }
 .market-modal { width: min(680px, calc(100vw - 32px)); }
 .market-panel { padding: 22px 24px; }
 .market-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -1905,6 +1924,7 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
     </section>
   </div>
   <div class="account-footer">
+    <button class="btn btn-soft share-entry" id="workspaceShareBtn" type="button" aria-haspopup="dialog" aria-controls="workspaceShareDialog" hidden>⌁ 连接工作区</button>
     <div class="account-row">
 <button class="account-button" id="sakuraAccountBtn" type="button" aria-label="登录 SakuraAPI 或查看账号"><span class="account-avatar" id="accountAvatar" aria-hidden="true">S</span><span class="account-copy"><strong id="accountUsername">登录 SakuraAPI</strong><small id="accountLabel">未登录 · 本地工作区</small></span></button>
       <button class="icon-btn" id="settingsViewBtn" type="button" aria-label="打开设置" aria-pressed="false" title="设置"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg></button>
@@ -2123,6 +2143,7 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
       </section>
       </section>
       <section class="settings-category" id="settings-integrationsPanel" role="tabpanel" aria-labelledby="settings-integrationsTab" tabindex="0" hidden>
+      <section class="settings-card" id="workspaceShareCard" hidden><h2>扫码／链接连接工作区</h2><p class="panel-note">电脑主动连接你的自建 HTTPS 中转，手机流量也能查看当前工作区。默认只读，控制权限逐设备授予。</p><button class="btn btn-soft" id="settingsWorkspaceShareBtn" type="button" aria-haspopup="dialog" aria-controls="workspaceShareDialog">连接工作区</button><p class="field-hint">需要先部署自建中转。不会自动上传数据或打开电脑公网端口。</p></section>
       <div class="settings-card" id="integrationsUnavailable"><h2>手机与外部连接</h2><p class="panel-note">微信连接需要桌面版的 Windows 安全存储。在支持的桌面环境中，可扫码绑定并查看工作区任务状态。</p></div>
       <section class="settings-card weixin-card" id="weixinCard" aria-labelledby="weixinTitle" hidden>
         <div class="weixin-heading"><div><h2 id="weixinTitle">微信 · 手机连接</h2><p class="panel-note">用手机微信扫码，随时查看主 Agent 和协作成员的工作情况。</p></div><span class="chip" id="weixinPhase">未绑定</span></div>
@@ -2285,6 +2306,31 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
 <div class="lightbox" id="lightbox" hidden>
   <img id="lightboxImg" alt="" />
 </div>
+
+<dialog class="spawn-modal share-modal" id="workspaceShareDialog" aria-labelledby="workspaceShareTitle">
+  <form class="spawn-panel" id="workspaceShareForm">
+    <div class="share-head"><h1 id="workspaceShareTitle">移动端连接工作区</h1><button class="icon-btn" id="workspaceShareClose" type="button" aria-label="关闭工作区连接弹窗">×</button></div>
+    <p class="panel-note">扫码或在手机打开链接，查看当前工作区。手机与电脑无需处于同一网络。</p>
+    <div class="share-columns">
+      <section class="share-section"><h2>手机扫码连接</h2><p class="share-status" id="workspaceShareStatus" role="status" aria-live="polite">尚未开始连接。</p>
+        <div class="share-qr"><img id="workspaceShareQr" width="260" height="260" alt="连接当前工作区的一次性邀请二维码" hidden><p class="share-empty" id="workspaceShareEmpty">开始连接后显示限时二维码。</p></div>
+        <label class="form-field" for="workspaceShareLink">手机访问链接<input id="workspaceShareLink" type="text" readonly autocomplete="off" spellcheck="false" placeholder="开始连接后生成" aria-describedby="workspaceShareExpiry"></label>
+        <p class="field-hint" id="workspaceShareExpiry"></p><div class="dialog-actions"><button class="btn btn-soft" id="workspaceShareCopy" type="button" disabled>复制链接</button><button class="btn btn-soft" id="workspaceShareRenew" type="button" disabled>重新生成邀请</button><button class="btn btn-soft" id="workspaceShareStop" type="button" disabled>停止</button></div>
+      </section>
+      <section class="share-section"><h2>自建中转与设备</h2>
+        <div id="workspaceShareConfig"><label class="form-field" for="workspaceShareOrigin">中转 HTTPS 地址<input id="workspaceShareOrigin" type="url" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="https://relay.example.com"></label>
+          <label class="form-field" for="workspaceShareToken">注册凭据（仅本次进程）<input id="workspaceShareToken" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="部署中转时配置的随机凭据"></label>
+          <p class="field-hint">没有中转服务时不能通过手机流量直连本机。部署步骤见仓库 docs/workspace-sharing.md。</p>
+          <label class="share-confirm"><input id="workspaceShareConsent" type="checkbox"><span>确认分享：当前工作区的聊天、专家结果和任务状态将经此自建中转发送；链接持有者可只读查看，聊天可能包含敏感信息。</span></label>
+          <div class="dialog-actions"><button class="btn btn-accent" id="workspaceShareStart" type="submit">开始连接</button></div>
+        </div>
+        <p class="field-hint" id="workspaceShareDeviceCount">暂无已连接设备。</p><div id="workspaceShareDevices"></div>
+      </section>
+    </div>
+    <p class="share-privacy">邀请 10 分钟有效且只能使用一次，分享默认 2 小时后结束。允许控制后设备可发送任务和停止当前轮；审批、账号、Key、设置、工作区切换和会话删除仍在电脑操作。停止或切换工作区后访问失效。采用 HTTPS 与可信中转，不是端到端加密。</p>
+    <p class="settings-message error" id="workspaceShareError" role="alert" hidden></p>
+  </form>
+</dialog>
 
 <dialog class="spawn-modal" id="authDialog" aria-labelledby="authTitle">
   <form class="spawn-panel auth-panel" id="authForm">
@@ -2627,6 +2673,7 @@ async function api(path, opts) {
   const accountAction = path.startsWith('/api/account/sakura');
   const appearanceAction = path === '/api/desktop/appearance';
   const statisticsAction = path === '/api/desktop/statistics' || path === '/api/desktop/statistics/activity';
+  const sharingAction = path.startsWith('/api/workspace-sharing/');
   const sessionAction = path === '/api/sessions' || init.method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(path);
   const windowAction = path === '/api/desktop/window';
   const updateCheck = path === '/api/updates/check' && init.method === 'POST';
@@ -2635,7 +2682,7 @@ async function api(path, opts) {
   const historyAction = /^\/api\/sessions\/[^/]+\/history\/(preview|edit|rewind)$/.test(path) || path === '/api/conversation/generate';
   // The history operation owns its own pending gate. Its request must not be
   // rejected by that same gate after the user has already confirmed the target.
-  const allowed = statisticsAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.statistics : updateOpenAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.desktop : updateSettingsAction ? canOperate() && !app.auth.remote : appearanceAction ? canOperate() && !app.auth.remote && !!app.state.desktop : accountAction ? canOperate() && !app.auth.remote : windowAction ? app.auth.authenticated && app.auth.role === 'operator' && app.state.desktopWindow : updateCheck ? app.auth.authenticated && app.connected : workspaceAction || historyAction ? canOperate() : canControl(sessionAction);
+  const allowed = sharingAction ? canManageSharing() : statisticsAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.statistics : updateOpenAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.desktop : updateSettingsAction ? canOperate() && !app.auth.remote : appearanceAction ? canOperate() && !app.auth.remote && !!app.state.desktop : accountAction ? canOperate() && !app.auth.remote : windowAction ? app.auth.authenticated && app.auth.role === 'operator' && app.state.desktopWindow : updateCheck ? app.auth.authenticated && app.connected : workspaceAction || historyAction ? canOperate() : canControl(sessionAction);
   if (init.method !== 'GET' && !path.startsWith('/api/auth/') && !allowed) {
     const error = new Error(app.auth.role === 'viewer' ? '只读访客不能修改工作区' : '尚未连接，操作未发送');
     error.status = 403;
@@ -2741,6 +2788,53 @@ const modelSel = $('modelSel');
 const compactModelSel = $('compactModelSel');
 const thinkingSel = $('thinkingSel');
 const usageChip = $('usageChip');
+function validUsageToken(value) { return typeof value === 'number' && Number.isFinite(value) && value >= 0; }
+function validUsageCoverage(coverage) {
+  return !!coverage && typeof coverage === 'object' &&
+    [coverage.requests, coverage.reportedRequests, coverage.rateRequests].every(function (count) { return Number.isSafeInteger(count) && count >= 0; }) &&
+    coverage.rateRequests <= coverage.reportedRequests && coverage.reportedRequests <= coverage.requests &&
+    validUsageToken(coverage.inputTokens) && validUsageToken(coverage.cachedTokens) && coverage.cachedTokens <= coverage.inputTokens &&
+    (coverage.rateRequests > 0 || coverage.inputTokens === 0 && coverage.cachedTokens === 0);
+}
+function usageCacheRate(coverage) {
+  return validUsageCoverage(coverage) && coverage.rateRequests > 0 && coverage.inputTokens > 0
+    ? Math.round(coverage.cachedTokens / coverage.inputTokens * 100) : null;
+}
+function cacheUsageLabel(coverage, cachedTokens) {
+  if (!validUsageCoverage(coverage)) return validUsageToken(cachedTokens)
+    ? '缓存命中 ' + cachedTokens.toLocaleString() + '（比例未报告 · 覆盖信息未报告）'
+    : '缓存未报告（比例未报告 · 覆盖信息未报告）';
+  const requests = coverage.requests, reports = coverage.reportedRequests, paired = coverage.rateRequests;
+  if (!reports) return '缓存未报告（报告覆盖 0/' + requests + ' 请求）';
+  const hits = validUsageToken(cachedTokens) ? cachedTokens : coverage.cachedTokens;
+  const rate = usageCacheRate(coverage);
+  return (validUsageToken(cachedTokens) ? '缓存命中 ' : '比例样本缓存 ') + hits.toLocaleString() + (rate === null ? '（比例未报告）' : '（' + rate + '%）') +
+    ' · 报告覆盖 ' + reports + '/' + requests + ' 请求 · 比例覆盖 ' + paired + '/' + requests + ' 请求' +
+    '（仅同时报告输入/缓存的请求；输入分母 ' + coverage.inputTokens.toLocaleString() + ' tokens，缓存分子 ' + coverage.cachedTokens.toLocaleString() + ' tokens）';
+}
+function clearUsageChip() { usageChip.hidden = true; usageChip.textContent = ''; usageChip.title = ''; }
+function paintTurnUsage(f) {
+  clearUsageChip();
+  const metrics = f.metrics, usage = f.usage || {};
+  const measured = metrics && validUsageToken(metrics.inputTokens) && validUsageToken(metrics.outputTokens);
+  const hasInput = validUsageToken(usage.inputTokens), hasOutput = validUsageToken(usage.outputTokens);
+  if (!measured && !hasInput && !hasOutput) return;
+  const inn = measured ? metrics.inputTokens : hasInput ? usage.inputTokens : null;
+  const out = measured ? metrics.outputTokens : hasOutput ? usage.outputTokens : null;
+  const total = (inn === null ? 0 : inn) + (out === null ? 0 : out);
+  const source = measured ? metrics.usageSource === 'reported' ? '接口报告' : metrics.usageSource === 'mixed' ? 'mixed · ≈估算（含接口报告）' : '≈估算' : hasInput && hasOutput ? '接口报告' : '仅已报告部分';
+  const cache = cacheUsageLabel(measured ? metrics.cacheCoverage : f.cacheCoverage, usage.cachedTokens);
+  const cached = usage.cachedTokens, coverage = measured ? metrics.cacheCoverage : f.cacheCoverage;
+  const cacheReports = validUsageCoverage(coverage) && coverage.reportedRequests > 0;
+  const rate = usageCacheRate(coverage);
+  const cacheBrief = rate !== null ? '缓存 ' + rate + '%' + (coverage.rateRequests < coverage.requests ? '（部分报告）' : '')
+    : cacheReports || validUsageToken(cached) ? '缓存比例未报告' : '缓存未报告';
+  usageChip.hidden = false;
+  usageChip.textContent = '本轮 ' + source + ' ' + (total >= 1000 ? (total / 1000).toFixed(1) + 'k' : total) + ' tokens · ' + cacheBrief;
+  usageChip.title = '输入 ' + (inn === null ? '未报告' : inn) + ' / 输出 ' + (out === null ? '未报告' : out) + ' tokens；' + source + '；' + cache +
+    (validUsageToken(usage.reasoningTokens) ? '；推理 ' + usage.reasoningTokens + '（包含在输出中）' : '') +
+    '；缓存包含在输入中，不另加到总量。估算不用于计费。';
+}
 const ctxChip = $('ctxChip');
 const contextViewer = $('contextViewer');
 const contextUi = { open: false, mode: 'category', refreshing: false, pending: null, message: '', error: false };
@@ -2750,15 +2844,15 @@ function paintCtxChip() {
   const threshold = budget && Number(budget.autoTokensThreshold) > 0 ? Number(budget.autoTokensThreshold) : 0;
   ctxChip.hidden = !t;
   ctxChip.textContent = '上下文 ≈ ' + (t >= 1000 ? (t / 1000).toFixed(1) + 'k' : t);
-  // Cumulative real usage lives in the tooltip: input / output / cache hits.
+  // Cumulative provider usage and cache reporting coverage live in the tooltip.
   var ts = app.state.tokenStats;
   var tip = '启发式估算，不用于计费。' + (threshold ? '达到约 ' + threshold.toLocaleString() + ' tokens 后自动压缩。' : '未启用按 token 自动压缩。');
-  if (ts && (ts.inputTokens || ts.outputTokens)) {
-    var hits = ts.cachedTokens || 0;
-    var rate = ts.inputTokens ? Math.round((hits * 100) / ts.inputTokens) : 0;
-    tip += '\\n累计 ' + ts.requests + ' 次请求 · 输入 ' + ts.inputTokens.toLocaleString() + ' / 输出 ' + ts.outputTokens.toLocaleString()
-      + ' tokens · 缓存命中 ' + hits.toLocaleString() + '（' + rate + '%）';
-    if (ts.reasoningTokens) tip += '\\n推理 tokens ' + ts.reasoningTokens.toLocaleString();
+  var coverage = ts && validUsageCoverage(ts.cacheCoverage) ? ts.cacheCoverage : null;
+  if (ts && (ts.requests || coverage && coverage.requests)) {
+    tip += '\\n累计 ' + (coverage ? coverage.requests : ts.requests) + ' 次请求（' + ts.requests + ' 次带 usage） · 输入 ' + ts.inputTokens.toLocaleString() + ' / 输出 ' + ts.outputTokens.toLocaleString()
+      + ' tokens · ' + cacheUsageLabel(coverage, ts.cachedTokens);
+    if (ts.reasoningTokens) tip += '\\n推理 tokens ' + ts.reasoningTokens.toLocaleString() + '（包含在输出中）';
+    tip += '\\n缓存包含在输入中，不另加到总量。';
   }
   ctxChip.title = tip;
   $('contextMeter').hidden = !t || !threshold;
@@ -4200,10 +4294,103 @@ function syncAccess() {
   renderRetrySettings();
   syncSkillImport();
   syncPluginMarketAccess();
+  renderWorkspaceSharing();
   renderSakuraAccount();
   renderContextViewer();
   refreshSelectControls();
 }
+
+const sharingUi = { pending: false, serial: 0, status: null, qrDataUrl: '', qrUrl: '', returnFocus: null };
+function canManageSharing() { return canOperate() && !app.auth.remote && !!app.state.sharingAvailable && !app.switchingWorkspace; }
+function renderWorkspaceSharing() {
+  const available = canManageSharing(), status = sharingUi.status || app.state.sharing || { phase: 'idle', devices: [] };
+  $('workspaceShareBtn').hidden = !available;
+  $('workspaceShareCard').hidden = !available;
+  $('workspaceShareBtn').disabled = sharingUi.pending;
+  $('settingsWorkspaceShareBtn').disabled = sharingUi.pending;
+  const active = ['connecting', 'online', 'offline'].includes(status.phase);
+  $('workspaceShareConfig').hidden = active;
+  const devices = Array.isArray(status.devices) ? status.devices : [];
+  const online = devices.filter(function (device) { return device.online; }).length;
+  const label = status.phase === 'online' ? online ? '已连接 ' + online + ' 台设备' : '等待手机连接 · 中转已就绪'
+    : status.phase === 'connecting' ? '正在连接中转…' : status.phase === 'offline' ? '中转连接已断开，手机暂时无法访问。'
+    : status.phase === 'error' ? '连接失败，请检查自建中转配置。' : '尚未开始连接。';
+  $('workspaceShareStatus').textContent = label;
+  $('workspaceShareLink').value = status.inviteUrl || '';
+  const hasQr = status.inviteUrl && sharingUi.qrUrl === status.inviteUrl && /^data:image\/svg\+xml;base64,/.test(sharingUi.qrDataUrl);
+  $('workspaceShareQr').hidden = !hasQr;
+  if (hasQr) $('workspaceShareQr').src = sharingUi.qrDataUrl; else $('workspaceShareQr').removeAttribute('src');
+  $('workspaceShareEmpty').hidden = !!hasQr;
+  $('workspaceShareEmpty').textContent = status.phase === 'online' && !status.inviteUrl ? '邀请已使用或过期。可重新生成二维码连接另一台设备。' : '开始连接后显示限时二维码。';
+  $('workspaceShareExpiry').textContent = (status.inviteExpiresAt ? '邀请截止 ' + new Date(status.inviteExpiresAt).toLocaleTimeString() + '；' : '') +
+    (status.expiresAt ? '分享截止 ' + new Date(status.expiresAt).toLocaleTimeString() : '邀请只使用一次，请勿公开链接或二维码。');
+  $('workspaceShareCopy').disabled = !available || sharingUi.pending || !status.inviteUrl;
+  $('workspaceShareRenew').disabled = !available || sharingUi.pending || status.phase !== 'online';
+  $('workspaceShareStop').disabled = !available || sharingUi.pending || !active;
+  $('workspaceShareStart').disabled = !available || sharingUi.pending || !$('workspaceShareConsent').checked;
+  $('workspaceShareOrigin').disabled = sharingUi.pending;
+  $('workspaceShareToken').disabled = sharingUi.pending;
+  $('workspaceShareDeviceCount').textContent = devices.length ? online + ' 台在线 · ' + devices.length + ' 台已认证设备（按设备会话去重）' : '暂无已连接设备。';
+  const list = $('workspaceShareDevices'); list.replaceChildren();
+  devices.forEach(function (device) {
+    const row = el('div', 'share-device'), name = el('strong', '', device.name || '手机设备');
+    row.appendChild(name); row.appendChild(el('p', 'field-hint', (device.online ? '在线' : '离线') + ' · ' + (device.role === 'controller' ? '允许发送任务／停止当前轮' : '只读查看')));
+    const actions = el('div', 'share-device-actions');
+    const role = el('button', 'btn btn-soft compact-btn', device.role === 'controller' ? '改为只读' : '允许控制'); role.type = 'button'; role.disabled = !available || sharingUi.pending;
+    role.addEventListener('click', function () { void sharingAction('device', { id: device.id, role: device.role === 'controller' ? 'viewer' : 'controller' }); });
+    const revoke = el('button', 'btn btn-soft compact-btn', '断开设备'); revoke.type = 'button'; revoke.disabled = !available || sharingUi.pending;
+    revoke.addEventListener('click', function () { void sharingAction('device', { id: device.id, revoke: true }); });
+    actions.append(role, revoke); row.appendChild(actions); list.appendChild(row);
+  });
+}
+function applySharingStatus(status) {
+  sharingUi.status = status;
+  if (status.qrDataUrl && status.inviteUrl) { sharingUi.qrDataUrl = status.qrDataUrl; sharingUi.qrUrl = status.inviteUrl; }
+  if (!status.inviteUrl || sharingUi.qrUrl !== status.inviteUrl) { sharingUi.qrDataUrl = ''; sharingUi.qrUrl = ''; }
+  app.state.sharing = status;
+  renderWorkspaceSharing();
+}
+async function openWorkspaceSharing() {
+  if (!canManageSharing()) return;
+  const serial = ++sharingUi.serial, workspace = app.state.workspaceId;
+  $('workspaceShareError').hidden = true;
+  if (!$('workspaceShareDialog').open) { sharingUi.returnFocus = document.activeElement; $('workspaceShareDialog').showModal(); }
+  $('workspaceShareClose').focus();
+  try {
+    const state = await api('/api/workspace-sharing');
+    if (serial !== sharingUi.serial || workspace !== app.state.workspaceId) return;
+    if (!$('workspaceShareOrigin').value && state.defaultRelayOrigin) $('workspaceShareOrigin').value = state.defaultRelayOrigin;
+    applySharingStatus(state);
+  } catch (error) { if (serial === sharingUi.serial) { $('workspaceShareError').textContent = error.message; $('workspaceShareError').hidden = false; } }
+}
+async function sharingAction(action, body) {
+  if (!canManageSharing() || sharingUi.pending) return;
+  const serial = ++sharingUi.serial, workspace = app.state.workspaceId;
+  sharingUi.pending = true; $('workspaceShareError').hidden = true; renderWorkspaceSharing();
+  try {
+    const state = await api('/api/workspace-sharing/' + action, { method: 'POST', body: body || {} });
+    if (serial !== sharingUi.serial || workspace !== app.state.workspaceId) return;
+    if (action === 'start') { $('workspaceShareToken').value = ''; $('workspaceShareConsent').checked = false; }
+    applySharingStatus(state);
+  } catch (error) { if (serial === sharingUi.serial && workspace === app.state.workspaceId) { $('workspaceShareError').textContent = error.message; $('workspaceShareError').hidden = false; } }
+  finally { if (serial === sharingUi.serial) { sharingUi.pending = false; renderWorkspaceSharing(); } }
+}
+$('workspaceShareBtn').addEventListener('click', openWorkspaceSharing);
+$('settingsWorkspaceShareBtn').addEventListener('click', openWorkspaceSharing);
+$('workspaceShareClose').addEventListener('click', function () { $('workspaceShareDialog').close(); });
+$('workspaceShareDialog').addEventListener('close', function () {
+  $('workspaceShareToken').value = ''; $('workspaceShareConsent').checked = false;
+  closeDrawer();
+  const previous = sharingUi.returnFocus;
+  const target = previous && previous.isConnected && !previous.disabled && !previous.closest('[inert]') && previous.checkVisibility() ? previous : $('menuBtn').checkVisibility() ? $('menuBtn') : $('input');
+  target.focus();
+});
+$('workspaceShareConsent').addEventListener('change', renderWorkspaceSharing);
+$('workspaceShareForm').addEventListener('submit', function (event) { event.preventDefault(); if (!$('workspaceShareConsent').checked) return;
+  void sharingAction('start', { confirmed: true, relayOrigin: $('workspaceShareOrigin').value.trim(), registrationToken: $('workspaceShareToken').value }); });
+$('workspaceShareStop').addEventListener('click', function () { void sharingAction('stop'); });
+$('workspaceShareRenew').addEventListener('click', function () { void sharingAction('invite'); });
+$('workspaceShareCopy').addEventListener('click', function () { if ($('workspaceShareLink').value) void copyText($('workspaceShareLink').value, this, '复制链接'); });
 
 function renderDesktopWindow() {
   const available = !!app.state.desktopWindow;
@@ -7602,7 +7789,7 @@ function resetConversation() {
   app.stopping = false;
   app.turnStarts.clear();
   $('expertModeNotice').hidden = true;
-  $('usageChip').hidden = true;
+  clearUsageChip();
   clearChat();
   paintRunStep();
   renderRunState();
@@ -8197,6 +8384,12 @@ function applyState(st) {
   if (st.cwd && previousCwd && (st.cwd !== previousCwd ||
     previousWorkspace && st.workspaceId && previousWorkspace !== st.workspaceId)) onWorkspaceChanged(st.cwd, previousCwd);
   app.state.workspaceId = st.workspaceId || '';
+  app.state.sharingAvailable = st.sharingAvailable === true;
+  if (previousWorkspace && previousWorkspace !== app.state.workspaceId) {
+    sharingUi.serial++; sharingUi.pending = false; sharingUi.status = null; sharingUi.qrDataUrl = ''; sharingUi.qrUrl = '';
+    $('workspaceShareDialog').close();
+  }
+  if (st.sharing) applySharingStatus(st.sharing);
   app.state.workspaceMemory = st.workspaceMemory || null;
   app.state.memoryProcessing = st.memoryProcessing || null;
   app.state.retryPolicy = st.retryPolicy || null;
@@ -9420,6 +9613,9 @@ function handleFrame(f) {
     case 'state':
       applyState(f.state);
       break;
+    case 'sharing/state':
+      if (f.state && canManageSharing()) applySharingStatus(f.state);
+      break;
     case 'weixin/state':
       if (f.state) { weixinState = f.state; renderWeixin(); }
       break;
@@ -9598,6 +9794,7 @@ function onTurnStart(f) {
     if (old) old.body.classList.remove('streaming');
     app.subBlocks.delete(f.agentId);
   } else {
+    clearUsageChip();
     if (app.textBlock) app.textBlock.body.classList.remove('streaming');
     app.textBlock = null;
     app.lastWasTool = false;
@@ -9677,7 +9874,7 @@ function renderTurnSummary(f, parent, root) {
     if (parent && parent.isConnected && f.main !== false && parent !== root) parent.after(summary);
     else (parent && parent.isConnected ? parent : root).appendChild(summary);
   }
-  const source = metrics.usageSource === 'reported' ? '接口报告' : metrics.usageSource === 'mixed' ? '估算（含接口报告）' : '估算';
+  const source = metrics.usageSource === 'reported' ? '接口报告' : metrics.usageSource === 'mixed' ? 'mixed · ≈估算（含接口报告）' : '≈估算';
   const total = metrics.totalTokens >= 1000 ? (metrics.totalTokens / 1000).toFixed(1) + 'k' : Math.round(metrics.totalTokens);
   const seconds = Math.max(0, metrics.elapsedMs) / 1000;
   const elapsed = seconds >= 60 ? Math.floor(seconds / 60) + ' 分 ' + Math.floor(seconds % 60) + ' 秒' : seconds.toFixed(1) + ' 秒';
@@ -9688,7 +9885,8 @@ function renderTurnSummary(f, parent, root) {
   summary.dataset.pending = String(pending);
   summary.title = '输入 ' + metrics.inputTokens + ' / 输出 ' + metrics.outputTokens + ' tokens；' + metrics.requests + ' 次请求，' + metrics.retries + ' 次重试。' +
     (metrics.scope === 'team' ? '包含本轮 ' + metrics.members + ' 名成员，并行耗时按起止时间计算，不相加。' : '含模型、工具、审批与重试等待；不含排队等待。') +
-    (metrics.usageSource !== 'reported' || metrics.legacy ? '估算不是账单；旧记录缺少精确回合时钟。' : '接口用量以服务商账单为准。');
+    (metrics.usageSource !== 'reported' || metrics.legacy ? '估算不是账单；旧记录缺少精确回合时钟。' : '接口用量以服务商账单为准。') +
+    ' ' + cacheUsageLabel(metrics.cacheCoverage) + '；缓存/推理包含在输入/输出中，不另加到总量。';
   return summary;
 }
 
@@ -9713,15 +9911,7 @@ function onTurnEnd(f) {
   // 主回合结束
   collapseThinkBlock();
   renderTurnSummary(f, app.textBlock && app.textBlock.wrap);
-  if (f.usage) {
-    const inn = f.usage.inputTokens || 0, out = f.usage.outputTokens || 0;
-    const total = inn + out;
-    usageChip.hidden = !total;
-    const cached = f.usage.cachedTokens || 0;
-    const rate = inn ? Math.round((cached * 100) / inn) : 0;
-    usageChip.textContent = '本轮 ' + (total >= 1000 ? (total / 1000).toFixed(1) + 'k' : total) + ' tokens' + (cached ? `（缓存 ${rate}%）` : '');
-    usageChip.title = `tokens — in ${inn} / out ${out}` + (cached ? ` / 缓存命中 ${cached}` : '') + (f.usage.reasoningTokens ? ` / 推理 ${f.usage.reasoningTokens}` : '');
-  }
+  paintTurnUsage(f);
   if (app.textBlock) {
     app.textBlock.body.classList.remove('streaming');
     app.textBlock = null;

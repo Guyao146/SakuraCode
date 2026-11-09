@@ -403,8 +403,9 @@ interface SSEUsage {
   completion_tokens?: number
   prompt_tokens_details?: { cached_tokens?: number }
   completion_tokens_details?: { reasoning_tokens?: number }
-  /** DeepSeek-style aliases. */
+  /** Top-level cache and reasoning aliases. */
   prompt_cache_hits?: number
+  prompt_cache_hit_tokens?: number
   reasoning_tokens?: number
 }
 
@@ -413,7 +414,7 @@ function usageChunk(usage: SSEUsage): UsageStats {
   return {
     inputTokens: usage.prompt_tokens,
     outputTokens: usage.completion_tokens,
-    cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hits,
+    cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hits ?? usage.prompt_cache_hit_tokens,
     reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? usage.reasoning_tokens,
   }
 }
@@ -560,7 +561,7 @@ export class OpenAICompatAdapter implements ModelAdapter {
 
     const response = await this.post(url, body, req.signal)
 
-    const calls = new Map<string, { index: number; callId?: string; name?: string; argsEmitted: boolean }>()
+    const calls = new Map<string, { index: number; callId?: string; name?: string; nameEmitted: boolean; idEmitted?: string; argsEmitted: boolean }>()
     let nextIndex = 0
     let anyText = false
     let completed = false
@@ -568,19 +569,33 @@ export class OpenAICompatAdapter implements ModelAdapter {
     const pendingUsage: UsageStats = {}
 
     const emitCall = (item: { itemId?: string; callId?: string; name?: string; arguments?: string; argsDelta?: string }) => {
-      const id = item.itemId ?? item.callId ?? ''
-      if (!id) return
-      let entry = calls.get(id)
+      const itemId = item.itemId || item.callId
+      if (!itemId) return null
+      let entry = calls.get(itemId) ?? (item.callId ? calls.get(item.callId) : undefined)
       if (!entry) {
-        entry = { index: nextIndex++, callId: item.callId, name: item.name, argsEmitted: false }
-        calls.set(id, entry)
+        entry = { index: nextIndex++, nameEmitted: false, argsEmitted: false }
       }
-      if (item.callId && !entry.callId) entry.callId = item.callId
+      calls.set(itemId, entry)
+      if (item.callId) {
+        entry.callId = item.callId
+        calls.set(item.callId, entry)
+      }
       if (item.name && !entry.name) entry.name = item.name
-      finishReason = 'tool_calls'
-      if (item.argsDelta) { entry.argsEmitted = true; return { type: 'tool_call' as const, index: entry.index, id: entry.callId ?? id, name: entry.name, argsDelta: item.argsDelta } }
-      if (item.arguments && !entry.argsEmitted) { entry.argsEmitted = true; return { type: 'tool_call' as const, index: entry.index, id: entry.callId ?? id, name: entry.name, argsDelta: item.arguments } }
-      return null
+      const id = entry.callId ?? itemId
+      const name = entry.nameEmitted ? undefined : entry.name
+      const argsDelta = item.argsDelta || (!entry.argsEmitted ? item.arguments : undefined)
+      if (!name && !argsDelta && entry.idEmitted === id) return null
+      entry.nameEmitted ||= !!name
+      entry.idEmitted = id
+      if (argsDelta) entry.argsEmitted = true
+      if (finishReason !== 'length') finishReason = 'tool_calls'
+      return {
+        type: 'tool_call' as const,
+        index: entry.index,
+        id,
+        ...(name ? { name } : {}),
+        ...(argsDelta ? { argsDelta } : {}),
+      }
     }
 
     for await (const event of sseEvents(response.body!)) {
@@ -619,6 +634,8 @@ export class OpenAICompatAdapter implements ModelAdapter {
       if (type === 'response.function_call_arguments.delta' || type === 'response.function_call_arguments.done') {
         const chunk = emitCall({
           itemId: String(parsed.item_id ?? ''),
+          callId: parsed.call_id as string | undefined,
+          name: parsed.name as string | undefined,
           argsDelta: type === 'response.function_call_arguments.delta' ? String(parsed.delta ?? '') : undefined,
           arguments: type === 'response.function_call_arguments.done' ? parsed.arguments as string | undefined : undefined,
         })
@@ -634,34 +651,36 @@ export class OpenAICompatAdapter implements ModelAdapter {
               output_tokens?: number
               input_tokens_details?: { cached_tokens?: number }
               output_tokens_details?: { reasoning_tokens?: number }
+              prompt_cache_hits?: number
+              prompt_cache_hit_tokens?: number
             }
           | undefined
         if (usage) {
           pendingUsage.inputTokens = usage.input_tokens
           pendingUsage.outputTokens = usage.output_tokens
-          pendingUsage.cachedTokens = usage.input_tokens_details?.cached_tokens
+          pendingUsage.cachedTokens = usage.input_tokens_details?.cached_tokens ?? usage.prompt_cache_hits ?? usage.prompt_cache_hit_tokens
           pendingUsage.reasoningTokens = usage.output_tokens_details?.reasoning_tokens
         }
         // Fallback for providers that complete without streaming deltas.
         if (type === 'response.completed' && !anyText) {
           const text = responsePayload?.output_text as string | undefined
           if (text) { anyText = true; yield { type: 'text', delta: text } }
-          for (const item of Array.isArray(responsePayload?.output) ? responsePayload.output as unknown[] : []) {
-            const row = item as Record<string, unknown>
-            if (row?.type === 'function_call') {
-              const chunk = emitCall({ itemId: String(row.id ?? ''), callId: row.call_id as string | undefined, name: row.name as string | undefined, arguments: row.arguments as string | undefined })
-              if (chunk) yield chunk
-            }
+        }
+        for (const item of Array.isArray(responsePayload?.output) ? responsePayload.output as unknown[] : []) {
+          const row = item as Record<string, unknown>
+          if (row?.type === 'function_call') {
+            const chunk = emitCall({ itemId: String(row.id ?? ''), callId: row.call_id as string | undefined, name: row.name as string | undefined, arguments: row.arguments as string | undefined })
+            if (chunk) yield chunk
           }
         }
         if (type === 'response.incomplete') finishReason = 'length'
       }
     }
     if (!completed) throw new LLMRequestError('LLM responses stream interrupted before completion', true)
-    if (pendingUsage.inputTokens !== undefined || pendingUsage.outputTokens !== undefined) {
+    if (Object.values(pendingUsage).some((value) => value !== undefined)) {
       yield { type: 'usage', ...pendingUsage }
     }
-    yield { type: 'done', reason: calls.size ? 'tool_calls' : finishReason }
+    yield { type: 'done', reason: finishReason }
   }
 }
 

@@ -16,7 +16,8 @@ import { APPROVAL_MODES } from './core/index.js'
 import type { PluginRegistry } from './tools/plugin-manager.js'
 import { isSessionId } from './core/session.js'
 
-import { estimateMessagesTokens, summarizeUsage } from './util/tokens.js'
+import { cacheHitRate, summarizeUsage } from './util/tokens.js'
+import { estimateRequestContextTokens } from './util/context.js'
 import { spawnExperts } from './experts.js'
 import { UpdateChecker } from './updates.js'
 const VERSION = '1.1.3'
@@ -753,20 +754,25 @@ async function main(): Promise<number> {
         break
       }
       case '/usage': {
-        // Sum the real usage rows logged on assistant/message events.
-        const sessionId = harness.main().sessionId
+        // Sum provider usage and expose the request coverage behind cache percentages.
+        const main = harness.main()
+        const sessionId = main.sessionId
         if (!isSessionId(sessionId)) {
           console.log('no session yet — send a message first')
           break
         }
         const session = await harness.ctx.sessions.open(sessionId)
         const stats = summarizeUsage(session.events)
-        const inT = stats.inputTokens, outT = stats.outputTokens, cached = stats.cachedTokens
-        const rate = inT ? Math.round((cached * 100) / inT) : 0
-        console.log(`session ${sessionId} — ${stats.requests} model request(s)`)
-        console.log(`input  ${inT.toLocaleString()} tokens (cache hits ${cached.toLocaleString()} · ${rate}%)`)
-        console.log(`output ${outT.toLocaleString()} tokens${stats.reasoningTokens ? ` (reasoning ${stats.reasoningTokens.toLocaleString()})` : ''}`)
-        console.log(`context estimate ${estimateMessagesTokens(session.deriveMessages()).toLocaleString()} tokens (heuristic, not for billing)`)
+        const coverage = stats.cacheCoverage
+        const rate = cacheHitRate(coverage)
+        const cache = coverage.reportedRequests
+          ? `cache hits ${stats.cachedTokens.toLocaleString()} · ${rate === undefined ? '比例未报告' : Math.round(rate) + '%'}; cache reported ${coverage.reportedRequests}/${coverage.requests} requests, rate coverage ${coverage.rateRequests}/${coverage.requests} requests; denominator ${coverage.inputTokens.toLocaleString()} input tokens, numerator ${coverage.cachedTokens.toLocaleString()} cached tokens`
+          : `cache 未报告; cache reported 0/${coverage.requests} requests`
+        console.log(`session ${sessionId} — ${stats.requests} model request(s) with usage`)
+        console.log(`input  ${stats.inputTokens.toLocaleString()} tokens (${cache})`)
+        console.log(`output ${stats.outputTokens.toLocaleString()} tokens${stats.reasoningTokens ? ` (reasoning ${stats.reasoningTokens.toLocaleString()}, included in output)` : ''}`)
+        const schemas = harness.ctx.tools.schemas(harness.ctx.agents.toolFilterFor(main.id))
+        console.log(`context estimate ${estimateRequestContextTokens(session.deriveMessages(), schemas).toLocaleString()} tokens (messages + visible tool schemas; heuristic, not for billing)`)
         break
       }
       case '/memory': {

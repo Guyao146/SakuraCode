@@ -53,6 +53,10 @@ import { PluginMarketplace } from './plugin-marketplace.js'
 import { CHAT_FILE_LIMITS, parseChatFiles, parseChatImages, ChatAttachmentError, type ChatUploadFile, type StoredChatFiles } from '../core/attachments.js'
 import { recordedTurnSummaries, teamMetrics } from '../util/turn-metrics.js'
 import { parseDesktopViewport, type DesktopViewport } from '../util/viewport.js'
+import QRCode from 'qrcode'
+import { WorkspaceShareClient } from '../sharing/client.js'
+import { isShareId, validShareRole, SHARE_LIMITS, type ShareRequest, type ShareReply } from '../sharing/protocol.js'
+import { projectSharedWorkspace, projectSharedHistory } from './sharing.js'
 
 const VERSION = '1.1.3'
 export { VERSION as WEB_VERSION }
@@ -128,6 +132,8 @@ export interface WebServerOptions {
   maxSteps?: number
   /** Full resolved config (sakura.yml layers + patches) — MCP servers live here. */
   config?: SakuraConfig
+  /** Sharing transport override for isolated tests; never supplied to the browser. */
+  sharingFetch?: typeof fetch
   /** Max time a request body may take to arrive (default 15s); lower it in tests. */
   bodyTimeoutMs?: number
   /** Workspaces offered in the desktop settings view (desktop mode only). */
@@ -420,12 +426,18 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   const sakuraAccount = access.remote ? undefined : new SakuraApiAccount({ saved: opts.sakuraApi,
     persist: opts.onPersistSakuraApi, fetch: opts.sakuraApiFetch, openLogin: opts.sakuraApiOpenLogin })
   let weixin: WeixinBridge | undefined
+  let workspaceShare: WorkspaceShareClient | undefined
+  let shareQr: { url: string; dataUrl: string } | undefined
   const stateFor = (state: Record<string, unknown>, principal: WebPrincipal): Record<string, unknown> =>
-    principal.role === 'operator' ? state : { ...state, statistics: undefined }
+    principal.role === 'operator' ? state : { ...state, statistics: undefined, sharing: undefined, sharingAvailable: false }
   const broadcast = (event: Record<string, unknown>): void => {
     if (closed) return
-    if (event.type === 'workspace/changed') weixin?.workspaceChanged()
+    if (event.type === 'workspace/changed') { weixin?.workspaceChanged(); void workspaceShare?.stop() }
     else weixin?.observe(event)
+    if (event.type !== 'sharing/state' && ['ui/text', 'ui/turn/start', 'ui/turn/end', 'ui/tool/result', 'agent/status', 'session/changed', 'session/deleted', 'ui/todos', 'state'].includes(String(event.type))) {
+      // Publish only committed, projected history; raw streaming chunks can split a credential.
+      workspaceShare?.observe({ type: 'changed' })
+    }
     if (event.type !== 'state') revision++
     const frame = `data: ${JSON.stringify({ ...event, revision })}\n\n`
     const viewerFrame = event.type === 'state'
@@ -436,7 +448,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
         res.destroy()
         continue
       }
-      if (event.type === 'desktop/statistics' && principal.role !== 'operator') continue
+      if (event.type === 'desktop/statistics' && principal.role !== 'operator' || event.type === 'sharing/state' && (principal.role !== 'operator' || access.remote)) continue
       try {
         if (res.writableLength > 1024 * 1024) { res.destroy(); clients.delete(res) }
         else res.write(principal.role === 'viewer' ? viewerFrame : frame)
@@ -733,6 +745,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     expertIds.clear()
     teamTurns.clear()
     const previous: Harness | undefined = harness
+    if (previous) void workspaceShare?.stop()
     previous?.dispose()
     harness = next
     ctx = next.ctx
@@ -919,7 +932,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     const epoch = workspaceEpoch
     const main = mainAgent()
     const sessionId = main.sessionId
-    if (!isSessionId(sessionId)) return { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }
+    if (!isSessionId(sessionId)) return summarizeUsage([])
     try {
       const session = await mount.sessions.open(sessionId)
       const key = `${epoch}:${sessionId}:${session.events.length}`
@@ -928,7 +941,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       if (mount === ctx) statsCache = { key, stats }
       return stats
     } catch {
-      return { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }
+      return summarizeUsage([])
     }
   }
 
@@ -987,6 +1000,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       version: VERSION,
       revision,
       server: { startedAt, remote: access.remote, authenticated: access.required },
+      sharingAvailable: !access.remote,
+      sharing: !access.remote ? workspaceShare?.status() : undefined,
       pendingRequests: [...pending.snapshot(), ...pendingQuestions.snapshot(), ...pendingPlans.snapshot(), ...pendingRetries.snapshot()],
       cwd: workspaceCwd,
       workspaceId: snapshotWorkspace,
@@ -1682,6 +1697,43 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     if (principal.role === 'viewer' && method !== 'GET' && method !== 'HEAD' && !checkingUpdate) {
       throw new HttpError(403, 'read-only viewer cannot modify the workspace')
     }
+    if (pathname === '/api/workspace-sharing' || pathname.startsWith('/api/workspace-sharing/')) {
+      if (access.remote || principal.role !== 'operator' || !isLoopbackHost(req.socket.remoteAddress ?? '') || !workspaceShare) {
+        throw new HttpError(404, '工作区连接管理仅供本机操作员使用。')
+      }
+      if (pathname === '/api/workspace-sharing' && method === 'GET') { json(res, 200, await sharingStatus()); return }
+      if (method !== 'POST') throw new HttpError(405, 'method not allowed')
+      const epoch = workspaceEpoch
+      const body = await bodyJson(req, 4096)
+      if (!access.isActive(principal)) throw new HttpError(401, 'authentication expired')
+      if (closed || epoch !== workspaceEpoch || switchingWorkspace || switching ||
+          req.headers['x-sakura-workspace'] !== undefined && req.headers['x-sakura-workspace'] !== workspaceId()) {
+        throw new HttpError(409, '工作区已改变，请刷新后重试。')
+      }
+      const action = pathname.slice('/api/workspace-sharing/'.length)
+      try {
+        if (action === 'start') {
+          if (body.confirmed !== true) throw new HttpError(400, '请确认当前工作区数据会经过所配置的自建中转。')
+          const configured = opts.config?.workspaceSharing
+          const tokenEnv = configured?.registrationTokenEnv
+          const token = body.registrationToken || (tokenEnv && /^[A-Z_][A-Z0-9_]{0,80}$/.test(tokenEnv) ? process.env[tokenEnv] : undefined)
+          await workspaceShare.start({ relayOrigin: String(body.relayOrigin || configured?.relayOrigin || ''),
+            registrationToken: typeof token === 'string' ? token : '', workspaceId: workspaceId() })
+        } else if (action === 'stop') await workspaceShare.stop()
+        else if (action === 'invite') await workspaceShare.rotateInvite()
+        else if (action === 'device') {
+          if (!isShareId(body.id) || !(body.revoke === true || validShareRole(body.role))) throw new HttpError(400, '无效的设备或权限。')
+          await workspaceShare.setDevice(body.revoke === true ? { id: body.id, revoke: true } : { id: body.id, role: validShareRole(body.role) ? body.role : 'viewer' })
+        } else throw new HttpError(404, 'unknown sharing action')
+      } catch (error) {
+        if (error instanceof HttpError) throw error
+        throw new HttpError(400, '工作区连接操作失败，请检查中转地址、网络和注册凭据。')
+      }
+      if (epoch !== workspaceEpoch) throw new HttpError(409, '工作区已改变，原分享操作未应用到新的连接。')
+      json(res, 200, await sharingStatus())
+      return
+    }
+
     // Display preferences do not touch the harness or credentials. They remain
     // editable during a turn, but only a local operator can persist desktop data.
     if ((pathname === '/api/desktop/statistics' && (method === 'GET' || method === 'POST')) ||
@@ -3060,6 +3112,69 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host === '::' ? '[::1]' : host.includes(':') ? `[${host}]` : host
   const url = access.publicOrigin ? access.publicOrigin + '/' : `http://${displayHost}:${port}/`
 
+  async function sharingStatus() {
+    const state = workspaceShare?.status() ?? { phase: 'idle' as const, devices: [] }
+    if (state.inviteUrl && shareQr?.url !== state.inviteUrl) {
+      const svg = await QRCode.toString(state.inviteUrl, { type: 'svg', margin: 4, width: 260, errorCorrectionLevel: 'M' })
+      if (workspaceShare?.status().inviteUrl === state.inviteUrl) shareQr = {
+        url: state.inviteUrl, dataUrl: `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`,
+      }
+    }
+    const current = workspaceShare?.status() ?? state
+    if (!current.inviteUrl) shareQr = undefined
+    return { ...current, available: !access.remote, defaultRelayOrigin: opts.config?.workspaceSharing?.relayOrigin ?? '',
+      qrDataUrl: current.inviteUrl && shareQr?.url === current.inviteUrl ? shareQr.dataUrl : undefined }
+  }
+
+  async function sharedRequest(request: ShareRequest, assertActive: () => void): Promise<ShareReply> {
+    const mount = ctx, epoch = workspaceEpoch, sessionAtEntry = sessionEpoch
+    const assertSame = (): void => {
+      assertActive()
+      if (closed || mount !== ctx || epoch !== workspaceEpoch || workspaceShare?.status().workspaceId !== workspaceId() || switchingWorkspace || switching) {
+        throw new HttpError(409, '工作区已改变或分享已停止。')
+      }
+    }
+    assertSame()
+    if (request.kind === 'state') {
+      const state = await stateSnapshot(); assertSame()
+      return { status: 200, data: projectSharedWorkspace(state, value => ctx.llm.redactError(value)) }
+    }
+    if (request.kind === 'history') {
+      if (!isSessionId(request.sessionId)) throw new HttpError(400, '无效的会话。')
+      const listed = await mount.sessions.list(); assertSame()
+      if (!listed.some(session => session.id === request.sessionId)) throw new HttpError(404, '当前工作区没有此会话。')
+      const session = await mount.sessions.open(request.sessionId); assertSame()
+      const history = projectSharedHistory(session.id, session.events, value => ctx.llm.redactError(value))
+      return { status: 200, data: history }
+    }
+    const currentSession = isSessionId(mainAgent().sessionId) ? mainAgent().sessionId : undefined
+    if (request.sessionId !== currentSession) throw new HttpError(409, '电脑当前会话已改变，请刷新手机工作区后重试。')
+    if (sessionAtEntry !== sessionEpoch || settingsUpdating || deletingSession || contextOperation ||
+        ctx.peek<MemoryProcessingService>('memoryProcessing')?.status().active) throw new HttpError(409, '工作区正在变更或处理中，请稍后重试。')
+    if (request.kind === 'stop') {
+      const agent = mainAgent()
+      agent.interrupt()
+      pending.cancel(agent.id); pendingQuestions.cancel(agent.id); pendingPlans.cancel(agent.id); pendingRetries.cancel(agent.id)
+      return { status: 200, data: { ok: true, queued: false, message: '已请求停止当前轮；排队任务保留。' } }
+    }
+    const text = request.text?.trim()
+    if (!text || text.length > SHARE_LIMITS.taskChars) throw new HttpError(400, '任务须为 1～8,000 字符。')
+    // Mobile text cannot expand an arbitrary local file, slash command or cross-workspace memory.
+    if (text.startsWith('/') || /(?:^|\s)@\S|sakura-ref:/i.test(text)) throw new HttpError(400, '手机任务不支持本机文件／资源引用或斜杠命令；请在电脑使用。')
+    const task = await prepareUserTask(text)
+    assertSame()
+    if (sessionAtEntry !== sessionEpoch || settingsUpdating || deletingSession || contextOperation) throw new HttpError(409, '会话已改变，任务未提交。')
+    const queued = submitUserTask(task, undefined, undefined, text)
+    return { status: 202, data: { ok: true, queued, message: queued ? '任务已排队，需要审批时请回到电脑。' : '任务已发送，需要审批时请回到电脑。' } }
+  }
+
+  if (!access.remote) {
+    workspaceShare = new WorkspaceShareClient({ fetch: opts.sharingFetch,
+      workspace: async () => projectSharedWorkspace(await stateSnapshot(), value => ctx.llm.redactError(value)),
+      request: sharedRequest, changed: status => broadcast({ type: 'sharing/state', state: status }),
+    })
+  }
+
   if (opts.onPersistWeixin && !access.remote) {
     weixin = new WeixinBridge({
       saved: opts.weixin,
@@ -3141,6 +3256,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       if (updateTimer !== undefined) clearTimeout(updateTimer)
       updateChecker.close()
       pluginMarketplace.close()
+      await workspaceShare?.close()
       await updateInFlight
       await sakuraAccount?.close()
       await weixin?.close()

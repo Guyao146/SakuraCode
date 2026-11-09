@@ -7,7 +7,8 @@
  */
 
 import type { Context } from '../kernel/index.js'
-import type { JsonSchemaObject, ToolContext, ToolDefinition, ToolSchema } from './types.js'
+import type { JsonSchemaObject, ToolContext, ToolDefinition, ToolOutputPreview, ToolSchema } from './types.js'
+import { previewToolOutput, validateToolOutputBudget } from '../util/tool-output.js'
 
 export interface ToolsExecutePayload {
   callId: string
@@ -63,8 +64,11 @@ function validateArgs(tool: ToolDefinition, args: Record<string, unknown>): stri
 
 export class ToolsService {
   private defs = new Map<string, ToolDefinition>()
+  readonly outputPreviewChars: number
 
-  constructor(private ctx: Context) {}
+  constructor(private ctx: Context, options: { outputPreviewChars?: number } = {}) {
+    this.outputPreviewChars = validateToolOutputBudget(options.outputPreviewChars)
+  }
 
   /** Register a tool on ctx.tools; its schema joins prompt assembly. */
   register(def: ToolDefinition): () => void {
@@ -87,6 +91,7 @@ export class ToolsService {
     return [...this.defs.values()]
       .filter((t) => (filter ? filter(t.name) : true))
       .map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))
+      .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
   }
 
   list(): ToolDefinition[] {
@@ -99,11 +104,15 @@ export class ToolsService {
     name: string,
     argsRaw: string,
     tc: ToolContext,
-  ): Promise<{ output: string; isError?: boolean; ui?: Record<string, unknown>; images?: string[]; durationMs: number }> {
+  ): Promise<{ output: string; modelPreview?: ToolOutputPreview; isError?: boolean; ui?: Record<string, unknown>; images?: string[]; durationMs: number }> {
     const started = Date.now()
     const tool = this.defs.get(name)
     const finish = async (payload: Partial<ToolsExecutePayload>) => {
       const output = payload.output ?? ''
+      const canRead = this.get('tool_output_read') &&
+        (this.ctx.peek<{ toolFilterFor(id: string): ((name: string) => boolean) | undefined }>('agents')?.toolFilterFor(tc.agentId)?.('tool_output_read') ?? true)
+      const modelPreview = name === 'skill' || name === 'tool_output_read' || !canRead ? undefined :
+        previewToolOutput(output, this.outputPreviewChars, payload.isError === true)
       const durationMs = Date.now() - started
       this.ctx.emit('tool/result', {
         callId,
@@ -115,6 +124,7 @@ export class ToolsService {
       })
       return {
         output,
+        ...(modelPreview ? { modelPreview } : {}),
         isError: payload.isError,
         ui: payload.ui,
         images: payload.images,
@@ -178,9 +188,16 @@ export class ToolsService {
 export const toolsPlugin = {
   name: 'core-tools',
   description: 'Scoped tool registry and guarded execution pipeline (ctx.tools)',
-  apply(ctx: import('../kernel/index.js').Context) {
+  config: {
+    type: 'object',
+    properties: {
+      outputPreviewChars: { type: 'integer', minimum: 0, maximum: 1_000_000,
+        description: 'Fixed model preview budget for tool text; 0 disables it, otherwise 1024–1000000 characters. The original output is retained.' },
+    },
+  } as const,
+  apply(ctx: import('../kernel/index.js').Context, config: { outputPreviewChars?: number } = {}) {
     ctx.provide('tools')
-    ctx.set('tools', new ToolsService(ctx))
+    ctx.set('tools', new ToolsService(ctx, config))
   },
 }
 

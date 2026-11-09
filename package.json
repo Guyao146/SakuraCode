@@ -31,6 +31,8 @@
     "client": "node scripts/build-client.mjs",
     "desktop": "node scripts/build-desktop.mjs",
     "web": "tsx src/cli.ts --web --no-open",
+    "relay": "tsx scripts/run-workspace-relay.ts",
+    "relay:build": "node scripts/build-workspace-relay.mjs",
     "sakura": "tsx src/cli.ts"
   },
   "engines": {

@@ -1,6 +1,6 @@
 /** Token/time accounting on the real loop: synthetic model responses, temporary logs, no billed API calls. */
 import { promises as fs } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { StreamChunk, StreamSummary, TurnMetrics } from '../src/core/types.js'
 import { recordedTurnSummaries, teamMetrics, TurnMeter } from '../src/util/turn-metrics.js'
 import { estimateRequestContextTokens } from '../src/util/context.js'
@@ -8,6 +8,12 @@ import { ConversationHistoryService } from '../src/core/conversation-history.js'
 import { text, toolCall, tmpHarness } from './helpers.js'
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+beforeAll(() => {
+  vi.stubEnv('SAKURA_API_KEY', 'fake-turn-metrics-key')
+  vi.stubEnv('SAKURA_UPDATES_AUTO_CHECK', '0')
+  vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('External network is disabled in turn-metrics tests') }))
+})
+afterAll(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs() })
 
 describe('per-turn token and wall-clock metrics', () => {
   it('uses final cumulative provider usage once per attempt and includes tool waiting across multiple steps', async () => {
@@ -20,7 +26,8 @@ describe('per-turn token and wall-clock metrics', () => {
     let live: { metrics: TurnMetrics; usage: { inputTokens: number; outputTokens: number } } | undefined
     ctx.on('ui/turn/end', frame => { live = frame })
     const result = await harness.run('timed task')
-    expect(result.metrics).toMatchObject({ inputTokens: 35, outputTokens: 7, totalTokens: 42, requests: 2, retries: 0, usageSource: 'reported', status: 'done' })
+    expect(result.metrics).toMatchObject({ inputTokens: 35, outputTokens: 7, totalTokens: 42, requests: 2, retries: 0, usageSource: 'reported', status: 'done',
+      cacheCoverage: { requests: 2, reportedRequests: 1, rateRequests: 1, inputTokens: 15, cachedTokens: 5 } })
     expect(result.metrics!.elapsedMs).toBeGreaterThanOrEqual(35)
     expect(live?.metrics).toEqual(result.metrics)
     expect(live?.usage).toMatchObject({ inputTokens: 35, outputTokens: 7 })
@@ -64,6 +71,54 @@ describe('per-turn token and wall-clock metrics', () => {
     expect(JSON.stringify(session.deriveMessages())).not.toContain('PARTIAL_ONLY')
   })
 
+  it('reports per-attempt cache coverage, preserves zero and never uses estimated input in the cache denominator', () => {
+    const meter = new TurnMeter()
+    const stream = (usage?: StreamSummary['usage']): StreamSummary => ({ text: 'abcd', toolCalls: [], durationMs: 0, ...(usage ? { usage } : {}) })
+    meter.attempt(stream({ inputTokens: 900, outputTokens: 10 }), 999)
+    meter.attempt(stream({ inputTokens: 100, outputTokens: 20, cachedTokens: 50, reasoningTokens: 5 }), 999)
+    meter.attempt(stream({ outputTokens: 2, cachedTokens: 0 }), 200, true)
+    const snapshot = meter.finish('done')
+    expect(snapshot).toMatchObject({ inputTokens: 1200, outputTokens: 32, totalTokens: 1232, usageSource: 'mixed', requests: 3, retries: 1,
+      cacheCoverage: { requests: 3, reportedRequests: 2, rateRequests: 1, inputTokens: 100, cachedTokens: 50 } })
+    expect(meter.usage).toEqual({ inputTokens: 1000, outputTokens: 32, cachedTokens: 50, reasoningTokens: 5 })
+    meter.attempt(stream(), 10)
+    expect(snapshot.cacheCoverage!.requests).toBe(3)
+    expect(meter.finish('done').cacheCoverage!.requests).toBe(4)
+    const zero = new TurnMeter()
+    zero.attempt(stream({ inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }), 999)
+    expect(zero.finish('done')).toMatchObject({ totalTokens: 0, usageSource: 'reported', cacheCoverage: { requests: 1, reportedRequests: 1, rateRequests: 1, inputTokens: 0, cachedTokens: 0 } })
+    const invalid = new TurnMeter()
+    invalid.attempt(stream({ inputTokens: NaN, outputTokens: -1, cachedTokens: Infinity }), 10)
+    expect(invalid.finish('done')).toMatchObject({ inputTokens: 10, outputTokens: 1, usageSource: 'estimated', cacheCoverage: { requests: 1, reportedRequests: 0, rateRequests: 0, inputTokens: 0, cachedTokens: 0 } })
+  })
+
+  it('combines only known paired coverage for teams and leaves legacy members unreported', () => {
+    const reported = new TurnMeter(), unknown = new TurnMeter()
+    reported.attempt({ text: '', toolCalls: [], durationMs: 0, usage: { inputTokens: 100, outputTokens: 10, cachedTokens: 50 } }, 999)
+    unknown.attempt({ text: '', toolCalls: [], durationMs: 0 }, 900)
+    const legacy = { ...unknown.finish('done'), requests: 2 }
+    delete legacy.cacheCoverage
+    expect(teamMetrics([reported.finish('done'), unknown.finish('done'), legacy])).toMatchObject({
+      requests: 4, cacheCoverage: { requests: 4, reportedRequests: 1, rateRequests: 1, inputTokens: 100, cachedTokens: 50 },
+    })
+  })
+
+  it('excludes malformed persisted team coverage without poisoning valid paired members', () => {
+    const meter = new TurnMeter()
+    meter.attempt({ text: '', toolCalls: [], durationMs: 0, usage: { inputTokens: 100, outputTokens: 10, cachedTokens: 50 } }, 999)
+    const good = meter.finish('done')
+    const malformed = [null, {}, { requests: 1, reportedRequests: 1, rateRequests: 0 },
+      { ...good.cacheCoverage, inputTokens: null }, { ...good.cacheCoverage, cachedTokens: Infinity },
+      { ...good.cacheCoverage, cachedTokens: 150 }, { ...good.cacheCoverage, reportedRequests: 2 },
+      { ...good.cacheCoverage, requests: '1' }, { ...good.cacheCoverage, rateRequests: -1 },
+      { ...good.cacheCoverage, rateRequests: 0.5 }, { ...good.cacheCoverage, rateRequests: 0 }]
+    const rows = malformed.map(cacheCoverage => ({ ...good, cacheCoverage }) as TurnMetrics)
+    const result = teamMetrics([good, ...rows])
+    expect(result).toMatchObject({ usageSource: 'reported', requests: rows.length + 1,
+      cacheCoverage: { requests: rows.length + 1, reportedRequests: 1, rateRequests: 1, inputTokens: 100, cachedTokens: 50 } })
+    expect(teamMetrics(rows).cacheCoverage).toEqual({ requests: rows.length, reportedRequests: 0, rateRequests: 0, inputTokens: 0, cachedTokens: 0 })
+  })
+
   it('measures concurrent team wall time rather than summing durations and retains failures and cancellations', () => {
     const row = (start: number, end: number, status: TurnMetrics['status'], usageSource: TurnMetrics['usageSource']): TurnMetrics => ({
       startedAt: new Date(start).toISOString(), endedAt: new Date(end).toISOString(), elapsedMs: end - start,
@@ -82,7 +137,8 @@ describe('per-turn token and wall-clock metrics', () => {
     await session.append({ type: 'assistant/message', payload: { role: 'assistant', content: null,
       tool_calls: [{ id: 'still-running', type: 'function', function: { name: 'read', arguments: '{}' } }], stream: { text: '', toolCalls: [], durationMs: 0 } } })
     const before = await fs.readFile(session.file)
-    expect(recordedTurnSummaries(session.events)).toMatchObject([{ userSeq: user.seq, metrics: { status: 'done', legacy: true, usageSource: 'estimated' } }])
+    expect(recordedTurnSummaries(session.events)).toMatchObject([{ userSeq: user.seq, metrics: { status: 'done', legacy: true, usageSource: 'estimated',
+      cacheCoverage: { requests: 1, reportedRequests: 0, rateRequests: 0, inputTokens: 0, cachedTokens: 0 } } }])
     expect(await fs.readFile(session.file)).toEqual(before)
   })
 

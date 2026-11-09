@@ -4,7 +4,7 @@
  */
 
 import { promises as fs } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { tmpHarness, text, toolCall, type MockStep } from './helpers.js'
 import { toolPolicyFilter } from '../src/core/index.js'
 import type { AssistantMessage, HarnessContext, LLMRequest, ModelAdapter, SessionEventRecord, StreamChunk, ToolMessage, TurnResult } from '../src/core/index.js'
@@ -247,6 +247,24 @@ describe('agent loop terminal outcomes', () => {
     expect(observed.uiEnds[1]).toMatchObject({ output: 'RECOVERED', steps: 1, main: true })
     expect(observed.uiEnds[1]?.error).toBeUndefined()
     expect(payloadsOf(session.events, 'assistant/attempt')).toEqual([{ error: expectedError }])
+  })
+
+  it('does not execute tool calls from a length-truncated response and still reconciles their results', async () => {
+    const execute = vi.fn(async () => ({ output: 'MUST_NOT_RUN' }))
+    const { harness, ctx } = await tmpHarness({ steps: [[
+      ...toolCall('truncated_action', '{"target":"complete"}', 'truncated-call').filter(chunk => chunk.type !== 'done'),
+      { type: 'usage', inputTokens: 10, outputTokens: 3 },
+      { type: 'done', reason: 'length' },
+    ], text('RECOVERED')] })
+    ctx.tools.register({ name: 'truncated_action', kind: 'write', description: 'must not run', parameters: { type: 'object' }, execute })
+    const result = await harness.run('perform action')
+    expect(result).toMatchObject({ error: 'stopped: max output length reached', metrics: { requests: 1, inputTokens: 10, outputTokens: 3 } })
+    expect(execute).not.toHaveBeenCalled()
+    const session = await ctx.sessions.open(harness.main().sessionId)
+    expect(payloadsOf(session.events, 'tool/result')).toEqual([expect.objectContaining({ id: 'truncated-call', isError: true,
+      output: expect.stringContaining('not executed') })])
+    expect(session.deriveMessages().at(-1)).toMatchObject({ role: 'tool', tool_call_id: 'truncated-call' })
+    expect(await harness.run('recover')).toMatchObject({ output: 'RECOVERED', steps: 1 })
   })
 
   it.each(['', 'Working on it'] as const)('records step exhaustion after tool calls with intermediate text %j', async (delta) => {

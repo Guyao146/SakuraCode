@@ -49,6 +49,7 @@ export { RetryService, RetryLimitError, retryPlugin, type RetryRequest, type Ret
 export { DEFAULT_RETRY_POLICY, validateRetryPolicy, LLMRequestError, type RetryPolicy } from '../util/retry.js'
 export type {
   ChatMessage,
+  CacheCoverage,
   CheckpointTarget,
   JsonSchemaObject,
   LLMRequest,
@@ -63,7 +64,10 @@ export type {
   ToolDefinition,
   ToolKind,
   ToolMessage,
+  ToolOutputPreview,
   ToolSchema,
+  TurnMetrics,
+  UsageStats,
   UserMessage,
   AssistantMessage,
 } from './types.js'

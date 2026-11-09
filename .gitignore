@@ -7,3 +7,4 @@ dist/
 # local scratch / packaging artifacts
 tmp/
 build/
+build-relay/

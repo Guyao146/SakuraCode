@@ -22,6 +22,7 @@ import type { AssistantMessage, ChatMessage, CheckpointTarget, StreamSummary, To
 import { storeChatFiles, type ChatUploadFile, type StoredChatFiles } from './attachments.js'
 import { estimateRequestContextTokens } from '../util/context.js'
 import { TurnMeter } from '../util/turn-metrics.js'
+import { committedToolPreviews } from '../util/tool-output.js'
 
 export interface TurnResult {
   output: string
@@ -179,12 +180,15 @@ export class DefaultAgentLoop implements AgentLoop {
       const shared = agent.sharedContext
       if (!shared || userSeq === undefined) return
       const lastSeq = session.events.at(-1)?.seq ?? publishedSeq
-      const messages = metrics ? [] : session.deriveMessages({ fromSeq: publishedSeq + 1, committedOnly: true }).filter(message => message.role !== 'system')
+      const messages = metrics ? [] : session.deriveMessages({ fromSeq: publishedSeq + 1, committedOnly: true, fullToolOutput: true }).filter(message => message.role !== 'system')
       if (!messages.length && !metrics) return
+      const toolPreviews = metrics ? undefined : committedToolPreviews(
+        session.events.filter(event => event.seq > publishedSeq && event.seq <= lastSeq), messages,
+      )
       await shared.session.append({ type: 'collaboration/message', payload: {
         key: `${session.id}:${userSeq}:${metrics ? 'end' : lastSeq}`, agentId: agent.id, agentName: agent.name,
         ...(typeof agent.meta.expert === 'string' ? { expert: agent.meta.expert } : {}), sourceSessionId: session.id,
-        turnSeq: userSeq, userSeq: shared.userSeq, messages, ...(metrics ? { metrics } : {}),
+        turnSeq: userSeq, userSeq: shared.userSeq, messages, ...(toolPreviews ? { toolPreviews } : {}), ...(metrics ? { metrics } : {}),
       } })
       if (!metrics) publishedSeq = lastSeq
     }
@@ -361,12 +365,14 @@ export class DefaultAgentLoop implements AgentLoop {
             type: 'tool/call',
             payload: { id: call.id, name: call.function.name, arguments: call.function.arguments },
           })
-          const result = await this.ctx.tools.execute(call.id, call.function.name, call.function.arguments, {
-            sessionId: session.id,
-            agentId: agent.id,
-            signal,
-            checkpoint,
-          })
+          const result = turnError ? { output: 'error: tool call was not executed because the model response reached its output length limit', isError: true, durationMs: 0 } :
+            await this.ctx.tools.execute(call.id, call.function.name, call.function.arguments, {
+              sessionId: session.id,
+              agentId: agent.id,
+              signal,
+              checkpoint,
+              ...(shared && throughSeq !== undefined && shared.userSeq !== undefined ? { sharedContext: { sessionId: shared.session.id, throughSeq, userSeq: shared.userSeq } } : {}),
+            })
           answered.add(call.id)
           await session.append({
             type: 'tool/result',
@@ -374,6 +380,7 @@ export class DefaultAgentLoop implements AgentLoop {
               id: call.id,
               name: call.function.name,
               output: result.output,
+              ...(result.modelPreview ? { modelPreview: result.modelPreview } : {}),
               isError: result.isError,
               durationMs: result.durationMs ?? 0,
               ...(result.images ? { images: result.images } : {}),
@@ -460,7 +467,7 @@ export interface Sessionish {
   dir?: string
   events: ReadonlyArray<{ seq: number; time: string; type: string; payload: unknown }>
   append(event: import('./types.js').SessionEventPayload): Promise<unknown>
-  deriveMessages(options?: { fromSeq?: number; throughSeq?: number; userSeq?: number; committedOnly?: boolean }): ChatMessage[]
+  deriveMessages(options?: { fromSeq?: number; throughSeq?: number; userSeq?: number; committedOnly?: boolean; fullToolOutput?: boolean }): ChatMessage[]
 }
 
 export class CancellationError extends Error {
@@ -537,6 +544,13 @@ export class AgentsService {
 
   get(id: string): AgentHandle | undefined {
     return this.agents.get(id)?.handle
+  }
+
+  /** Current schema visibility, including memory restrictions, without exposing agent internals. */
+  toolFilterFor(id: string): ((name: string) => boolean) | undefined {
+    const entry = this.agents.get(id)
+    if (!entry) return undefined
+    return name => entry.toolFilter(name) && !(name === 'memory_write' && this.userOnlyMemory(id))
   }
 
   /** One canonical context for a session's expert roster; archival sessions remain independent. */

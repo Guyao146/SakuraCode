@@ -3,6 +3,11 @@
 
 profile: default
 
+# Optional self-hosted HTTPS sharing relay. Configuring it does NOT start sharing.
+# workspaceSharing:
+#   relayOrigin: https://relay.example.com
+#   registrationTokenEnv: SAKURA_RELAY_REGISTRATION_TOKEN
+
 # Web GUI / remote dashboard. Local-only by default; --host / --port override.
 # Bind 0.0.0.0 only on a trusted LAN/VPN. A non-loopback listener or publicOrigin
 # requires a cryptographically random operator token (32-256 ASCII characters).
@@ -62,6 +67,11 @@ plugins:
       models:
         - gpt-4o-mini
         - gpt-4o
+  # Optional tool text previews. Full output stays in the session log; the
+  # model can request bounded pages using tool_output_read. 0 (default) disables.
+  # core-tools:
+  #   config:
+  #     outputPreviewChars: 12000 # allowed: 0 or 1024–1000000 UTF-16 characters
   core-approval:
     config:
       mode: default # plan | default | acceptEdits | yolo
