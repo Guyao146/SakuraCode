@@ -2,6 +2,8 @@
 
 export { fsToolsPlugin } from './fs.js'
 export { workspaceMemoryToolsPlugin } from './memory.js'
+export { knowledgeToolsPlugin } from './knowledge.js'
+export { connectorToolsPlugin } from './connectors.js'
 export { fsSearchPlugin } from './search.js'
 export { shellToolsPlugin } from './shell.js'
 export { jobToolsPlugin } from './jobs.js'

@@ -369,6 +369,116 @@ try {
     Write-Output 'Compiled appearance all modes/load/rollback and credential/context/stale-save preservation PASS'
     Write-Output 'Compiled context-budget settings save and failure acknowledgements PASS'
     Write-Output 'Compiled authorized-Key DPAPI save/load/logout and failure acknowledgements PASS (synthetic Key only)'
+    Add-Type -ReferencedAssemblies System.Web.Extensions -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Reflection;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Web.Script.Serialization;
+public static class CompiledJsonStorageSmoke {
+    static void Require(bool value, string message) { if (!value) throw new Exception(message); }
+    static Exception Failure(MethodInfo write, string file, object value) {
+        try { write.Invoke(null, new object[] { file, value }); return null; }
+        catch (TargetInvocationException error) { return error.InnerException; }
+    }
+    static object Value(int revision) { return new { synthetic = true, revision = revision, payload = new string('x', 4096) }; }
+    static FileSecurity CopyAccess(FileSecurity access) {
+        var copy = new FileSecurity();
+        copy.SetSecurityDescriptorBinaryForm(access.GetSecurityDescriptorBinaryForm(), AccessControlSections.Access);
+        return copy;
+    }
+    static void NoTemp(string file) { Require(Directory.GetFiles(Path.GetDirectoryName(file), Path.GetFileName(file) + ".*.tmp").Length == 0, "Native save left a temporary file"); }
+    public static string Run(Assembly assembly, string directory) {
+        Directory.CreateDirectory(directory);
+        var write = assembly.GetType("SakuraCode.Desktop.Program", true).GetMethod("WriteJson", BindingFlags.Static | BindingFlags.Public);
+        string file = Path.Combine(directory, "synthetic-atomic.json");
+        write.Invoke(null, new object[] { file, Value(0) });
+        for (int i = 0; i < 40; i++) {
+            write.Invoke(null, new object[] { file, Value(i * 3 + 1) });
+            string original = File.ReadAllText(file);
+            using (var held = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+                var error = Failure(write, file, Value(i * 3 + 2));
+                Require(error is IOException || error is UnauthorizedAccessException || error is Win32Exception, "Locked JSON save did not fail");
+                Require(File.ReadAllText(file) == original, "Locked JSON save changed the original");
+            }
+            write.Invoke(null, new object[] { file, Value(i * 3 + 3) });
+            NoTemp(file);
+        }
+        int reads = 0, concurrentWrites = 0, conflicts = 0;
+        using (var cancel = new CancellationTokenSource()) {
+            var reader = Task.Run(delegate {
+                var serializer = new JavaScriptSerializer();
+                while (!cancel.IsCancellationRequested) {
+                    using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    using (var text = new StreamReader(stream, Encoding.UTF8)) {
+                        var value = serializer.DeserializeObject(text.ReadToEnd()) as System.Collections.Generic.Dictionary<string, object>;
+                        Require(value != null && (bool)value["synthetic"] && (string)value["payload"] == new string('x', 4096), "Concurrent reader observed partial JSON");
+                        Interlocked.Increment(ref reads);
+                    }
+                    Thread.Yield();
+                }
+            });
+            try {
+                for (int i = 0; i < 40; i++) {
+                    string original = File.ReadAllText(file);
+                    var error = Failure(write, file, Value(200 + i));
+                    if (error == null) concurrentWrites++;
+                    else {
+                        bool accessConflict = error is Win32Exception && (((Win32Exception)error).NativeErrorCode == 5 || ((Win32Exception)error).NativeErrorCode == 32);
+                        bool sharingConflict = error is IOException && (error.HResult & 0xffff) == 32;
+                        Require(accessConflict || sharingConflict, "Concurrent JSON save failed for an unexpected reason");
+                        Require(File.ReadAllText(file) == original, "Failed concurrent JSON save changed the original");
+                        conflicts++;
+                    }
+                    NoTemp(file);
+                    Thread.Sleep(1);
+                }
+            } finally { cancel.Cancel(); reader.GetAwaiter().GetResult(); }
+        }
+        Require(reads > 0 && concurrentWrites + conflicts == 40, "Concurrent JSON reader was not exercised");
+        write.Invoke(null, new object[] { file, Value(998) });
+        NoTemp(file);
+        var access = new FileSecurity();
+        access.SetAccessRuleProtection(true, false);
+        access.AddAccessRule(new FileSystemAccessRule(WindowsIdentity.GetCurrent().User, FileSystemRights.FullControl, AccessControlType.Allow));
+        File.SetAccessControl(file, access);
+        var attributes = FileAttributes.Archive | FileAttributes.Hidden | FileAttributes.NotContentIndexed;
+        File.SetAttributes(file, attributes);
+        string descriptor = File.GetAccessControl(file, AccessControlSections.Access).GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+        write.Invoke(null, new object[] { file, Value(999) });
+        Require(File.GetAccessControl(file, AccessControlSections.Access).GetSecurityDescriptorSddlForm(AccessControlSections.Access) == descriptor, "JSON replacement changed the original DACL");
+        Require(File.GetAttributes(file) == attributes, "JSON replacement changed the original attributes");
+        string before = File.ReadAllText(file);
+        File.SetAttributes(file, attributes | FileAttributes.ReadOnly);
+        try {
+            Require(Failure(write, file, Value(1000)) != null, "Read-only JSON save succeeded");
+            Require(File.ReadAllText(file) == before && File.GetAttributes(file) == (attributes | FileAttributes.ReadOnly), "Read-only JSON save changed the original");
+            NoTemp(file);
+        } finally { File.SetAttributes(file, attributes); }
+        var denied = new FileSecurity();
+        denied.SetAccessRuleProtection(true, false);
+        denied.AddAccessRule(new FileSystemAccessRule(WindowsIdentity.GetCurrent().User, FileSystemRights.ReadAndExecute, AccessControlType.Allow));
+        File.SetAccessControl(file, denied);
+        try {
+            Require(Failure(write, file, Value(1001)) is UnauthorizedAccessException, "Read-only DACL did not reject JSON write");
+            Require(File.ReadAllText(file) == before, "Denied JSON write changed the original");
+            NoTemp(file);
+        } finally { File.SetAccessControl(file, CopyAccess(access)); }
+        string blocked = Path.Combine(directory, "blocked.json");
+        Directory.CreateDirectory(blocked);
+        Require(Failure(write, blocked, Value(1002)) != null && Directory.Exists(blocked), "Directory target was replaced");
+        NoTemp(blocked);
+        File.SetAttributes(file, FileAttributes.Normal);
+        return "Compiled JSON atomic rename: 80 updates, 40 locked rollbacks/explicit retries, " + reads + " concurrent complete reads (" + concurrentWrites + " writes/" + conflicts + " safe conflicts), DACL/attributes/read-only/directory protection PASS";
+    }
+}
+'@
+    Write-Output ([CompiledJsonStorageSmoke]::Run($assembly, (Join-Path $scratch 'atomic-json')))
 } finally {
     $writer.Dispose(); $stream.Dispose()
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue

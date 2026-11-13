@@ -1943,6 +1943,7 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
     </div>
     <div class="top-right">
       <button class="chip expert-mode" id="expertChip" type="button" data-write="1" aria-label="专家协同模式" aria-pressed="false" title="专家协同模式：开启后保留草稿，点击发送时由主智能体与各位专家并行处理">专家 · 关闭</button>
+<button class="agent-action" id="expertModelsBtn" type="button" aria-label="配置各专家的独立模型">专家模型</button>
       <span class="run-state" id="runState" role="status"><span class="dot" id="runDot"></span><span id="runLabel">就绪</span></span>
       <button class="panel-toggle" id="inspectorBtn" type="button" aria-label="切换协作与变更面板" aria-controls="inspector" aria-expanded="true">
         <svg class="icon" aria-hidden="true"><use href="#i-panel-right"/></svg><span class="panel-toggle-label">协作</span><span class="count-badge" id="agentCount">0</span>
@@ -2079,6 +2080,8 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
         <div id="workspaceMemoryEditor" hidden>
         <p class="field-hint" id="workspaceMemoryPath"></p>
         <label class="check-field" for="workspaceMemoryEnabled"><input id="workspaceMemoryEnabled" type="checkbox"><span>启用所选工作区的记忆</span></label>
+        <label class="form-field" for="memoryInjectionMode">记忆进入上下文的方式<select id="memoryInjectionMode"><option value="full">全文注入（兼容默认）</option><option value="on-demand">按需检索（减少无关记忆）</option></select><span class="field-hint">按需模式只保留固定导航，智能体通过 memory_search 查相关条目；完整记忆和 AGENTS.md 项目规则保留。</span></label>
+        <label class="form-field" for="memorySearchInput">搜索当前工作区记忆<input id="memorySearchInput" type="search" maxlength="256" placeholder="输入关键词，不调用模型"><button class="btn btn-soft" id="memorySearchBtn" type="button">检索相关记忆</button></label><p id="memorySearchStatus" class="field-hint" role="status"></p><div id="memorySearchResults"></div>
         <div class="settings-card-heading"><h3>长期记忆条目</h3><span class="field-hint" id="memoryEntryCount"></span></div><p class="field-hint">按条整理、删除或停用。停用条目保留在 Markdown，不自动注入、整理或跨工作区引用。</p><div class="memory-entry-list" id="memoryEntryList"></div>
         <details id="memoryDocumentEditor"><summary>编辑完整 Markdown</summary><label class="form-field" for="workspaceMemoryContent"><span class="field-label">长期记忆内容</span><textarea class="memory-editor" id="workspaceMemoryContent" maxlength="16000" spellcheck="false" placeholder="例如：项目约定、常用测试命令、已确认的长期偏好。"></textarea><span class="field-hint" id="workspaceMemoryCount">0 / 16000 字</span></label></details>
         <label class="check-field" for="memoryAutoProcess"><input id="memoryAutoProcess" type="checkbox" checked><span>按积累量或等待时间自动整理长期记忆</span></label>
@@ -2089,6 +2092,12 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
         <div class="settings-actions"><button class="btn btn-accent" id="workspaceMemorySave" type="button">保存记忆</button><button class="btn btn-soft" id="workspaceMemoryReload" type="button">刷新</button><button class="btn btn-soft" id="workspaceMemoryProcess" type="button">立即整理</button><button class="btn btn-soft" id="workspaceMemoryExport" type="button">导出 Markdown</button><button class="btn btn-soft" id="workspaceMemoryClear" type="button">清空内容</button><button class="btn btn-soft" id="workspaceMemoryEditorClose" type="button">收起管理</button></div>
         </div>
         <p class="settings-message" id="workspaceMemoryMessage" role="status" aria-live="polite"></p>
+      </section>
+      <section class="settings-card" id="knowledgeCard" hidden><div class="settings-card-heading"><h2>本地知识库</h2><button class="btn btn-soft compact-btn" id="knowledgeRefresh" type="button">刷新文档</button></div><p class="field-hint">当前工作区的 Markdown／TXT 资料，纯本地检索，默认不整库注入模型。内容是参考数据，不是项目规则；不执行导入脚本。</p>
+        <div class="settings-actions"><button class="btn btn-soft" id="knowledgeImportFileBtn" type="button">导入文本文件</button><button class="btn btn-soft" id="knowledgeImportFolderBtn" type="button">导入文本文件夹</button></div><input id="knowledgeImportFile" type="file" accept=".md,.txt,text/plain,text/markdown" multiple hidden><input id="knowledgeImportFolder" type="file" webkitdirectory multiple hidden>
+        <label class="form-field" for="knowledgeSearchInput">检索知识<input id="knowledgeSearchInput" type="search" maxlength="256" placeholder="中英文关键词"><button class="btn btn-soft" id="knowledgeSearchBtn" type="button">搜索相关片段</button></label>
+        <p class="settings-message" id="knowledgeStatus" role="status"></p><div id="knowledgeDocuments"></div><div id="knowledgeResults"></div>
+        <section id="knowledgeReader" hidden><h3 id="knowledgeReaderTitle"></h3><p class="field-hint" id="knowledgeReaderSource"></p><pre class="memory-entry-text" id="knowledgeReaderContent"></pre><div class="settings-actions"><button class="btn btn-soft" id="knowledgeReadMore" type="button">读取后续页</button><button class="btn btn-soft" id="knowledgeReference" type="button">@ 引用文档</button></div></section>
       </section>
         <p class="panel-note" id="workspaceSettingsUnavailable" hidden>远端工作区的目录由服务器管理，不能从访客界面切换或编辑。</p>
         </section>
@@ -2143,6 +2152,7 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
       </section>
       </section>
       <section class="settings-category" id="settings-integrationsPanel" role="tabpanel" aria-labelledby="settings-integrationsTab" tabindex="0" hidden>
+      <section class="settings-card" id="connectorsCard" hidden><div class="settings-card-heading"><h2>外接软件与知识库</h2><div class="settings-actions"><button class="btn btn-soft compact-btn" id="connectorsRefresh" type="button">刷新连接</button><button class="btn btn-accent compact-btn" id="connectorsAdd" type="button">添加外接</button></div></div><p class="panel-note">连接已安装的软件 MCP，或提供 HTTP JSON 接口的知识库／软件。保存不启动服务；连接和能力启用需分别确认，操作继续遵循审批。</p><p class="field-hint">凭据填写环境变量名，不保存 Token／Key。查询只发送到你选择的外接知识库，结果会作为参考数据进入所选模型；不会自动上传本地知识库或对话。</p><p id="connectorsStatus" class="settings-message" role="status" aria-live="polite"></p><div id="connectorsList"></div><div id="externalKnowledgePanel" hidden><label class="form-field" for="externalKnowledgeSource">外部知识来源<select id="externalKnowledgeSource"></select></label><label class="form-field" for="externalKnowledgeQuery">检索关键词<input id="externalKnowledgeQuery" type="search" maxlength="256" placeholder="确认后向所选外接知识库发送"><button class="btn btn-soft" id="externalKnowledgeSearch" type="button">确认并检索外部知识</button></label><div id="externalKnowledgeResults"></div><section id="externalKnowledgeReader" hidden><p class="field-hint" id="externalKnowledgeSourceLabel"></p><pre class="memory-editor" id="externalKnowledgeContent"></pre><button class="btn btn-soft" id="externalKnowledgeMore" type="button" hidden>确认读取后续页</button></section></div></section>
       <section class="settings-card" id="workspaceShareCard" hidden><h2>扫码／链接连接工作区</h2><p class="panel-note">电脑主动连接你的自建 HTTPS 中转，手机流量也能查看当前工作区。默认只读，控制权限逐设备授予。</p><button class="btn btn-soft" id="settingsWorkspaceShareBtn" type="button" aria-haspopup="dialog" aria-controls="workspaceShareDialog">连接工作区</button><p class="field-hint">需要先部署自建中转。不会自动上传数据或打开电脑公网端口。</p></section>
       <div class="settings-card" id="integrationsUnavailable"><h2>手机与外部连接</h2><p class="panel-note">微信连接需要桌面版的 Windows 安全存储。在支持的桌面环境中，可扫码绑定并查看工作区任务状态。</p></div>
       <section class="settings-card weixin-card" id="weixinCard" aria-labelledby="weixinTitle" hidden>
@@ -2682,7 +2692,10 @@ async function api(path, opts) {
   const historyAction = /^\/api\/sessions\/[^/]+\/history\/(preview|edit|rewind)$/.test(path) || path === '/api/conversation/generate';
   // The history operation owns its own pending gate. Its request must not be
   // rejected by that same gate after the user has already confirmed the target.
-  const allowed = sharingAction ? canManageSharing() : statisticsAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.statistics : updateOpenAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.desktop : updateSettingsAction ? canOperate() && !app.auth.remote : appearanceAction ? canOperate() && !app.auth.remote && !!app.state.desktop : accountAction ? canOperate() && !app.auth.remote : windowAction ? app.auth.authenticated && app.auth.role === 'operator' && app.state.desktopWindow : updateCheck ? app.auth.authenticated && app.connected : workspaceAction || historyAction ? canOperate() : canControl(sessionAction);
+  const agentModelAction = /^\/api\/agents\/[^/]+\/model$/.test(path);
+  const connectorAction = path === '/api/connectors' || path.startsWith('/api/connectors/');
+  const knowledgeAction = path.startsWith('/api/knowledge/');
+  const allowed = connectorAction ? canManageConnectors() : agentModelAction ? canOperate() : knowledgeAction ? knowledgeLocal() : sharingAction ? canManageSharing() : statisticsAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.statistics : updateOpenAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.desktop : updateSettingsAction ? canOperate() && !app.auth.remote : appearanceAction ? canOperate() && !app.auth.remote && !!app.state.desktop : accountAction ? canOperate() && !app.auth.remote : windowAction ? app.auth.authenticated && app.auth.role === 'operator' && app.state.desktopWindow : updateCheck ? app.auth.authenticated && app.connected : workspaceAction || historyAction ? canOperate() : canControl(sessionAction);
   if (init.method !== 'GET' && !path.startsWith('/api/auth/') && !allowed) {
     const error = new Error(app.auth.role === 'viewer' ? '只读访客不能修改工作区' : '尚未连接，操作未发送');
     error.status = 403;
@@ -4279,6 +4292,7 @@ function syncAccess() {
     node.disabled = !control || node.dataset.resolved === 'true' || node.dataset.submitting === 'true';
   });
   expertChip.disabled = !control || app.sending || expertChip.dataset.submitting === 'true';
+  $('expertModelsBtn').disabled = !canOperate() || app.switchingWorkspace;
   syncSessionMenuAccess();
   syncHistoryActions();
   $('generateEditedMessage').hidden = !app.state.historyGenerationReady || app.auth.role !== 'operator' || !!app.historySessionId;
@@ -4291,6 +4305,7 @@ function syncAccess() {
   $('dashboardRole').textContent = app.auth.authenticated ? (app.auth.role === 'viewer' ? '只读访客 · 无写入权限' : app.auth.required ? '已认证 · 操作员' : '本地操作员') : '等待登录';
   $('dashboardAddress').textContent = location.host;
   syncMemoryAccess();
+  syncConnectorAccess();
   renderRetrySettings();
   syncSkillImport();
   syncPluginMarketAccess();
@@ -4299,6 +4314,169 @@ function syncAccess() {
   renderContextViewer();
   refreshSelectControls();
 }
+
+const connectorUi = { generation: 0, loading: false, pending: false, workspace: '', snapshot: null, page: null };
+function resetConnectorsView() {
+  connectorUi.generation++; connectorUi.loading = false; connectorUi.pending = false; connectorUi.snapshot = null; connectorUi.page = null; connectorUi.workspace = '';
+  $('connectorsList').replaceChildren(); $('externalKnowledgeResults').replaceChildren(); $('externalKnowledgeSource').replaceChildren();
+  $('externalKnowledgeReader').hidden = true; $('externalKnowledgePanel').hidden = true;
+  $('externalKnowledgeContent').textContent = ''; $('externalKnowledgeSourceLabel').textContent = ''; $('externalKnowledgeQuery').value = ''; $('connectorsStatus').textContent = '';
+  const dialog = $('connectorDialog'); if (dialog) { dialog.close(); dialog.remove(); }
+}
+function canManageConnectors() { return canOperate() && !app.auth.remote && !!app.state.connectorsAvailable && !app.switchingWorkspace; }
+function syncConnectorAccess() {
+  $('connectorsCard').hidden = !canManageConnectors();
+  const changing = connectorUi.pending || app.state.connectorsChanging;
+  $('connectorsAdd').disabled = !canManageConnectors() || changing || connectorUi.loading;
+  $('connectorsRefresh').disabled = !canManageConnectors() || connectorUi.loading || connectorUi.pending;
+  $('externalKnowledgeSearch').disabled = !canManageConnectors() || changing;
+  $('connectorsList').querySelectorAll('button').forEach(function (button) { button.disabled = !canManageConnectors() || changing; });
+  const stale = $('connectorDialog');
+  if (!canManageConnectors() && stale) { stale.close(); stale.remove(); }
+}
+async function loadConnectors() {
+  if (!canManageConnectors() || connectorUi.loading) return;
+  const generation = ++connectorUi.generation, workspace = app.state.workspaceId;
+  connectorUi.loading = true; syncConnectorAccess();
+  try {
+    const result = await api('/api/connectors');
+    if (generation !== connectorUi.generation || workspace !== app.state.workspaceId) return;
+    connectorUi.snapshot = result; connectorUi.workspace = workspace;
+    renderConnectors();
+    $('connectorsStatus').textContent = result.error || result.connections.length + ' 个外接配置；浏览列表没有连接外部服务。';
+  } catch (error) { if (generation === connectorUi.generation) $('connectorsStatus').textContent = error.message; }
+  finally { if (generation === connectorUi.generation) { connectorUi.loading = false; syncConnectorAccess(); } }
+}
+function renderConnectors() {
+  const snapshot = connectorUi.snapshot;
+  const list = $('connectorsList'); list.replaceChildren();
+  if (!snapshot) return;
+  const available = [];
+  snapshot.connections.forEach(function (config) {
+    const status = snapshot.statuses.find(function (row) { return row.id === config.id; }) || { state: 'disconnected' };
+    const card = el('div', 'market-card');
+    card.dataset.connectorId = config.id;
+    card.append(el('strong', '', config.name), el('p', 'field-hint', config.id + ' · ' + config.adapter + ' · ' + ({ connected: '已连接', connecting: '连接中', disconnected: '未连接', error: '连接失败' })[status.state] + ' · ' + (config.url || config.command || '自定义适配器')));
+    if (status.error) card.appendChild(el('p', 'mcp-error-text', status.error));
+    const actions = el('div', 'settings-actions');
+    function button(label, action) { const node = el('button', 'btn btn-soft compact-btn', label); node.type = 'button'; node.addEventListener('click', action); actions.appendChild(node); }
+    button(status.state === 'connected' ? '重新连接' : '连接', function () { confirmConnectorOperation(config, 'connect'); });
+    if (status.state === 'connected' || status.state === 'connecting') button('断开', function () { confirmConnectorOperation(config, 'disconnect'); });
+    button('修改', function () { openConnectorEditor(config); });
+    if (status.state === 'connected') button('启用能力', function () { openConnectorCapabilities(config, status); });
+    button('移除', function () { confirmConnectorOperation(config, 'remove'); });
+    card.appendChild(actions);
+    card.appendChild(el('p', 'field-hint', (config.enabledActions || []).length + ' 个已授权动作' + (config.knowledgeEnabled ? ' · 外部知识已启用' : '') + (config.autoConnect ? ' · 明确开启启动连接' : ' · 手动连接')));
+    list.appendChild(card);
+    const approved = config.approvedCapabilities === status.capabilitiesFingerprint;
+    if (status.state === 'connected' && config.knowledgeEnabled && approved) available.push(config);
+  });
+  if (!snapshot.connections.length) list.appendChild(el('p', 'market-empty', '尚无外接服务，点击添加外接；保存不会启动软件。'));
+  const select = $('externalKnowledgeSource'), selected = select.value;
+  select.replaceChildren(); available.forEach(function (config) { select.appendChild(new Option(config.name + ' (' + config.id + ')', config.id)); });
+  if (available.some(config => config.id === selected)) select.value = selected;
+  $('externalKnowledgePanel').hidden = !available.length;
+  syncConnectorAccess();
+}
+async function connectorRequest(path, body, dialog) {
+  const workspace = app.state.workspaceId, generation = connectorUi.generation;
+  connectorUi.pending = true; if (dialog) dialog.busy(true); syncConnectorAccess();
+  try {
+    const result = await api(path, { method: 'POST', body: { ...body, confirmed: true }, timeoutMs: 125000 });
+    if (workspace !== app.state.workspaceId || generation !== connectorUi.generation) return;
+    connectorUi.snapshot = { ...connectorUi.snapshot, ...result };
+    if (dialog) { dialog.busy(false); dialog.close(); }
+    renderConnectors(); $('connectorsStatus').textContent = '外接操作已完成。';
+  } catch (error) { if (workspace === app.state.workspaceId) { if (dialog?.modal.isConnected) dialog.fail(error.message); else $('connectorsStatus').textContent = error.message; } }
+  finally { if (workspace === app.state.workspaceId) { connectorUi.pending = false; if (dialog?.modal.isConnected) dialog.busy(false); syncConnectorAccess(); } }
+}
+function openConnectorEditor(config) {
+  if (!canManageConnectors() || $('connectorDialog') || !connectorUi.snapshot) return;
+  const snapshot = connectorUi.snapshot, workspace = app.state.workspaceId;
+  const dialog = makeDialog('connectorDialog', config ? '修改外接连接' : '添加外接软件或知识库', '只保存连接元数据，不立即启动或联网。凭据只填写环境变量名；本机命令仅使用已安装且信任的程序，不在参数中写 Token／Key。');
+  const id = dialog.field('连接 ID（英文、数字、下划线，建议不超过 20 字）', el('input'), 'connectorId'); id.maxLength = 48; id.value = config?.id || ''; id.disabled = !!config; id.required = true;
+  const name = dialog.field('显示名称', el('input'), 'connectorName'); name.maxLength = 100; name.required = true; name.value = config?.name || '';
+  const category = dialog.field('服务分类（分类不代表权限）', el('select'), 'connectorCategory'); category.append(new Option('软件', 'software'), new Option('知识库', 'knowledge')); category.value = config?.category || 'software';
+  const adapter = dialog.field('接口类型', el('select'), 'connectorAdapter'); (snapshot.adapters || []).forEach(function (row) { adapter.appendChild(new Option(row.description + ' (' + row.id + ')', row.id)); }); adapter.value = config?.adapter || 'http';
+  const url = dialog.field('HTTP / MCP 地址（本机可用 HTTP，其他必须 HTTPS）', el('input'), 'connectorUrl'); url.type = 'url'; url.value = config?.url || ''; url.placeholder = 'http://127.0.0.1:8789';
+  const command = dialog.field('本机程序路径（MCP stdio；与地址二选一）', el('input'), 'connectorCommand'); command.value = config?.command || ''; command.placeholder = '已安装程序的绝对路径';
+  const args = dialog.field('程序参数（JSON 字符串数组，不能填写密钥）', el('textarea'), 'connectorArgs'); args.value = JSON.stringify(config?.args || []);
+  const headers = dialog.field('请求头环境引用（JSON，如 {"Authorization":"SOFTWARE_AUTH"}）', el('textarea'), 'connectorHeaders'); headers.value = JSON.stringify(config?.headersEnv || {});
+  const env = dialog.field('本机环境引用（JSON，如 {"APP_TOKEN":"MY_APP_TOKEN"}）', el('textarea'), 'connectorEnv'); env.value = JSON.stringify(config?.envRefs || {});
+  const timeout = dialog.field('超时（毫秒，100–120000）', el('input'), 'connectorTimeout'); timeout.type = 'number'; timeout.min = 100; timeout.max = 120000; timeout.value = String(config?.timeoutMs || 30000);
+  const bindings = dialog.field('MCP 知识工具绑定（选填 JSON，search / read）', el('textarea'), 'connectorKnowledgeBindings'); bindings.value = config?.knowledgeTools ? JSON.stringify(config.knowledgeTools) : '';
+  const auto = dialog.field('明确允许每次启动自动连接（会执行程序或访问服务）', el('input'), 'connectorAutoConnect'); auto.type = 'checkbox'; auto.checked = !!config?.autoConnect;
+  dialog.submit.textContent = '确认保存（不连接）';
+  dialog.panel.addEventListener('submit', function (event) {
+    event.preventDefault(); if (connectorUi.pending || workspace !== app.state.workspaceId) return;
+    try {
+      const connection = { id: id.value.trim(), name: name.value.trim(), category: category.value, adapter: adapter.value, timeoutMs: Number(timeout.value), autoConnect: auto.checked,
+        enabledActions: [], knowledgeEnabled: false };
+      if (url.value.trim()) connection.url = url.value.trim();
+      if (command.value.trim()) connection.command = command.value.trim();
+      const values = [['args', args.value], ['headersEnv', headers.value], ['envRefs', env.value]];
+      values.forEach(function (row) { const value = JSON.parse(row[1] || (row[0] === 'args' ? '[]' : '{}')); if (row[0] === 'args' ? value.length : Object.keys(value).length) connection[row[0]] = value; });
+      if (bindings.value.trim()) connection.knowledgeTools = JSON.parse(bindings.value);
+      void connectorRequest('/api/connectors', { connection, revision: snapshot.revision, fingerprint: snapshot.fingerprint }, dialog);
+    } catch (error) { dialog.fail('配置 JSON 无效：' + error.message); }
+  });
+  dialog.show(); id.focus();
+}
+function confirmConnectorOperation(config, action) {
+  if (!canManageConnectors() || $('connectorDialog') || !connectorUi.snapshot) return;
+  const snapshot = connectorUi.snapshot;
+  const description = action === 'connect' ? '确认连接 ' + config.name + '？目标：' + (config.url || config.command || config.adapter) + '。这会访问外部服务或启动已配置本机程序；服务可看到连接及后续调用数据。不会安装软件，也不会自动启用新动作。' : action === 'remove' ? '移除 ' + config.name + ' 的连接元数据并断开？不会删除外部软件或知识资料。' : '断开本地连接，撤销其工具并取消等待；已经送达外部软件的副作用可能无法撤回。';
+  const dialog = makeDialog('connectorDialog', ({ connect: '确认外接连接', remove: '移除外接', disconnect: '断开外接' })[action], description);
+  dialog.panel.addEventListener('submit', function (event) { event.preventDefault(); if (!connectorUi.pending) void connectorRequest('/api/connectors/' + encodeURIComponent(config.id) + '/' + action,
+    { revision: snapshot.revision, fingerprint: snapshot.fingerprint }, dialog); });
+  dialog.show(); dialog.cancel.focus();
+}
+function openConnectorCapabilities(config, status) {
+  if (!canManageConnectors() || $('connectorDialog')) return;
+  const snapshot = connectorUi.snapshot, dialog = makeDialog('connectorDialog', '启用 ' + config.name + ' 的能力', '仅启用你勾选的真实能力。软件自报只读不会绕过审批；知识检索也会发送数据到外部服务。');
+  const selected = [];
+  (status.capabilities?.actions || []).forEach(function (action) { const input = dialog.field(action.name + ' · ' + action.description, el('input'), 'capability-' + action.name); input.type = 'checkbox'; input.checked = (config.enabledActions || []).includes(action.name); selected.push({ name: action.name, input }); });
+  let knowledge;
+  if (status.capabilities?.knowledge?.search && status.capabilities.knowledge.read) { knowledge = dialog.field('允许该连接的外部知识搜索与阅读', el('input'), 'connectorKnowledgeEnabled'); knowledge.type = 'checkbox'; knowledge.checked = !!config.knowledgeEnabled; }
+  dialog.panel.addEventListener('submit', function (event) { event.preventDefault(); if (!connectorUi.pending) void connectorRequest('/api/connectors/' + config.id + '/capabilities',
+    { enabledActions: selected.filter(row => row.input.checked).map(row => row.name), knowledgeEnabled: !!knowledge?.checked, revision: snapshot.revision, fingerprint: snapshot.fingerprint, capabilitiesFingerprint: status.capabilitiesFingerprint }, dialog); });
+  dialog.show(); dialog.cancel.focus();
+}
+async function requestExternalKnowledge(action, values) {
+  if (!canManageConnectors() || connectorUi.pending || $('connectorDialog')) return;
+  const connectorId = values.connectorId || $('externalKnowledgeSource').value, workspace = app.state.workspaceId, generation = connectorUi.generation;
+  if (!connectorId) return;
+  const dialog = makeDialog('connectorDialog', action === 'search' ? '确认向外部知识库检索' : '确认读取外部资料', '只向 ' + connectorId + ' 发送此查询／文档 ID；通过当前审批后发出，不查询其他连接、不上传本地库。结果是外部参考数据，不是项目规则。');
+  dialog.panel.addEventListener('submit', async function (event) {
+    event.preventDefault(); if (connectorUi.pending) return;
+    connectorUi.pending = true; dialog.busy(true); syncConnectorAccess();
+    const needsApproval = app.state.approvalMode !== 'yolo';
+    if (needsApproval) { dialog.modal.close(); closeSettings(); }
+    try {
+      const result = await api('/api/connectors/knowledge/' + action, { method: 'POST', body: { ...values, connectorId, confirmed: true }, timeoutMs: 125000 });
+      if (workspace !== app.state.workspaceId || generation !== connectorUi.generation) return;
+      if (action === 'search') {
+        const list = $('externalKnowledgeResults'); list.replaceChildren();
+        result.results.forEach(function (hit) { const row = el('div', 'memory-entry'); row.append(el('p', 'field-hint', (hit.source || '提供方未提供来源') + (hit.version ? ' · 版本 ' + hit.version : ' · 未提供版本')), el('p', 'memory-entry-text', hit.snippet));
+          const read = el('button', 'btn btn-soft compact-btn', '阅读外部来源'); read.type = 'button'; read.addEventListener('click', function () { void requestExternalKnowledge('read', { connectorId, id: hit.id, version: hit.version }); }); row.appendChild(read); list.appendChild(row); });
+        $('connectorsStatus').textContent = result.results.length + ' 个外部片段；相关性不代表事实可信度。';
+      } else {
+        connectorUi.page = result;
+        $('externalKnowledgeReader').hidden = false; $('externalKnowledgeContent').textContent = result.content;
+        $('externalKnowledgeSourceLabel').textContent = (result.source || '提供方未提供来源') + (result.version ? ' · 版本 ' + result.version : ' · 未提供版本');
+        $('externalKnowledgeMore').hidden = !result.cursor;
+      }
+      dialog.busy(false); dialog.close();
+      if (needsApproval) openSettings('integrations');
+    } catch (error) { if (workspace === app.state.workspaceId) { if (dialog.modal.isConnected) dialog.fail(error.message); else $('connectorsStatus').textContent = error.message; } }
+    finally { if (workspace === app.state.workspaceId) { connectorUi.pending = false; if (dialog.modal.isConnected) dialog.busy(false); syncConnectorAccess(); } }
+  });
+  dialog.show(); dialog.cancel.focus();
+}
+$('connectorsRefresh').addEventListener('click', loadConnectors);
+$('connectorsAdd').addEventListener('click', function () { openConnectorEditor(); });
+$('externalKnowledgeSearch').addEventListener('click', function () { void requestExternalKnowledge('search', { query: $('externalKnowledgeQuery').value.trim() }); });
+$('externalKnowledgeMore').addEventListener('click', function () { const page = connectorUi.page; if (page?.cursor) void requestExternalKnowledge('read', { connectorId: page.connectorId, id: page.id, version: page.version, cursor: page.cursor }); });
 
 const sharingUi = { pending: false, serial: 0, status: null, qrDataUrl: '', qrUrl: '', returnFocus: null };
 function canManageSharing() { return canOperate() && !app.auth.remote && !!app.state.sharingAvailable && !app.switchingWorkspace; }
@@ -4429,7 +4607,7 @@ function syncMemoryAccess() {
   $('workspaceMemoryCard').hidden = !memoryIsLocal();
   const running = app.state.busy || (app.state.agents || []).some(function (agent) { return agent.status === 'running'; });
   const canEdit = memoryIsLocal() && canOperate() && memoryEditor.loaded && !memoryEditor.snapshot?.error && !memoryEditor.loading && !memoryEditor.saving && !app.switchingWorkspace && !app.deletingSession && !running && !app.state.memoryProcessing?.active;
-  ['workspaceMemoryEnabled', 'workspaceMemoryContent', 'workspaceMemorySave', 'workspaceMemoryClear', 'memoryAutoProcess', 'memoryThreshold', 'memoryInterval'].forEach(function (id) { $(id).disabled = !canEdit; });
+  ['workspaceMemoryEnabled', 'workspaceMemoryContent', 'workspaceMemorySave', 'workspaceMemoryClear', 'memoryInjectionMode', 'memoryAutoProcess', 'memoryThreshold', 'memoryInterval'].forEach(function (id) { $(id).disabled = !canEdit; });
   $('workspaceMemoryReload').disabled = !memoryIsLocal() || !canOperate() || memoryEditor.loading || memoryEditor.saving;
   $('workspaceMemoryProcess').disabled = !canEdit || !memoryEditor.snapshot?.enabled || memoryEditor.target !== app.state.cwd || !modelConfigured();
   $('workspaceMemoryExport').disabled = !memoryIsLocal() || !memoryEditor.loaded || !!memoryEditor.snapshot?.error;
@@ -4471,6 +4649,7 @@ function acceptMemorySnapshot(snapshot) {
   memoryEditor.conflictRevision = null;
   $('workspaceMemoryContent').value = snapshot.content || '';
   $('workspaceMemoryEnabled').checked = !!snapshot.enabled;
+  $('memoryInjectionMode').value = snapshot.injectionMode || 'full';
   $('workspaceMemoryPath').textContent = snapshot.path || '';
   const processing = snapshot.processing || { auto: true, thresholdChars: 8000, intervalMs: 1800000 };
   $('memoryAutoProcess').checked = processing.auto;
@@ -4489,6 +4668,7 @@ function renderWorkspaceMemory() {
   $('workspaceMemoryBadge').textContent = status && status.enabled ? '已启用' : '已关闭';
   $('workspaceMemoryBadge').classList.toggle('chip-on', !!status && status.enabled);
   syncMemoryAccess();
+  syncKnowledgeAccess();
   syncMemoryEntryAccess();
   if (!memoryIsLocal()) return;
   const currentRow = memoryCatalogUi.rows.find(function (row) { return row.workspace === app.state.cwd; });
@@ -4508,6 +4688,101 @@ function renderWorkspaceMemory() {
     if (memoryEditor.target && !memoryEditor.loaded && !memoryEditor.loading && !memoryEditor.saving && !memoryEditor.dirty) void loadWorkspaceMemory(false);
   }
 }
+
+const knowledgeUi = { version: 0, catalogVersion: 0, searchVersion: 0, readVersion: 0, workspace: '', loading: false, importing: false, documents: [], page: null };
+function knowledgeLocal() { return canOperate() && !app.auth.remote; }
+function syncKnowledgeAccess() {
+  $('knowledgeCard').hidden = !knowledgeLocal();
+  $('knowledgeReadMore').disabled = !knowledgeLocal() || !knowledgeUi.page || knowledgeUi.page.nextOffset === undefined || knowledgeUi.importing;
+  $('knowledgeReference').disabled = !knowledgeUi.page || !canControl();
+  $('knowledgeDocuments').querySelectorAll('button').forEach(function (button) { button.disabled = !knowledgeLocal() || knowledgeUi.importing; });
+  ['knowledgeImportFileBtn', 'knowledgeImportFolderBtn', 'knowledgeRefresh', 'knowledgeSearchBtn'].forEach(function (id) { $(id).disabled = !knowledgeLocal() || knowledgeUi.loading || knowledgeUi.importing; });
+}
+async function loadKnowledge() {
+  if (!knowledgeLocal() || knowledgeUi.loading) return;
+  const workspace = app.state.workspaceId, version = ++knowledgeUi.catalogVersion;
+  knowledgeUi.loading = true; syncKnowledgeAccess();
+  try {
+    const result = await api('/api/knowledge');
+    if (workspace !== app.state.workspaceId || version !== knowledgeUi.catalogVersion) return;
+    knowledgeUi.documents = result.documents || []; knowledgeUi.workspace = workspace;
+    const list = $('knowledgeDocuments'); list.replaceChildren();
+    knowledgeUi.documents.forEach(function (doc) {
+      const row = el('div', 'market-card'); row.appendChild(el('span', 'field-hint', doc.name + ' · ' + doc.lines + ' 行'));
+      const button = el('button', 'btn btn-soft compact-btn', '阅读'); button.type = 'button';
+      button.addEventListener('click', function () { void readKnowledge(doc.id, 1, doc.version); }); row.appendChild(button); list.appendChild(row);
+    });
+    $('knowledgeStatus').textContent = result.errors?.length ? '部分文档不可读：' + result.errors.join('；') : knowledgeUi.documents.length + ' 份本地文档；没有调用模型。';
+  } catch (error) { if (version === knowledgeUi.catalogVersion && workspace === app.state.workspaceId) $('knowledgeStatus').textContent = error.message; }
+  finally { if (version === knowledgeUi.catalogVersion) { knowledgeUi.loading = false; syncKnowledgeAccess(); } }
+}
+async function readKnowledge(id, offset, version, charOffset) {
+  if (!knowledgeLocal() || knowledgeUi.importing) return;
+  const workspace = app.state.workspaceId, generation = ++knowledgeUi.readVersion;
+  try {
+    const result = await api('/api/knowledge/read?id=' + encodeURIComponent(id) + '&offset=' + offset + '&charOffset=' + (charOffset || 0) + (version ? '&version=' + version : ''));
+    if (generation !== knowledgeUi.readVersion || workspace !== app.state.workspaceId) return;
+    knowledgeUi.page = result; $('knowledgeReader').hidden = false;
+    $('knowledgeReaderTitle').textContent = result.id;
+    $('knowledgeReaderSource').textContent = result.source + ' · 行 ' + result.startLine + '–' + result.endLine + ' · 版本 ' + result.version.slice(0, 12);
+    $('knowledgeReaderContent').textContent = result.content;
+    const allowed = knowledgeLocal() && !knowledgeUi.importing && !app.state.busy;
+    $('knowledgeReadMore').disabled = result.nextOffset === undefined || !allowed;
+    $('knowledgeReference').disabled = !canControl();
+  } catch (error) { if (generation === knowledgeUi.readVersion && workspace === app.state.workspaceId) $('knowledgeStatus').textContent = error.message; }
+}
+async function searchKnowledge() {
+  if (!knowledgeLocal() || knowledgeUi.importing) return;
+  const workspace = app.state.workspaceId, version = ++knowledgeUi.searchVersion;
+  try {
+    const result = await api('/api/knowledge/search?q=' + encodeURIComponent($('knowledgeSearchInput').value.trim()));
+    if (version !== knowledgeUi.searchVersion || workspace !== app.state.workspaceId) return;
+    const list = $('knowledgeResults'); list.replaceChildren();
+    result.results.forEach(function (hit) {
+      const row = el('div', 'memory-entry'); row.appendChild(el('p', 'field-hint', hit.source + ' · 行 ' + hit.startLine + '–' + hit.endLine));
+      row.appendChild(el('p', 'memory-entry-text', hit.snippet));
+      const button = el('button', 'btn btn-soft compact-btn', '阅读来源'); button.type = 'button';
+      button.addEventListener('click', function () { void readKnowledge(hit.documentId, hit.startLine || 1, hit.version, hit.charOffset || 0); }); row.appendChild(button); list.appendChild(row);
+    });
+    $('knowledgeStatus').textContent = result.results.length ? '检索到 ' + result.results.length + ' 个片段；词法分数不是可信度。' : '没有匹配的知识；没有调用模型。';
+  } catch (error) { if (version === knowledgeUi.searchVersion && workspace === app.state.workspaceId) $('knowledgeStatus').textContent = error.message; }
+}
+async function importKnowledge(picker) {
+  if (!knowledgeLocal() || knowledgeUi.importing || !picker.files.length) return;
+  const selected = Array.from(picker.files), workspace = app.state.workspaceId, version = ++knowledgeUi.version;
+  knowledgeUi.importing = true; syncKnowledgeAccess();
+  try {
+    if (selected.length > 128 || selected.some(file => file.size > 256 * 1024) || selected.reduce((sum, file) => sum + file.size, 0) > 4 * 1024 * 1024) throw new Error('导入最多 128 个文件、每个 256 KiB、总计 4 MiB。');
+    if (selected.some(file => !/\.(md|txt)$/i.test(file.name))) throw new Error('仅支持 Markdown／TXT，请去掉其他文件。');
+    const files = await Promise.all(selected.map(async function (file) { return { path: file.webkitRelativePath || file.name, content: new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer()) }; }));
+    if (workspace !== app.state.workspaceId || version !== knowledgeUi.version) return;
+    const result = await api('/api/knowledge/import', { method: 'POST', body: { files: files } });
+    if (workspace !== app.state.workspaceId || version !== knowledgeUi.version) return;
+    $('knowledgeStatus').textContent = '已导入 ' + result.imported + ' 份文档；没有执行文件或调用模型。';
+    knowledgeUi.workspace = ''; mentionUi.workspace = '';
+  } catch (error) { if (version === knowledgeUi.version) $('knowledgeStatus').textContent = error.message; }
+  finally { picker.value = ''; if (version === knowledgeUi.version) { knowledgeUi.importing = false; syncKnowledgeAccess(); } }
+  if (workspace === app.state.workspaceId && version === knowledgeUi.version) void loadKnowledge();
+}
+$('knowledgeRefresh').addEventListener('click', loadKnowledge);
+$('knowledgeSearchBtn').addEventListener('click', searchKnowledge);
+$('knowledgeImportFileBtn').addEventListener('click', function () { $('knowledgeImportFile').click(); });
+$('knowledgeImportFolderBtn').addEventListener('click', function () { $('knowledgeImportFolder').click(); });
+$('knowledgeImportFile').addEventListener('change', function () { void importKnowledge(this); });
+$('knowledgeImportFolder').addEventListener('change', function () { void importKnowledge(this); });
+$('knowledgeReadMore').addEventListener('click', function () { const page = knowledgeUi.page; if (page && page.nextOffset !== undefined) void readKnowledge(page.id, page.nextOffset, page.version, page.nextCharOffset); });
+$('knowledgeReference').addEventListener('click', function () { if (knowledgeUi.page && canControl()) { insertReference({ token: '@[knowledge:' + encodeURIComponent(knowledgeUi.page.id) + ']' }); closeSettings(); } });
+$('memorySearchBtn').addEventListener('click', async function () {
+  if (!memoryIsLocal()) return;
+  const workspace = app.state.workspaceId;
+  try {
+    const result = await api('/api/workspace/memory/search?q=' + encodeURIComponent($('memorySearchInput').value.trim()));
+    if (workspace !== app.state.workspaceId) return;
+    const list = $('memorySearchResults'); list.replaceChildren();
+    result.results.forEach(function (hit) { list.appendChild(el('p', 'memory-entry-text', hit.snippet)); });
+    $('memorySearchStatus').textContent = result.results.length + ' 个相关片段 · revision ' + result.revision + '；不包含待整理或停用内容。';
+  } catch (error) { if (workspace === app.state.workspaceId) $('memorySearchStatus').textContent = error.message; }
+});
 
 function paintMemoryCatalog() {
   const list = $('workspaceMemoryList');
@@ -4578,7 +4853,7 @@ async function saveWorkspaceMemory(clear) {
   memoryMessage('正在保存记忆…');
   syncMemoryAccess();
   const patch = { revision: memoryEditor.snapshot.revision, fingerprint: memoryEditor.snapshot.fingerprint,
-    ...(clear ? { content: '', clearPending: true, confirmed: true } : { content: $('workspaceMemoryContent').value, enabled: $('workspaceMemoryEnabled').checked,
+    ...(clear ? { content: '', clearPending: true, confirmed: true } : { content: $('workspaceMemoryContent').value, enabled: $('workspaceMemoryEnabled').checked, injectionMode: $('memoryInjectionMode').value,
       processing: { auto: $('memoryAutoProcess').checked, thresholdChars: Number($('memoryThreshold').value), intervalMs: Math.round(Number($('memoryInterval').value) * 60000) } }) };
   try {
     const snapshot = await api('/api/workspace/memory?workspace=' + encodeURIComponent(memoryEditor.target), { method: 'POST', body: patch });
@@ -4598,6 +4873,7 @@ async function saveWorkspaceMemory(clear) {
 
 $('workspaceMemoryContent').addEventListener('input', function () { memoryEditor.dirty = true; updateMemoryCount(); });
 $('workspaceMemoryEnabled').addEventListener('change', function () { memoryEditor.dirty = true; });
+$('memoryInjectionMode').addEventListener('change', function () { memoryEditor.dirty = true; });
 $('workspaceMemorySave').addEventListener('click', function () { void saveWorkspaceMemory(false); });
 $('workspaceMemoryClear').addEventListener('click', function () { void saveWorkspaceMemory(true); });
 $('workspaceMemoryReload').addEventListener('click', function () { void loadWorkspaceMemory(true); });
@@ -4750,8 +5026,9 @@ function selectSettingsSection(section, focus) {
   if (section === 'market') renderMarket();
   if (section === 'skills') renderSkills();
   if (section === 'mcp') renderMcp();
+  if (section === 'integrations') void loadConnectors();
   if ((section === 'account' || section === 'models') && !app.account.loading && !app.account.state) void loadSakuraAccount();
-  if (section === 'workspace') renderWorkspaceMemory();
+  if (section === 'workspace') { renderWorkspaceMemory(); if (knowledgeUi.workspace !== app.state.workspaceId) void loadKnowledge(); }
   if (section === 'archives') void loadArchives();
   refreshSelectControls();
   if (focus) $(settingsPanelId(section)).focus({ preventScroll: true });
@@ -4884,6 +5161,14 @@ function onWorkspaceChanged(newCwd, previousCwd) {
   closeMentionMenu(); mentionUi.version++; mentionUi.workspace = ''; mentionUi.loading = false; mentionUi.candidates = [];
   memoryCatalogUi.version++; memoryCatalogUi.workspace = ''; memoryCatalogUi.loading = false; memoryCatalogUi.rows = [];
   resetMemoryEditor();
+  resetConnectorsView();
+    const dialog = $('agentModelDialog');
+    if (dialog) { dialog.close(); dialog.remove(); }
+    const expertsDialog = $('expertModelsDialog');
+    if (expertsDialog) { expertsDialog.close(); expertsDialog.remove(); }
+    knowledgeUi.version++; knowledgeUi.catalogVersion++; knowledgeUi.searchVersion++; knowledgeUi.readVersion++;
+  knowledgeUi.workspace = ''; knowledgeUi.loading = false; knowledgeUi.importing = false; knowledgeUi.documents = []; knowledgeUi.page = null;
+  $('knowledgeDocuments').replaceChildren(); $('knowledgeResults').replaceChildren(); $('knowledgeReader').hidden = true;
   closeContextViewer();
   if ($('contextClearDialog')) $('contextClearDialog').close();
   if ($('contextSettingsDialog')) $('contextSettingsDialog').close();
@@ -5210,6 +5495,38 @@ function renderExpertChip() {
   expertChip.classList.toggle('chip-on', on);
 }
 
+const expertModelUi = { workspace: '', choices: null, fingerprint: '' };
+$('expertModelsBtn').addEventListener('click', async function () {
+  if (!canOperate() || $('expertModelsDialog')) return;
+  const workspace = app.state.workspaceId;
+  const dialog = makeDialog('expertModelsDialog', '各专家独立模型', '只从当前已配置模型推荐。确认后仅设置未来新成员，已存在成员保留原模型，可在成员卡单独切换。');
+  dialog.submit.disabled = true; dialog.submit.textContent = '确认专家模型'; dialog.show();
+  try {
+    const result = await api('/api/experts/models');
+    if (workspace !== app.state.workspaceId || !dialog.modal.isConnected) return;
+    const controls = {};
+    result.experts.forEach(function (expert) {
+      const select = el('select');
+      result.catalog.forEach(function (choice, index) { select.appendChild(new Option(choice.adapter + '/' + choice.model, String(index))); });
+      const preferred = expertModelUi.workspace === workspace ? expertModelUi.choices?.[expert.key] : null;
+      const choice = preferred || expert.recommendation;
+      select.value = String(Math.max(0, result.catalog.findIndex(function (row) { return row.adapter === choice?.adapter && row.model === choice?.model; })));
+      select.disabled = !!expert.existingId;
+      dialog.field(expert.name + (expert.existingId ? '（已存在，保留原选择）' : ''), select, 'expert-model-' + expert.key);
+      const reason = el('p', 'field-hint', expert.recommendation?.reason || '目录未提供足够能力信息，请手动选择。'); dialog.panel.insertBefore(reason, dialog.submit.parentElement);
+      controls[expert.key] = select;
+    });
+    dialog.submit.disabled = !result.catalog.length;
+    dialog.panel.addEventListener('submit', function (event) {
+      event.preventDefault(); if (dialog.submit.disabled) return;
+      const choices = {};
+      result.experts.filter(function (expert) { return !expert.existingId; }).forEach(function (expert) { choices[expert.key] = result.catalog[Number(controls[expert.key].value)]; });
+      expertModelUi.workspace = workspace; expertModelUi.choices = choices; expertModelUi.fingerprint = result.catalogFingerprint;
+      dialog.close();
+    });
+  } catch (error) { dialog.fail(error.message); }
+});
+
 expertChip.addEventListener('click', async function () {
   if (!canControl() || app.sending || expertChip.dataset.submitting === 'true') return;
   const wasOn = !!app.state.expertMode;
@@ -5219,7 +5536,9 @@ expertChip.addEventListener('click', async function () {
   expertChip.dataset.submitting = 'true';
   syncAccess();
   try {
-    await api(wasOn ? '/api/experts/stop' : '/api/experts/start', { method: 'POST', body: { sessionId: sessionId } });
+    const models = !wasOn && expertModelUi.workspace === workspace && expertModelUi.choices ? expertModelUi.choices : undefined;
+    await api(wasOn ? '/api/experts/stop' : '/api/experts/start', { method: 'POST', body: { sessionId: sessionId,
+      ...(models ? { models: models, confirmedModels: true, catalogFingerprint: expertModelUi.fingerprint } : {}) } });
     if (!current()) return;
     // SSE or another operator may already have changed the mode again. A late
     // command response is not authoritative; reconcile the current snapshot.
@@ -6841,7 +7160,7 @@ function loadCommands() {
 }
 
 /* Typed @ references: the menu fetches metadata, never full memory/history bodies. */
-const REFERENCE_LABELS = { skill: 'Skill', session: '会话', agent: '智能体', 'agent-type': '智能体类型', memory: '记忆' };
+const REFERENCE_LABELS = { skill: 'Skill', session: '会话', agent: '智能体', 'agent-type': '智能体类型', memory: '记忆', knowledge: '知识' };
 function mentionQuery() {
   const before = input.value.slice(0, input.selectionStart);
   const match = /(?:^|\s)@([^\s\[\]]*)$/.exec(before);
@@ -7102,8 +7421,10 @@ function openSpawnModal() {
     types.forEach(function (t) { typeSel.appendChild(new Option(t.name + ' — ' + t.description, t.name)); });
     dialog.field('预定义类型', typeSel, 'spawnType');
   }
-  const model = dialog.field('模型（可选）', el('input'), 'spawnModel');
-  model.placeholder = '留空使用默认模型或类型定义';
+  const modelChoices = app.state.modelCatalog || [];
+  const model = dialog.field('模型（可选）', el('select'), 'spawnModel');
+  model.appendChild(new Option('使用默认模型或类型定义', ''));
+  modelChoices.forEach(function (choice, index) { model.appendChild(new Option(choice.adapter + '/' + choice.model, String(index))); });
   const sys = dialog.field('专属指令（可选）', el('textarea'), 'spawnSystem');
   sys.placeholder = '例如：只读检查代码质量，不修改文件';
   const task = dialog.field('初始任务（可选）', el('textarea'), 'spawnTask');
@@ -7121,7 +7442,8 @@ function openSpawnModal() {
           method: 'POST',
           body: {
             name: name.value.trim() || undefined,
-            model: model.value.trim() || undefined,
+            model: model.value !== '' ? modelChoices[Number(model.value)].model : undefined,
+            modelAdapter: model.value !== '' ? modelChoices[Number(model.value)].adapter : undefined,
             systemPrompt: sys.value.trim() || undefined,
             agent: typeSel && typeSel.value ? typeSel.value : undefined
           }
@@ -7279,7 +7601,8 @@ function renderHeader() {
         modelSel.appendChild(opt);
       });
     }
-    const def = unique.find(function (u) { return u.default; });
+    const current = unique.find(function (u) { return u.value === app.state.model || u.label.endsWith('/' + app.state.model); });
+    const def = current || unique.find(function (u) { return u.default; });
     if (def) modelSel.value = def.value;
   } else {
     modelSel.hidden = true;
@@ -7959,13 +8282,48 @@ setInterval(function () {
   if (inspectorVisible() && app.layout.panel === 'team' && app.view !== 'settings') void loadCollaboration(false);
 }, 7000);
 
+function agentModelBlocked(agent) { return !canOperate() || agent.modelBusy || agent.status === 'running' || app.switchingWorkspace; }
+async function openAgentModel(agent, initial) {
+  if (agentModelBlocked(agent) || $('agentModelDialog')) return;
+  const workspace = app.state.workspaceId;
+  const dialog = makeDialog('agentModelDialog', '为 ' + (agent.name || agent.id) + ' 选择模型', '推荐不会自动应用。确认只影响该智能体后续回合，不改变其他成员或全局默认。');
+  dialog.submit.textContent = '确认使用模型';
+  const select = dialog.field('模型与已配置提供方', el('select'), 'agentModelSelect');
+  const reason = el('p', 'field-hint', '正在读取当前目录与推荐…'); dialog.panel.insertBefore(reason, dialog.submit.parentElement);
+  dialog.submit.disabled = true; dialog.show();
+  try {
+    const result = await api('/api/agents/' + encodeURIComponent(agent.id) + '/model');
+    if (workspace !== app.state.workspaceId || !dialog.modal.isConnected) return;
+    result.catalog.forEach(function (choice, index) { select.appendChild(new Option(choice.adapter + '/' + choice.model, String(index))); });
+    const recommendation = result.recommendation;
+    const chosen = result.catalog.findIndex(function (choice) { return initial ? choice.model === initial || choice.adapter === initial : choice.model === recommendation?.model && choice.adapter === recommendation?.adapter; });
+    select.value = String(Math.max(0, chosen));
+    reason.textContent = recommendation?.reason || '没有可用推荐，可从目录手动选择。';
+    dialog.submit.disabled = !result.catalog.length || !!result.agent.modelBusy;
+    dialog.panel.addEventListener('submit', async function (event) {
+      event.preventDefault(); if (dialog.submit.disabled) return;
+      const choice = result.catalog[Number(select.value)]; if (!choice) return;
+      dialog.busy(true);
+      try {
+        const saved = await api('/api/agents/' + encodeURIComponent(agent.id) + '/model', { method: 'POST', body: { ...choice, confirmed: true, catalogFingerprint: result.catalogFingerprint } });
+        if (workspace !== app.state.workspaceId) return;
+        const current = findAgent(agent.id); if (current) Object.assign(current, saved.agent);
+        if (agent.role === 'main') app.state.model = saved.agent.model;
+        dialog.busy(false); dialog.close();
+        api('/api/state').then(applyState).catch(function () {});
+      } catch (error) { dialog.busy(false); dialog.fail(error.message); }
+    });
+    select.focus();
+  } catch (error) { dialog.fail(error.message); }
+}
+
 let agentRenderSignature = '';
 function renderAgents() {
   renderCollaboration();
   renderExpertSessionHistory();
   $('summarizeBtn').hidden = !app.state.expertSummaryAvailable;
   const signature = JSON.stringify([app.state.workspaceId, app.auth.authenticated, app.auth.role, app.connected,
-    (app.state.agents || []).map(function (a) { return [a.id, a.name, a.role, a.status, a.model, a.sessionId, a.description, a.error, a.expert]; })]);
+    (app.state.agents || []).map(function (a) { return [a.id, a.name, a.role, a.status, a.model, a.modelAdapter, a.modelBusy, a.sessionId, a.description, a.error, a.expert]; })]);
   // Unrelated state frames must not replace the same action buttons between
   // pointer-down/up or discard their keyboard focus. Access flags are still
   // reconciled by syncAccess after every snapshot.
@@ -8001,13 +8359,15 @@ function renderAgents() {
     head.appendChild(el('span', 'agent-status', labels[a.status] || a.status));
     const meta = el('div', 'agent-meta');
     meta.appendChild(el('span', 'role-badge' + (a.expert ? ' expert' : ''), a.role === 'main' ? '主智能体' : (a.expert ? '专家' : '子智能体')));
-    const model = el('span', 'agent-model', a.model || '默认模型');
-    model.title = a.model || '默认模型';
+    const model = el('span', 'agent-model', (a.modelAdapter ? a.modelAdapter + '/' : '') + (a.model || '默认模型'));
+    model.title = model.textContent;
     meta.appendChild(model);
     row.append(head, meta);
     if (a.description) row.appendChild(el('p', 'agent-description', a.description));
     if (a.error) row.appendChild(el('p', 'form-error', a.error));
     const actions = el('div', 'agent-actions');
+    const chooseModel = el('button', 'agent-action agent-model-choose', '选择／推荐模型'); chooseModel.type = 'button'; chooseModel.disabled = agentModelBlocked(a);
+    chooseModel.addEventListener('click', function () { const current = findAgent(a.id); if (current) void openAgentModel(current); }); actions.appendChild(chooseModel);
     if (a.role !== 'main') {
       const message = writeControl(el('button', 'agent-action agent-message', '发消息'));
       message.type = 'button';
@@ -8408,7 +8768,14 @@ function applyState(st) {
   if (Array.isArray(st.tools)) app.state.tools = st.tools;
   if (Array.isArray(st.plugins)) app.state.plugins = st.plugins;
   if (Array.isArray(st.mcp)) app.state.mcp = st.mcp;
+  if (st.connectorsAvailable !== undefined) app.state.connectorsAvailable = st.connectorsAvailable;
+  if (st.connectorsChanging !== undefined) app.state.connectorsChanging = st.connectorsChanging;
+  if (st.connectorsRevision !== undefined && st.connectorsRevision !== app.state.connectorsRevision) {
+    app.state.connectorsRevision = st.connectorsRevision;
+    if (app.settingsSection === 'integrations' && !connectorUi.pending && !connectorUi.loading) void loadConnectors();
+  }
   if (Array.isArray(st.models)) app.state.models = st.models;
+  app.state.modelCatalog = Array.isArray(st.modelCatalog) ? st.modelCatalog : [];
   if (Array.isArray(st.providers)) app.state.providers = st.providers;
   app.state.update = st.update || null;
   app.state.updatePageUrl = st.updatePageUrl || '';
@@ -9490,6 +9857,7 @@ function showLogin(message) {
   app.state.workspaceMemory = null;
   app.state.desktopWindow = false;
   resetMemoryEditor();
+  resetConnectorsView(); app.state.connectorsAvailable = false; app.state.connectorsChanging = false; app.state.connectorsRevision = -1;
   renderDesktopWindow();
   clearWeixinView();
   ['sessions', 'agents', 'tools', 'plugins', 'mcp', 'skills', 'models', 'todos', 'agentTypes', 'pendingRequests'].forEach(function (key) { app.state[key] = []; });
@@ -9743,6 +10111,13 @@ function handleFrame(f) {
         renderAgents();
       }
       break;
+    case 'agent/model': {
+      const agent = findAgent(f.id);
+      if (agent) { agent.model = f.model; agent.modelAdapter = f.modelAdapter; }
+      if (agent && agent.role === 'main') app.state.model = f.model;
+      renderAgents(); renderHeader();
+      break;
+    }
     case 'agent/status': {
       const arr2 = Array.isArray(app.state.agents) ? app.state.agents : (app.state.agents = []);
       const a = arr2.find(function (x) { return x.id === f.id; });
@@ -10092,12 +10467,9 @@ themeBtn.addEventListener('click', function () {
 });
 
 modelSel.addEventListener('change', function () {
-  api('/api/settings', { method: 'POST', body: { model: modelSel.value } }).then(function () {
-    if (sakuraManagedUpstream()) void loadSakuraAccount();
-  }).catch(function (e) {
-    renderHeader();
-    addNotice({ level: 'error', message: '模型切换失败：' + e.message });
-  });
+  const main = (app.state.agents || []).find(function (agent) { return agent.role === 'main'; });
+  if (main) void openAgentModel(main, modelSel.value);
+  renderHeader();
 });
 
 compactModelSel.addEventListener('change', function () {

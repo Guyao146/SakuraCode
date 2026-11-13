@@ -19,6 +19,8 @@ import type { ChatAttachment } from '../src/core/attachments.js'
 import type { TurnMetrics } from '../src/core/types.js'
 import type { DesktopViewport } from '../src/util/viewport.js'
 import { defaultStatisticsSettings, StatisticsFileStore } from '../src/desktop/statistics.js'
+import type { ConnectorSnapshot, ExternalKnowledgeSearch, ExternalKnowledgeRead } from '../src/connectors/types.js'
+const exampleBridgeModule = './example-connector-bridge.mjs'
 
 const exec = promisify(execFile)
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -489,6 +491,43 @@ module.exports = { name: 'synthetic-sakuraapi-transport', inject: ['jobs'], appl
   const sourceHash = createHash('sha256').update(sourceHtml).digest('hex')
   assert.equal(createHash('sha256').update(ui).digest('hex'), sourceHash, 'served UI must match the latest sources')
   console.log(`Embedded UI SHA-256 matches source: ${sourceHash}`)
+  const { startExampleBridge } = await import(exampleBridgeModule) as { startExampleBridge(): Promise<{ url: string; requests: Array<{ path: string }>; close(): Promise<void> }> }
+  const connectorBridge = await startExampleBridge()
+  try {
+    const connectors = await (await request(first.url + 'api/connectors')).json() as ConnectorSnapshot
+    assert.deepEqual(connectors.connections, [])
+    const savedConnectorResponse = await post(first.url + 'api/connectors', { confirmed: true, revision: connectors.revision, fingerprint: connectors.fingerprint,
+      connection: { id: 'smoke', name: 'Synthetic packaged connector', category: 'knowledge', adapter: 'http', url: connectorBridge.url } })
+    assert.equal(savedConnectorResponse.status, 200)
+    const savedConnector = await savedConnectorResponse.json() as ConnectorSnapshot
+    assert.equal(connectorBridge.requests.length, 0, 'saving a connector never contacts the external service')
+    const connectResponse = await post(first.url + 'api/connectors/smoke/connect', { confirmed: true, revision: savedConnector.revision, fingerprint: savedConnector.fingerprint })
+    assert.equal(connectResponse.status, 200)
+    const connectedConnector = await connectResponse.json() as ConnectorSnapshot
+    assert.equal(connectedConnector.statuses[0]?.state, 'connected')
+    const enableResponse = await post(first.url + 'api/connectors/smoke/capabilities', { confirmed: true, revision: connectedConnector.revision,
+      fingerprint: connectedConnector.fingerprint, capabilitiesFingerprint: connectedConnector.statuses[0]?.capabilitiesFingerprint,
+      enabledActions: ['status'], knowledgeEnabled: true })
+    assert.equal(enableResponse.status, 200)
+    const enabledConnector = await enableResponse.json() as ConnectorSnapshot
+    assert.equal((await post(first.url + 'api/settings', { approvalMode: 'yolo' })).status, 200)
+    const searchResponse = await post(first.url + 'api/connectors/knowledge/search', { confirmed: true, connectorId: 'smoke', query: '示例' })
+    assert.equal(searchResponse.status, 200)
+    const knowledgeResults = await searchResponse.json() as ExternalKnowledgeSearch
+    assert.equal(knowledgeResults.results[0]?.source, 'synthetic:guide')
+    const readResponse = await post(first.url + 'api/connectors/knowledge/read', { confirmed: true, connectorId: 'smoke', id: 'guide', version: knowledgeResults.results[0]?.version })
+    assert.equal(readResponse.status, 200)
+    const externalPage = await readResponse.json() as ExternalKnowledgeRead
+    assert.ok(externalPage.content.includes('不代表已连接真实第三方服务'))
+    assert.equal(externalPage.version, knowledgeResults.results[0]?.version)
+    assert.equal(mock.requests.length, 0, 'connector setup and local reference queries never call the model')
+    assert.equal((await post(first.url + 'api/connectors/smoke/disconnect', { confirmed: true })).status, 200)
+    assert.equal((await post(first.url + 'api/connectors/smoke/remove', { confirmed: true, revision: enabledConnector.revision, fingerprint: enabledConnector.fingerprint })).status, 200)
+    assert.equal((await post(first.url + 'api/settings', { approvalMode: 'default' })).status, 200)
+    assert.equal((await (await request(first.url + 'api/connectors')).json() as ConnectorSnapshot).connections.length, 0)
+    verifiedFeatures.push('packaged connector v1 save without network, confirmed capability discovery/enable, versioned synthetic knowledge search/read, disconnect/removal and zero model requests')
+    console.log('Packaged external connector discovery, capability confirmation, versioned reference read and disconnect PASS')
+  } finally { await connectorBridge.close() }
   await browser.waitFor("document.body.classList.contains('desktop-shell') && !document.getElementById('desktopWindowControls').hidden")
   assert.equal(first.frameless, true)
   let native = await nativeWindow(first)
@@ -1610,10 +1649,16 @@ server.listen(0, '127.0.0.1', () => console.log('NATIVE_HISTORY_BACKGROUND_URL=h
   verifiedFeatures.push('compiled message edit, independent branch, persisted native write preimage, confirmed code restore, single regeneration and conversation rewind')
   verifiedFeatures.push('running background preview permits conversation-only edit/rewind without file restoration; code restore stays blocked until the job exits')
   await browser.screenshot(path.join(previews, 'desktop-history-rewound.png'))
-  assert.equal((await post(original.url + 'api/account/sakura/logout', {})).status, 200)
+  await browser.click('#sakuraAccountBtn')
+  await browser.waitFor("!document.getElementById('sakuraLogout').hidden && !document.getElementById('sakuraLogout').disabled")
+  await browser.click('#sakuraLogout')
+  await browser.waitFor("!document.getElementById('sakuraLogin').hidden && document.getElementById('sakuraLogout').hidden")
   assert.equal(await fs.stat(path.join(dataDir, 'sakuraapi.json')).then(() => true, () => false), false)
+  assert.equal((await (await request(original.url + 'api/account/sakura')).json() as { phase: string }).phase, 'signed-out')
+  const signedOutAuth = await (await request(original.url + 'api/auth')).json() as { authenticated: boolean; required: boolean; role?: string; remote?: boolean }
+  assert.deepEqual(signedOutAuth, { authenticated: true, required: false, role: 'operator', remote: false }, 'workspace access remains local and unauthenticated in this isolated smoke')
   const signedOut = await (await request(original.url + 'api/state')).json() as { modelStatus: { configured: boolean } }
-  assert.equal(signedOut.modelStatus.configured, false, 'logout disables the fixed model adapter')
+  assert.equal(signedOut.modelStatus.configured, false, 'account logout disables the fixed model adapter')
   const finalCalls = (await fs.readFile(transportLog,'utf8')).trim().split('\n').map(line => JSON.parse(line) as {url:string;method:string})
   assert.equal(finalCalls.filter(row => row.url.endsWith('/auth/client/revoke')).length,1,'only this client session is revoked')
   assert.ok(!finalCalls.some(row => row.url.endsWith('/auth/logout') || row.url.endsWith('/api/v1/keys') && row.method === 'POST'))

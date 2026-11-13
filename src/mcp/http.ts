@@ -20,6 +20,7 @@
  */
 
 import type { JsonSchemaObject, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
+import { boundedResponse } from '../connectors/http.js'
 
 // ---------------------------------------------------------------------------
 // Public contracts
@@ -32,6 +33,8 @@ export interface HttpMcpServerConfig {
   headers?: Record<string, string>
   /** Per-tool-call timeout in ms (default 120000). */
   timeoutMs?: number
+  /** Manager-owned cancellation also covers the initialize handshake. */
+  signal?: AbortSignal
 }
 
 /** Same lifecycle states as the stdio transport's McpServerState. */
@@ -135,8 +138,8 @@ function buildHeaders(state: HttpConnState): Record<string, string> {
     'content-type': 'application/json',
     accept: 'application/json, text/event-stream',
     'mcp-protocol-version': PROTOCOL_VERSION,
+    ...(state.cfg.headers ?? {}),
     ...(state.sessionId ? { 'mcp-session-id': state.sessionId } : {}),
-    ...state.cfg.headers,
   }
 }
 
@@ -163,6 +166,7 @@ async function readSseResponse(
   if (!reader) throw new Error(`mcp http: empty SSE response to "${methodLabel}"`)
   const decoder = new TextDecoder()
   let buffer = ''
+  let bytes = 0
   // Cancelling settles a pending read() (done: true) and releases the socket;
   // the fetch abort alone is not a contract this reader may depend on.
   const cancelOnAbort = (): void => {
@@ -174,6 +178,8 @@ async function readSseResponse(
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
+      bytes += value.byteLength
+      if (bytes > 1024 * 1024) throw new Error('MCP SSE response exceeds its byte budget')
       buffer += decoder.decode(value, { stream: true })
       let index = buffer.indexOf('\n')
       while (index >= 0) {
@@ -221,21 +227,26 @@ async function postJson(
   const timeoutSignal = AbortSignal.timeout(timeoutMs)
   const signals: AbortSignal[] = [controller.signal, timeoutSignal]
   if (extraSignal) signals.push(extraSignal)
+  if (state.cfg.signal) signals.push(state.cfg.signal)
   // One composite for the whole exchange: fetch and the SSE body reader share
   // it so a timeout/caller abort cuts the stream, not just the request.
   const abortSignal = AbortSignal.any(signals)
   try {
     const response = await fetch(state.cfg.url, {
       method: 'POST',
+      redirect: 'error',
       headers: buildHeaders(state),
       body: JSON.stringify(message),
       signal: abortSignal,
     })
     const session = response.headers.get('mcp-session-id')
-    if (session) state.sessionId = session
+    if (session) {
+      if (session.length > 256 || /[\u0000-\u001f\u007f]/.test(session)) throw new Error('invalid MCP session id')
+      state.sessionId = session
+    }
     if (!response.ok) {
-      const body = await response.text().catch(() => '')
-      throw new Error(`mcp http ${methodLabel} failed with status ${response.status}: ${body.slice(0, 200)}`)
+      await response.body?.cancel().catch(() => {})
+      throw new Error(`mcp http ${methodLabel} failed with status ${response.status}`)
     }
     const contentType = response.headers.get('content-type') ?? ''
     if (contentType.includes('text/event-stream')) {
@@ -249,7 +260,7 @@ async function postJson(
       }
       return await readSseResponse(response, requestId, methodLabel, abortSignal)
     }
-    const text = await response.text()
+    const text = await boundedResponse(response, abortSignal)
     if (!text.trim()) return undefined
     let parsed: unknown
     try {
@@ -259,7 +270,7 @@ async function postJson(
     }
     return parsed
   } catch (error) {
-    if (state.closed) throw new Error(`connection to mcp server "${state.name}" was closed`)
+    if (state.closed || state.cfg.signal?.aborted) throw new Error(`connection to mcp server "${state.name}" was closed`)
     if (timeoutSignal.aborted) throw new Error(`mcp request "${methodLabel}" timed out after ${timeoutMs}ms`)
     if (extraSignal?.aborted) throw new Error('mcp tool call aborted')
     throw error
@@ -288,7 +299,7 @@ async function rpc<T>(
     throw new Error(`mcp http: invalid response to "${method}"`)
   }
   const message = parsed as JsonRpcResponse
-  if (!('result' in message) && !('error' in message)) {
+  if (message.id !== id || !('result' in message) && !('error' in message)) {
     throw new Error(`mcp http: invalid JSON-RPC response to "${method}"`)
   }
   if (message.error !== undefined && message.error !== null) {
@@ -381,10 +392,12 @@ export async function connectHttpServer(
 
     let toolCount = 0
     const skipped: string[] = []
+    if (tools.length > 128) throw new Error('MCP tool list exceeds 128 capabilities')
     for (const raw of tools) {
       if (!raw || typeof raw !== 'object') continue
       const tool = raw as { name?: unknown; description?: unknown; inputSchema?: unknown }
       if (typeof tool.name !== 'string' || !tool.name) continue
+      if (Buffer.byteLength(JSON.stringify(tool.inputSchema ?? {})) > 64 * 1024) throw new Error('MCP tool schema exceeds its byte budget')
       const toolName: string = tool.name
       const fullName = `mcp__${name}__${toolName}`.replace(/[^A-Za-z0-9_-]/g, '_')
       const description =
@@ -414,6 +427,7 @@ export async function connectHttpServer(
       close: () => closeConnection(state, unregisterAll, setStatus),
     }
   } catch (error) {
+    await closeConnection(state, unregisterAll, () => {})
     setStatus({ state: 'error', toolCount: 0, error: describeError(error) })
     throw error
   }

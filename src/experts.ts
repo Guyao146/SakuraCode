@@ -87,9 +87,26 @@ export function spawnExperts(
   agents: AgentsService,
   keys?: string[],
   takenNames: ReadonlySet<string> = new Set(agents.list().map((a) => a.name)),
+  models: Readonly<Record<string, { model: string; adapter?: string }>> = {},
 ): { spawned: AgentHandle[]; reused: AgentHandle[]; skipped: string[] } {
   const presets = resolveExperts(keys)
   const roster = agents.list()
+  const choices = new Map<string, { model: string; adapter: string }>()
+  for (const preset of presets) {
+    if (roster.some(agent => agent.meta.role === 'sub' && agent.meta.expert === preset.key)) continue
+    const choice = models[preset.key]
+    if (choice === undefined) continue
+    if (!choice || typeof choice !== 'object' || Array.isArray(choice) || typeof choice.model !== 'string' ||
+        !choice.model || choice.model.length > 256 || /[\x00-\x1f\x7f]/.test(choice.model) ||
+        (choice.adapter !== undefined && typeof choice.adapter !== 'string')) {
+      throw new Error('invalid expert model selection')
+    }
+    const matches = agents.listModels().filter(row => row.model === choice.model && (choice.adapter === undefined || row.adapter === choice.adapter))
+    if (matches.length !== 1) {
+      throw new Error(matches.length ? 'expert model is offered by multiple providers; select a provider explicitly' : 'expert model is not in the current configured catalog')
+    }
+    choices.set(preset.key, { model: choice.model, adapter: matches[0]!.adapter })
+  }
   const occupiedNames = new Set([...takenNames, ...roster.map((a) => a.name)])
   const spawned: AgentHandle[] = []
   const reused: AgentHandle[] = []
@@ -98,12 +115,14 @@ export function spawnExperts(
     const existing = roster.find((a) => a.meta.role === 'sub' && a.meta.expert === preset.key)
     if (existing) { reused.push(existing); continue }
     if (occupiedNames.has(preset.name)) { skipped.push(preset.name); continue }
+    const choice = choices.get(preset.key)
     const handle = agents.spawn({
       name: preset.name,
       seed: '',
       autoStart: false,
       persistentSession: true,
       background: true,
+      ...(choice ? { model: choice.model, modelAdapter: choice.adapter } : {}),
       systemPrompt: preset.systemPrompt,
       tools: preset.tools,
       meta: { role: 'sub', expert: preset.key, description: preset.description },

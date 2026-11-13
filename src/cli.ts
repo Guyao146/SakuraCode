@@ -11,6 +11,7 @@ import * as readline from 'node:readline'
 import { createHarness, BASE_BUNDLE } from './harness.js'
 import { loadConfig, flagsToPatch, deepMerge, resolveProfile, CONFIG_FILES, type SakuraConfig } from './config.js'
 import { resolveModelName } from './core/llm.js'
+import { recommendModel } from './core/model-recommendations.js'
 import type { ApprovalMode } from './core/index.js'
 import { APPROVAL_MODES } from './core/index.js'
 import type { PluginRegistry } from './tools/plugin-manager.js'
@@ -20,7 +21,7 @@ import { cacheHitRate, summarizeUsage } from './util/tokens.js'
 import { estimateRequestContextTokens } from './util/context.js'
 import { spawnExperts } from './experts.js'
 import { UpdateChecker } from './updates.js'
-const VERSION = '1.1.3'
+const VERSION = '1.1.4'
 
 interface ParsedArgs {
   print: boolean
@@ -74,7 +75,7 @@ function usage(): string {
     '  -h, --help           show this help',
     '  --version            show version',
     '',
-    'REPL commands: /help /exit /agents /experts /update /mode /model /thinking /tools /plugins /sessions /resume /skills /compact /memory /export /hooks /permissions /usage',
+    'REPL commands: /help /exit /agents /experts /update /mode /model /thinking /tools /plugins /sessions /resume /skills /compact /memory /export /hooks /permissions /usage /agent-model',
     'Custom commands: .sakura/commands/<name>.md (project) or ~/.sakura/commands/<name>.md → /<name> [args]',
     '',
     `API: set SAKURA_API_KEY, optional SAKURA_BASE_URL, SAKURA_MODEL.`,
@@ -576,7 +577,7 @@ async function main(): Promise<number> {
    */
   function applySelectedModel(): void {
     const model = harness.ctx.llm.selectedModel()
-    if (model) (harness.main() as { model: string }).model = model
+    if (model) { (harness.main() as { model: string }).model = model; (harness.main() as { modelAdapter?: string }).modelAdapter = undefined }
   }
 
   async function handleSlash(text: string): Promise<void> {
@@ -626,6 +627,24 @@ async function main(): Promise<number> {
             console.log(`model switch failed: ${(error as Error).message}`)
           }
         }
+        break
+      }
+      case '/agent-model': {
+        const target = harness.ctx.agents.get(rest[0] || '') ?? harness.ctx.agents.list().find(agent => agent.name === rest[0])
+        if (!target) { console.log('usage: /agent-model <agent-id-or-name> [model] [--adapter=<id>] --confirm'); break }
+        const catalog = harness.ctx.llm.modelCatalog()
+        const suggestion = recommendModel(target, catalog, harness.config.agentModels)
+        if (!rest.includes('--confirm')) {
+          console.log(`current ${target.name}: ${target.modelAdapter ? target.modelAdapter + '/' : ''}${target.model || '(follow default)'}`)
+          if (suggestion) console.log(`recommended ${suggestion.adapter}/${suggestion.model} — ${suggestion.reason}`)
+          console.log('No model changed. Repeat with an explicit model, --adapter=<id>, and --confirm to apply.')
+          break
+        }
+        const model = rest.slice(1).find(value => !value.startsWith('--'))
+        const adapter = rest.find(value => value.startsWith('--adapter='))?.slice('--adapter='.length)
+        if (!model) { console.log('confirmation requires an explicit model'); break }
+        try { const chosen = harness.ctx.agents.setModel(target.id, model, adapter); console.log(`agent model → ${chosen.name}: ${chosen.modelAdapter}/${chosen.model}`) }
+        catch (error) { console.log(`agent model unchanged: ${(error as Error).message}`) }
         break
       }
       case '/agents': {

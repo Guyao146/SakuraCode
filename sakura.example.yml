@@ -8,6 +8,29 @@ profile: default
 #   relayOrigin: https://relay.example.com
 #   registrationTokenEnv: SAKURA_RELAY_REGISTRATION_TOKEN
 
+# Per-agent recommendations, never automatic model changes. Values must already
+# exist in the configured/authorized catalog; do not infer tags from model names.
+# agentModels:
+#   roleModels:
+#     architect: { adapter: default, model: gpt-4o }
+#     implementer: { adapter: default, model: gpt-4o-mini }
+#     reviewer: { adapter: default, model: gpt-4o }
+#   tags:
+#     default/gpt-4o-mini: [coding]
+
+# External software / knowledge connectors. Saving metadata does not connect.
+# New actions stay disabled until locally discovered and explicitly confirmed.
+# .sakura/connectors.json, when present, takes precedence over these initial rows.
+# connectors:
+#   - id: notes
+#     name: External reference library
+#     category: knowledge
+#     adapter: http # http JSON v1 bridge, or mcp stdio / Streamable HTTP
+#     url: https://my-software.example/bridge
+#     headersEnv: { Authorization: MY_SOFTWARE_AUTH } # env value is the complete header
+#     timeoutMs: 30000
+#     autoConnect: false # true explicitly permits process/network access at startup
+
 # Web GUI / remote dashboard. Local-only by default; --host / --port override.
 # Bind 0.0.0.0 only on a trusted LAN/VPN. A non-loopback listener or publicOrigin
 # requires a cryptographically random operator token (32-256 ASCII characters).

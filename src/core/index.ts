@@ -3,7 +3,8 @@
 export { Session, SessionService, sessionPlugin, type SessionMeta } from './session.js'
 export { CheckpointService, CheckpointError, checkpointsPlugin, type CheckpointPlan } from './checkpoints.js'
 export { ConversationHistoryService, messageText, type HistoryMode, type HistoryPreview } from './conversation-history.js'
-export { LLMService, OpenAICompatAdapter, llmPlugin, type OpenAICompatOptions } from './llm.js'
+export { LLMService, OpenAICompatAdapter, llmPlugin, type ModelChoice, type OpenAICompatOptions } from './llm.js'
+export { recommendModel, modelCatalogFingerprint, type AgentModelPreferences, type ModelRecommendation } from './model-recommendations.js'
 export { ToolsService, toolsPlugin, params, type ToolsExecutePayload } from './tools.js'
 export { SystemPromptService, systemPromptPlugin, type PromptSection } from './system-prompt.js'
 export {

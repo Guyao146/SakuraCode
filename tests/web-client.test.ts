@@ -1553,7 +1553,10 @@ browserSuite('web client — real browser', () => {
       const select = document.getElementById('modelSel');
       select.value = 'gui-reasoner'; select.dispatchEvent(new Event('change', {bubbles: true}));
     })()`)
-    await browser.waitFor("document.getElementById('modelSel').value === 'gui-reasoner'")
+    await browser.waitFor("document.getElementById('agentModelDialog')?.open && !document.querySelector('#agentModelDialog button[type=submit]').disabled")
+    expect(adapter.requests).toHaveLength(0)
+    await browser.click('#agentModelDialog button[type=submit]')
+    await browser.waitFor("!document.getElementById('agentModelDialog') && document.getElementById('modelSel').value === 'gui-reasoner'")
     await browser.fill('#input', '检查这个项目')
     await browser.key('Enter')
     await browser.waitFor("document.querySelector('.msg-assist')?.textContent.includes('已完成') && !document.getElementById('sendBtn').classList.contains('busy')")

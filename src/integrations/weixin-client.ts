@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 
 export const WEIXIN_BASE_URL = 'https://ilinkai.weixin.qq.com'
 const CHANNEL_VERSION = '2.4.10'
+const VERSION = '1.1.4'
 const MAX_RESPONSE_BYTES = 1024 * 1024
 
 export interface WeixinCredentials {
@@ -154,7 +155,7 @@ export class WeixinClient implements WeixinTransport {
   }
 
   private botBody(body: Record<string, unknown>): Record<string, unknown> {
-    return { ...body, base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'SakuraCode/1.1.3' } }
+    return { ...body, base_info: { channel_version: CHANNEL_VERSION, bot_agent: `SakuraCode/${VERSION}` } }
   }
 
   async getQr(signal: AbortSignal, tokens: string[] = []): Promise<WeixinQr> {

@@ -8,6 +8,7 @@ using System.Drawing;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -122,8 +123,32 @@ namespace SakuraCode.Desktop
             string temp = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
             {
-                File.WriteAllText(temp, new JavaScriptSerializer().Serialize(value), new UTF8Encoding(false));
-                if (File.Exists(file)) File.Replace(temp, file, null);
+                FileSecurity access = null;
+                FileAttributes attributes = FileAttributes.Normal;
+                if (File.Exists(file))
+                {
+                    using (var check = new FileStream(file, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) { }
+                    access = File.GetAccessControl(file, AccessControlSections.Access);
+                    attributes = File.GetAttributes(file);
+                }
+                byte[] content = new UTF8Encoding(false).GetBytes(new JavaScriptSerializer().Serialize(value));
+                using (var stream = access == null
+                    ? new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None)
+                    : new FileStream(temp, FileMode.CreateNew, FileSystemRights.Write, FileShare.None, 4096, FileOptions.None, access))
+                {
+                    stream.Write(content, 0, content.Length);
+                    stream.Flush(true);
+                }
+                if (access != null)
+                {
+                    // Preserve the old DACL before one same-directory rename; ReplaceFile can fail after a released lock.
+                    var copiedAccess = new FileSecurity();
+                    copiedAccess.SetSecurityDescriptorBinaryForm(access.GetSecurityDescriptorBinaryForm(), AccessControlSections.Access);
+                    File.SetAccessControl(temp, copiedAccess);
+                    File.SetAttributes(temp, attributes);
+                    if (File.GetAttributes(temp) != attributes) throw new IOException("Desktop storage attributes could not be preserved.");
+                    if (!Native.MoveFileEx(temp, file, 0x1 | 0x8)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Desktop settings could not be saved atomically.");
+                }
                 else File.Move(temp, file);
             }
             finally { if (File.Exists(temp)) File.Delete(temp); }
@@ -1443,6 +1468,7 @@ namespace SakuraCode.Desktop
             public IoCounters Io;
             public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
         }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] internal static extern bool MoveFileEx(string existing, string target, uint flags);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] internal static extern IntPtr LoadLibrary(string path);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] internal static extern IntPtr CreateJobObject(IntPtr attributes, string name);
         [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length);

@@ -1,4 +1,5 @@
 /** Accumulate completed main turns and consolidate them only at explicit size/time boundaries. */
+import { createHash } from 'node:crypto'
 import type { Context, PluginModule } from '../kernel/index.js'
 import type { AgentsService } from '../core/agent.js'
 import type { LLMService } from '../core/llm.js'
@@ -27,6 +28,8 @@ function candidate(text: string, maxChars = ENTRY_MAX_CHARS): string {
     .replace(/\b(?:sk-|Bearer\s+)[A-Za-z0-9_.-]{8,}/gi, '[凭据已排除]')
     .replace(/((?:api[_ -]?key|token|password|secret|密码|密钥)\s*[:=]\s*)[^\s,;]+/gi, '$1[已排除]')
     .replace(/<!-- sakura-memory-pending -->/g, '')
+    .replace(/\0/g, '')
+    .replace(/\r\n?/g, '\n')
     .slice(0, maxChars)
 }
 
@@ -37,7 +40,6 @@ export class MemoryProcessor implements MemoryProcessingService {
   private error?: string
   private lastAttemptAt: string | null = null
   private readonly controller = new AbortController()
-  private readonly collected = new Map<string, number>()
   private chain: Promise<unknown> = Promise.resolve()
   private autoInFlight?: Promise<void>
   private isBusy: () => boolean = () => false
@@ -65,7 +67,7 @@ export class MemoryProcessor implements MemoryProcessingService {
       const task = session.events[lastUser] as Extract<SessionEventRecord, { type: 'user/message' }>
       if (task.payload.from || task.payload.source && task.payload.source !== 'user') return
       const last = session.events.at(-1)
-      if (!last || task.seq <= (this.collected.get(sessionId) ?? 0)) return
+      if (!last) return
       const events = session.events.slice(lastUser)
       const userOnly = task.payload.expertMode === true
       if (!userOnly && events.some(event => event.type === 'assistant/attempt' && !event.payload.retry)) return
@@ -76,8 +78,11 @@ export class MemoryProcessor implements MemoryProcessingService {
           event.type === 'user/message' ? event.payload.originalText ?? event.payload.content : event.payload.content ?? ''))}`)
       if (!lines.length || !events.some(event => event.type === 'assistant/message' && !event.payload.tool_calls?.length ||
           userOnly && event.type === 'assistant/attempt' && !event.payload.retry)) return
-      await this.memory.appendPending(`## ${last.time} · 会话 ${sessionId}${userOnly ? ' · 仅用户调整方向' : ''}\n${lines.join('\n\n')}`, this.controller.signal)
-      this.collected.set(sessionId, task.seq)
+      // Keep latest-turn collection bounded; historical turns are not backfilled.
+      const content = lines.join('\n\n').trim()
+      const digest = createHash('sha256').update(content).digest('hex')
+      await this.memory.appendPending(`## ${task.time} · 会话 ${sessionId}${userOnly ? ' · 仅用户调整方向' : ''}\n${content}`, this.controller.signal,
+        { sessionId, userSeq: task.seq, digest })
     })
     this.chain = run.catch(error => {
       if (this.controller.signal.aborted) return

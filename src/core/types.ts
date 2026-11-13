@@ -110,6 +110,8 @@ export interface ToolDefinition {
 
 export interface LLMRequest {
   model?: string
+  /** Local routing for an explicitly selected per-agent model; never sent upstream. */
+  modelAdapter?: string
   messages: ChatMessage[]
   tools?: ToolSchema[]
   signal?: AbortSignal
@@ -195,6 +197,8 @@ export interface ModelAdapter {
   id: string
   defaultModel?: string
   models?: string[]
+  /** Optional per-model metadata reported by an adapter, never inferred from its name. */
+  modelInfo?(model: string): { reasoning?: boolean }
   stream(req: LLMRequest): AsyncIterable<StreamChunk>
 }
 

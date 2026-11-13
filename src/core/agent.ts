@@ -49,6 +49,7 @@ export interface AgentCreateOptions {
   name?: string
   seed: string
   model?: string
+  modelAdapter?: string
   /** Extra prompt section scoped to this agent. */
   systemPrompt?: string
   /** 'full' keeps every tool; 'core' drops the subagent family; or an explicit allow-list. */
@@ -73,6 +74,7 @@ export interface AgentHandle {
   readonly name: string
   readonly sessionId: string
   readonly model: string
+  readonly modelAdapter?: string
   readonly meta: AgentMeta
   status: AgentStatus
   result?: string
@@ -114,6 +116,7 @@ export interface AgentRuntime {
   id: string
   name: string
   model: string
+  modelAdapter?: string
   systemPrompt?: string
   toolFilter?: (name: string) => boolean
   maxSteps: number
@@ -257,6 +260,7 @@ export class DefaultAgentLoop implements AgentLoop {
         const thinking = this.ctx.llm.thinking
         const request = {
           model: agent.model,
+          ...(agent.modelAdapter ? { modelAdapter: agent.modelAdapter } : {}),
           messages,
           tools: toolsSchemas,
           signal,
@@ -513,6 +517,7 @@ export class AgentsService {
         name,
         sessionId: opts.resumeSessionId ?? '(creating…)',
         model: opts.model ?? this.config.defaultModel ?? '',
+        ...(opts.modelAdapter ? { modelAdapter: opts.modelAdapter } : {}),
         meta,
         status: 'idle',
         turn: async (input: string, opts?: TurnOptions) => this.drive(entry, input, opts),
@@ -673,6 +678,23 @@ export class AgentsService {
     return this.ctx.peek<LLMService>('llm')?.listModels() ?? []
   }
 
+  /** Change only this idle agent's future turns; queued work is already accepted. */
+  setModel(id: string, model: string, adapter?: string): AgentHandle {
+    const entry = this.agents.get(id)
+    if (!entry || this.stopping || this.ctx.isDisposed()) throw new Error('agent is unavailable')
+    if (entry.controller || entry.pendingTurns || entry.handle.status === 'running') throw new Error('agent has running or queued turns')
+    const choice = this.ctx.get<LLMService>('llm').resolveModel(model, adapter)
+    entry.handle.model = choice.model
+    entry.handle.modelAdapter = choice.adapter
+    this.ctx.emit('agent/model', { id, model: choice.model, modelAdapter: choice.adapter })
+    return entry.handle
+  }
+
+  isBusy(id: string): boolean {
+    const entry = this.agents.get(id)
+    return !!entry && (entry.pendingTurns > 0 || !!entry.controller || entry.handle.status === 'running')
+  }
+
   /** Mailbox entries count as busy before their run microtask starts. */
   hasPendingTurns(): boolean {
     return [...this.agents.values()].some(entry => entry.pendingTurns > 0)
@@ -685,6 +707,7 @@ export class AgentsService {
    * chain — a turn issued while the agent is running queues behind it.
    */
   private drive(entry: AgentEntry, input: string, opts?: TurnOptions): Promise<TurnResult> {
+    if (this.ctx.peek<{ isChanging(): boolean }>('connectors')?.isChanging()) return (opts?.preparedFiles?.remove() ?? Promise.resolve()).then(() => { throw new Error('external connectors are changing; retry after the confirmed change completes') })
     const target = opts?.checkpoint ?? entry.handle.meta.checkpoint
     const turnGroup = opts?.turnGroup ?? (target ? this.turnGroups.get(`${target.sessionId}:${target.turnSeq}`) : undefined)
     if (turnGroup) {
@@ -731,6 +754,7 @@ export class AgentsService {
           id: handle.id,
           name: handle.name,
           model: handle.model,
+          ...(handle.modelAdapter ? { modelAdapter: handle.modelAdapter } : {}),
           systemPrompt: entry.opts.systemPrompt,
           toolFilter: entry.toolFilter,
           maxSteps: entry.opts.maxSteps ?? this.defaultMaxSteps,
@@ -788,7 +812,7 @@ export class AgentsService {
 }
 
 interface AgentEntry {
-  handle: AgentHandle & { sessionId: string }
+  handle: AgentHandle & { sessionId: string; model: string; modelAdapter?: string }
   opts: AgentCreateOptions
   /** Controller of the in-flight turn only; null when idle (recreated per turn). */
   controller: AbortController | null

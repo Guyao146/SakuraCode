@@ -10,6 +10,9 @@ import type { ChatMessage, LLMRequest, ModelAdapter, StreamChunk, ThinkingLevel,
 import type { RetryService } from './retry.js'
 import { LLMRequestError, retryableStatus, retryAfterMilliseconds } from '../util/retry.js'
 
+/** A model identity is scoped to its registered adapter, not just its display name. */
+export interface ModelChoice { adapter: string; model: string; default: boolean; reasoning?: boolean }
+
 /** A configuration assessment, never a connectivity probe or a credentials dump. */
 export interface ModelStatus {
   adapter: string
@@ -213,9 +216,9 @@ export class LLMService {
   }
 
   /** Safe provider metadata for the workbench; does not perform a network request. */
-  modelStatus(model?: string): ModelStatus {
+  modelStatus(model?: string, modelAdapter?: string): ModelStatus {
     let adapter: ModelAdapter
-    try { adapter = this.pick(model || this.selection) }
+    try { adapter = modelAdapter ? this.adapters.get(this.resolveModel(model || '', modelAdapter).adapter)! : this.pick(model || this.selection) }
     catch {
       return { adapter: '', model: model || '', configured: false, requiresApiKey: false,
         thinking: { supported: false, param: 'none', levels: ['off'] } }
@@ -232,7 +235,9 @@ export class LLMService {
     const local = !!endpoint && /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i.test(endpoint.hostname)
     const requiresApiKey = opts.requiresApiKey ?? !local
     const hasCredential = !!opts.apiKey || Object.entries(opts.headers ?? {}).some(([name, value]) => isCredentialHeader(name) && !!value)
-    const param = opts.thinkingParam && opts.thinkingParam !== 'none' ? opts.thinkingParam : opts.thinkingModel ? 'model' : 'none'
+    const reportedThinking = (adapter as ModelAdapter).modelInfo?.(selectedModel)?.reasoning
+    const param = reportedThinking === false ? 'none' : reportedThinking === true ? 'reasoning_effort' :
+      opts.thinkingParam && opts.thinkingParam !== 'none' ? opts.thinkingParam : opts.thinkingModel ? 'model' : 'none'
     const levels: ThinkingLevel[] = param === 'reasoning_effort' ? ['off', 'low', 'medium', 'high'] : param === 'none' ? ['off'] : ['off', 'high']
     return {
       adapter: adapter.id,
@@ -280,6 +285,30 @@ export class LLMService {
     ) as Array<{ adapter: string; model?: string; default: boolean }>
   }
 
+  /** Safe, finite catalog for explicit choices; no network or credential metadata. */
+  modelCatalog(): ModelChoice[] {
+    const result: ModelChoice[] = [], seen = new Set<string>()
+    for (const row of this.listModels()) {
+      if (!row.model || seen.has(row.adapter + '\0' + row.model)) continue
+      seen.add(row.adapter + '\0' + row.model)
+      const adapter = this.adapters.get(row.adapter)
+      const opts = adapter instanceof OpenAICompatAdapter ? adapter.opts : undefined
+      const reasoning = opts?.thinkingParam && opts.thinkingParam !== 'none' || !!opts?.thinkingModel
+      const explicitInfo = adapter?.modelInfo?.(row.model)
+      const known = explicitInfo?.reasoning ?? (opts ? !!reasoning : undefined)
+      result.push({ adapter: row.adapter, model: row.model, default: row.default, ...(known === undefined ? {} : { reasoning: known }) })
+    }
+    return result.sort((a, b) => a.adapter.localeCompare(b.adapter) || a.model.localeCompare(b.model))
+  }
+
+  /** Resolve an explicit choice without selecting it or falling back to another provider. */
+  resolveModel(model: string, adapter?: string): ModelChoice {
+    if (typeof model !== 'string' || !model || model.length > 256 || /[\x00-\x1f\x7f]/.test(model)) throw new Error('invalid model selection')
+    const matches = this.modelCatalog().filter(row => row.model === model && (adapter === undefined || row.adapter === adapter))
+    if (matches.length !== 1) throw new Error(matches.length ? 'model is offered by multiple providers; select a provider explicitly' : 'model is not in the current configured catalog')
+    return matches[0]!
+  }
+
   /** Registered upstream sites for the settings view; keys/credentials are never included. */
   listProviders(): Array<{ id: string; model?: string; models?: string[]; default: boolean; format?: UpstreamFormat; baseURL?: string }> {
     return [...this.adapters.values()].map((a) => {
@@ -305,8 +334,9 @@ export class LLMService {
     // may also carry '' — `agent.model` is '' until a model is named, and ''
     // is not nullish, so the adapter's `req.model ?? opts.model` fallback would
     // otherwise send an empty `model` field.
-    const requested = req.model || this.selection || undefined
-    const adapter = this.pick(requested)
+    const explicit = req.modelAdapter ? this.resolveModel(req.model || '', req.modelAdapter) : undefined
+    const requested = explicit?.model || req.model || this.selection || undefined
+    const adapter = explicit ? this.adapters.get(explicit.adapter)! : this.pick(requested)
     const model = requested ?? adapter.defaultModel
     const resolved: LLMRequest = model && model !== req.model ? { ...req, model } : req
     const ctx = this.ctx

@@ -9,11 +9,11 @@
 
 - **微内核**（`src/kernel`）：五种事件派发模式（`emit` / `parallel` / `serial` / `bail` / `waterfall`）；一切注册可逆（`on()` / `effect()` 返回 disposer，`dispose()` 按 LIFO 释放）；插件以 `name` / `inject` / `apply(ctx, config)` 挂载，`inject` 声明的服务键未就绪时自动等待（round-robin 重试）。
 - **会话**：append-only JSONL 日志（`.sakura/sessions/<id>/session.jsonl`），"model-visible means logged" —— 每次请求的上下文都能通过 `deriveMessages()` 从日志重建；支持按 session id 恢复（`--resume <id>`）。
-- **工具集**（35 个，按 `read` / `write` / `execute` / `agent` 四类）：
-  - read（14）：`read` · `glob` · `grep` · `web_fetch` · `web_search` · `ask_user` · `skill` · `exit_plan` · `todo_write` · `job_list` · `job_output` · `list_subagent_models` · `list_agents` · `plugin_manager`
-  - write（2）：`write` · `edit`
-  - execute（16）：`bash` · `pwsh` · `job_kill` · `browser_navigate` / `browser_screenshot` / `browser_click` / `browser_type` / `browser_key` / `browser_evaluate` / `browser_close` · `computer_screenshot` / `computer_click` / `computer_move` / `computer_scroll` / `computer_type` / `computer_key`
-  - agent（3）：`subagent` · `send_message` · `interrupt_agent`
+- **工具集**（按 `read` / `write` / `execute` / `agent` 四类；实际列表取决于挂载插件，可用 `/tools` 查看）：
+  - read：`read` · `glob` · `grep` · `web_fetch` · `web_search` · `ask_user` · `skill` · `exit_plan` · `todo_write` · `job_list` · `job_output` · `list_subagent_models` · `list_agents` · `plugin_manager` · `tool_output_read` · `memory_read` · `memory_search` · `knowledge_read` · `knowledge_search`
+  - write：`write` · `edit` · `memory_write`
+  - execute：`external_knowledge_search` · `external_knowledge_read` · 已确认启用的 `connector__…` 动作 · `bash` · `pwsh` · `job_kill` · `browser_navigate` / `browser_screenshot` / `browser_click` / `browser_type` / `browser_key` / `browser_evaluate` / `browser_close` · `computer_screenshot` / `computer_click` / `computer_move` / `computer_scroll` / `computer_type` / `computer_key`
+  - agent：`subagent` · `send_message` · `interrupt_agent`
 - **跨平台 shell**：`bash` / `pwsh` 的解释器在进程内自动发现（`SAKURA_BASH` / `SAKURA_PWSH` 环境变量优先，其次 PATH，最后探测 Git for Windows / MSYS2 / WSL / PowerShell 7 等已知安装位置）——Windows 上装过 Git 就能直接用 `bash` 工具，无需手工配置；缺失时返回可操作的错误而非 `ENOENT`。
 - **工具管道**：每次调用流经 `tools/pre-execute → tools/execute → tools/post-execute` 三级瀑布 —— 监听器可在 pre 阶段拒绝（审批门就是这么实现的）、在 execute 阶段短路、在 post 阶段改写输出。
 - **多智能体**：`subagent` 工具前台/后台委派；`send_message` mailbox 投递、`interrupt_agent` 中断、`list_agents` 查看花名册；子代理工具策略 `full` / `core` / 显式白名单。
@@ -21,7 +21,21 @@
 - **配置**：profile / bundle / plugin rows / `--patch` 多层组合，`--dump-config` 查看最终生效组合。
 - **CLI**：交互式 REPL（斜杠命令）+ one-shot（`-p`）两种用法。
 - **远端运行看板**：`/dashboard` 查看智能体、三列任务进度和待审批事项；支持独立操作员／只读访客令牌、跨设备实时同步与断线恢复，默认仍仅监听本机。
+- **本地记忆与知识库**：长期记忆可切换为按需检索，持久记录已采集来源，避免重启后重复积累；Markdown／TXT 知识资料可本地导入、带来源检索和分页回读，不整库注入、不执行文件或上传到向量服务。
+- **智能体独立模型**：主智能体与协作成员分别选择已配置／授权模型，先显示职责推荐、由你确认后应用；不改变其他成员，运行／排队目标不能切换。入口、配置与边界见 [记忆、知识库和模型说明](docs/memory-knowledge-models.md)。
+- **外接软件与知识库**：设置 → 集成与连接，可添加 MCP 或 HTTP JSON 连接，确认目标、逐项启用能力并按现有审批调用。外部知识按指定来源检索、不广播查询、不自动上传本地库；支持自定义插件适配器。协议、示例和边界见 [外接连接器说明](docs/external-connectors.md)。
 - **扫码连接工作区**：侧栏“连接工作区”生成限时二维码／链接，手机经你部署的自建 HTTPS 中转查看聊天和任务；默认只读，电脑逐设备授予发送／停止权限。不开放电脑公网端口、不转发完整桌面接口。部署与安全边界见 [工作区连接说明](docs/workspace-sharing.md)。
+
+## v1.1.4 更新
+
+本次加入工作区隔离的外接软件／知识库连接器，并优化本地记忆检索和智能体独立选模。完整升级步骤与验证边界见 [v1.1.4 发行说明](docs/releases/v1.1.4.md)。
+
+- **外接软件与知识库**：通过现有 MCP、HTTP JSON v1 或自定义插件适配器连接。保存不启动；连接及能力启用分别确认，动作保留原审批流程。外部知识必须指定来源，不广播、不自动导入本地库；凭据只从环境变量引用，不写进连接配置。详情见 [外接连接器协议](docs/external-connectors.md)。
+- **本地记忆与知识库**：长期记忆支持全文注入或按需检索，并持久记录采集来源；工作区 Markdown／TXT 知识库支持有界搜索、来源版本与分页阅读。
+- **智能体独立选模**：按当前已配置／授权目录给出职责推荐，确认后仅应用于目标成员；运行／排队目标不能切换。
+- **桌面安全存储**：修复 Windows 原子文件替换失败导致设置／账号保存未确认的问题；锁定、只读或保存失败仍拒绝并保留原文件。
+
+旧配置及数据保留；推送发布不会替换已安装的 EXE，需退出旧程序并手动升级。v1.1.2 的匿名统计偏好继续保留。
 
 ## v1.1.3 更新
 

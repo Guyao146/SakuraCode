@@ -48,9 +48,14 @@ import { projectMemoryPlugin } from './plugins/project-memory.js'
 import { workspaceMemoryPlugin } from './plugins/workspace-memory.js'
 import { memoryProcessingPlugin } from './plugins/memory-processing.js'
 import { workspaceMemoryToolsPlugin } from './tools/memory.js'
+import { knowledgePlugin } from './knowledge/plugin.js'
+import { knowledgeToolsPlugin } from './tools/knowledge.js'
 import { modelProfilesPlugin } from './plugins/model-profiles.js'
 import { retryPlugin } from './core/retry.js'
 import { mcpPlugin } from './mcp/index.js'
+import { connectorsPlugin } from './connectors/plugin.js'
+import { connectorToolsPlugin } from './tools/connectors.js'
+import type { ConnectorsService } from './connectors/index.js'
 import { hooksPlugin } from './hooks/index.js'
 import { skillsPlugin } from './skills/index.js'
 import type { Plugin } from './kernel/index.js'
@@ -65,6 +70,7 @@ export const BASE_BUNDLE: Array<{ plugin: Plugin; name: string }> = [
   { name: 'core-identity', plugin: identityPlugin },
   { name: 'core-project-memory', plugin: projectMemoryPlugin },
   { name: 'core-workspace-memory', plugin: workspaceMemoryPlugin },
+  { name: 'core-knowledge', plugin: knowledgePlugin },
   { name: 'core-approval', plugin: approvalPlugin },
   { name: 'core-hooks', plugin: hooksPlugin },
   { name: 'core-retry', plugin: retryPlugin },
@@ -81,6 +87,7 @@ export const BASE_BUNDLE: Array<{ plugin: Plugin; name: string }> = [
   { name: 'core-session-export', plugin: sessionExportPlugin },
   { name: 'tool-fs', plugin: fsToolsPlugin },
   { name: 'tool-workspace-memory', plugin: workspaceMemoryToolsPlugin },
+  { name: 'tool-knowledge', plugin: knowledgeToolsPlugin },
   { name: 'tool-fs-search', plugin: fsSearchPlugin },
   { name: 'tool-shell', plugin: shellToolsPlugin },
   { name: 'tool-jobs', plugin: jobToolsPlugin },
@@ -95,6 +102,8 @@ export const BASE_BUNDLE: Array<{ plugin: Plugin; name: string }> = [
   { name: 'tool-subagent', plugin: subagentToolsPlugin },
   { name: 'tool-subagent-control', plugin: subagentControlPlugin },
   { name: 'mcp-manager', plugin: mcpPlugin },
+  { name: 'core-connectors', plugin: connectorsPlugin },
+  { name: 'tool-connectors', plugin: connectorToolsPlugin },
   { name: 'tool-plugin-manager', plugin: pluginManagerToolPlugin },
 ]
 
@@ -190,16 +199,19 @@ async function composeHarness(ctx: HarnessContext, opts: HarnessOptions): Promis
     setRow('core-agent-defs', { cwd })
     setRow('core-project-memory', { cwd })
     setRow('core-workspace-memory', { cwd })
+    setRow('core-knowledge', { cwd })
     setRow('core-checkpoints', { cwd })
     setRow('tool-fs', { cwd })
     setRow('tool-fs-search', { cwd })
     setRow('tool-shell', { cwd })
     setRow('core-hooks', { cwd })
     setRow('mcp-manager', { cwd })
+    setRow('core-connectors', { cwd })
   }
   // Top-level mcpServers rows feed the mcp-manager plugin (plugins.mcp-manager
   // rows still win when both are present).
   if (config.mcpServers) setRow('mcp-manager', { servers: config.mcpServers })
+  if (config.connectors) setRow('core-connectors', { connections: config.connectors })
   // Top-level models rows feed the model-profiles plugin: named providers
   // switchable via /model and the GUI dropdown.
   if (config.models) setRow('core-model-profiles', { profiles: config.models })
@@ -288,6 +300,9 @@ async function composeHarness(ctx: HarnessContext, opts: HarnessOptions): Promis
       ctx.emit('kernel/error', { event: 'mount', error, plugin: name })
     }
   }
+
+  // Custom adapters register before explicitly configured auto-connections start.
+  await ctx.peek<ConnectorsService>('connectors')?.start()
 
   if (opts.renderer !== false) {
     await ctx.plugin(rendererPlugin, { mode: 'repl', ...opts.renderer })

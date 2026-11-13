@@ -10,6 +10,8 @@
 
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import * as path from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
+import { killProcessTree } from '../core/shell.js'
 import type { Context, Plugin } from '../kernel/index.js'
 import type { ToolsService } from '../core/tools.js'
 import type { JsonSchemaObject, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
@@ -24,6 +26,8 @@ export interface McpServerConfig {
   command?: string
   args?: string[]
   env?: Record<string, string>
+  /** Isolated connectors supply an explicit minimal environment; legacy configs inherit by default. */
+  inheritEnv?: boolean
   /** Streamable HTTP transport: connect to this URL instead of spawning. */
   url?: string
   headers?: Record<string, string>
@@ -125,6 +129,8 @@ interface ServerEntry {
   pending: Map<number | string, PendingRequest>
   /** Unparsed stdout tail (up to the next newline). */
   lineBuf: string
+  decoder: StringDecoder
+  stopped: AbortController
   stderrTail: string
   nextId: number
   /** Set for intentional stops so the exit handler keeps the managed state. */
@@ -203,6 +209,8 @@ export class McpManager implements McpService {
       toolCount: 0,
       pending: new Map(),
       lineBuf: '',
+      decoder: new StringDecoder('utf8'),
+      stopped: new AbortController(),
       stderrTail: '',
       nextId: 0,
       stopping: false,
@@ -218,8 +226,9 @@ export class McpManager implements McpService {
       try {
         const connection = await connectHttpServer(
           name,
-          { url: config.url, headers: config.headers, timeoutMs: config.timeoutMs },
+          { url: config.url, headers: config.headers, timeoutMs: config.timeoutMs, signal: entry.stopped.signal },
           (definition) => {
+            if (entry.stopping || this.servers.get(name) !== entry) throw new Error('MCP connection changed')
             try {
               const dispose = this.toolsService().register(definition)
               entry.disposers.push(dispose)
@@ -239,6 +248,7 @@ export class McpManager implements McpService {
             entry.toolCount = status.toolCount
           },
         )
+        if (entry.stopping || this.servers.get(name) !== entry) { await connection.close(); throw new Error('MCP connection was closed') }
         entry.http = connection
         entry.state = 'connected'
         this.emitStatus(entry)
@@ -258,7 +268,7 @@ export class McpManager implements McpService {
       const resolved = resolveCommand(config.command)
       const options: SpawnOptions = {
         cwd: this.cwd,
-        env: { ...process.env, ...config.env },
+        env: config.inheritEnv === false ? config.env : { ...process.env, ...config.env },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       }
@@ -277,6 +287,7 @@ export class McpManager implements McpService {
       this.notify(entry, 'notifications/initialized')
       const listing = await this.request<{ tools?: unknown }>(entry, 'tools/list', {}, HANDSHAKE_TIMEOUT_MS)
       const tools = Array.isArray(listing?.tools) ? listing.tools : []
+      if (entry.stopping || this.servers.get(name) !== entry) throw new Error('MCP connection was closed')
       this.registerTools(entry, tools)
 
       entry.state = 'connected'
@@ -296,6 +307,7 @@ export class McpManager implements McpService {
   /** Intentional stop: kill the child, reject pending, unregister tools. */
   private shutdownEntry(entry: ServerEntry): void {
     entry.stopping = true
+    entry.stopped.abort()
     if (entry.http) {
       const http = entry.http
       entry.http = undefined
@@ -305,7 +317,7 @@ export class McpManager implements McpService {
     entry.child = undefined
     if (child) {
       try {
-        child.kill()
+        killProcessTree(child)
       } catch {
         /* already dead */
       }
@@ -328,10 +340,12 @@ export class McpManager implements McpService {
     const registry = this.toolsService()
     const callTimeoutMs = entry.config.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS
     const skipped: string[] = []
+    if (tools.length > 128) throw new Error('MCP tool list exceeds 128 capabilities')
     for (const raw of tools) {
       if (!raw || typeof raw !== 'object') continue
       const tool = raw as { name?: unknown; description?: unknown; inputSchema?: unknown }
       if (typeof tool.name !== 'string' || !tool.name) continue
+      if (Buffer.byteLength(JSON.stringify(tool.inputSchema ?? {})) > 64 * 1024) throw new Error('MCP tool schema exceeds its byte budget')
       const toolName: string = tool.name
       const fullName = `mcp__${entry.name}__${toolName}`.replace(/[^A-Za-z0-9_-]/g, '_')
       const description =
@@ -417,7 +431,8 @@ export class McpManager implements McpService {
     timeoutMs: number,
     signal?: AbortSignal,
   ): Promise<T> {
-    if (!entry.child) return Promise.reject(new Error(`mcp server "${entry.name}" is not running`))
+    if (entry.stopping || !entry.child) return Promise.reject(new Error(`mcp server "${entry.name}" is not running`))
+    if (entry.pending.size >= 32) return Promise.reject(new Error('MCP pending request budget reached'))
     const id = ++entry.nextId
     return new Promise<T>((resolve, reject) => {
       let onAbort: (() => void) | undefined
@@ -470,7 +485,13 @@ export class McpManager implements McpService {
   }
 
   private onStdout(entry: ServerEntry, chunk: Buffer): void {
-    entry.lineBuf += chunk.toString('utf8')
+    if (entry.stopping) return
+    entry.lineBuf += entry.decoder.write(chunk)
+    if (Buffer.byteLength(entry.lineBuf) > 1024 * 1024) {
+      this.shutdownEntry(entry)
+      this.setErrored(entry, 'MCP stdout frame exceeds its byte budget')
+      return
+    }
     let index = entry.lineBuf.indexOf('\n')
     while (index >= 0) {
       const line = entry.lineBuf.slice(0, index)

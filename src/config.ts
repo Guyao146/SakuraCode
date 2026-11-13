@@ -40,6 +40,8 @@ export interface SakuraConfig {
   }
   /** Optional self-hosted sharing relay. Credentials are read only when sharing starts. */
   workspaceSharing?: { relayOrigin?: string; registrationTokenEnv?: string }
+  /** Optional role defaults and declared model capability tags; recommendations never auto-apply. */
+  agentModels?: import('./core/model-recommendations.js').AgentModelPreferences
   profile?: string
   profiles?: Record<string, { bundles?: string[]; plugins?: Record<string, PluginRow> }>
   /** Out-of-tree plugin module specifiers (file paths or package names). */
@@ -50,6 +52,8 @@ export interface SakuraConfig {
   plugins?: Record<string, PluginRow>
   /** MCP servers bridged as `mcp__<server>__<tool>` tools (mcp-manager plugin). */
   mcpServers?: Record<string, McpServerConfig>
+  /** Non-secret connector metadata; new rows never auto-connect without explicit opt-in. */
+  connectors?: import('./connectors/types.js').ConnectorConfig[]
   /** Named model profiles (provider baseURL/key/model) — switchable via /model. */
   models?: Record<string, import('./plugins/model-profiles.js').ModelProfileConfig>
 }

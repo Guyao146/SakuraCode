@@ -21,6 +21,11 @@ export class SakuraApiModelAdapter extends OpenAICompatAdapter {
       redirect: 'error', fetch: fetcher })
   }
 
+  modelInfo(model: string): { reasoning?: boolean } {
+    const row = this.catalog.find(entry => entry.id === model)
+    return row ? { reasoning: row.reasoning } : {}
+  }
+
   override async *stream(req: LLMRequest): AsyncIterable<StreamChunk> {
     if (!this.opts.apiKey) throw new Error('请先授权登录 SakuraAPI，并同步可用模型。')
     const model = this.catalog.find(row => row.id === (req.model || this.defaultModel))

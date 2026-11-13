@@ -55,6 +55,11 @@ export class HarnessContext extends Context {
     return this.peek<import('../mcp/index.js').McpService>('mcp')
   }
 
+  /** Explicit external software/knowledge registry (optional service). */
+  get connectors(): import('../connectors/index.js').ConnectorsService | undefined {
+    return this.peek<import('../connectors/index.js').ConnectorsService>('connectors')
+  }
+
   /** Mount a plugin and keep its disposers tracked on this context. */
   async use(plugin: Parameters<Context['plugin']>[0], config?: unknown): Promise<Disposable> {
     const scope = await this.plugin(plugin, config)

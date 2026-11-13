@@ -1,11 +1,11 @@
 /** Explicit references are resolved once from the user's text, never recursively from referenced data. */
-export const RESOURCE_KINDS = ['skill', 'session', 'agent', 'agent-type', 'memory'] as const
+export const RESOURCE_KINDS = ['skill', 'session', 'agent', 'agent-type', 'memory', 'knowledge'] as const
 export type ResourceKind = typeof RESOURCE_KINDS[number]
 export interface ResourceReference { kind: ResourceKind; id: string; token: string }
 export interface ResourceCandidate extends ResourceReference { label: string; description: string }
 export interface ResourceContent { label: string; content: string }
-const REFERENCE_RE = /(?<=^|\s)@\[(skill|session|agent|agent-type|memory):([^\]\r\n]{1,4096})\]/g
-const SHORT_REFERENCE_RE = /(?<=^|\s)@(skill|session|agent|memory):([^\s\[\]]{1,256})/g
+const REFERENCE_RE = /(?<=^|\s)@\[(skill|session|agent|agent-type|memory|knowledge):([^\]\r\n]{1,4096})\]/g
+const SHORT_REFERENCE_RE = /(?<=^|\s)@(skill|session|agent|memory|knowledge):([^\s\[\]]{1,256})/g
 
 export function resourceToken(kind: ResourceKind, id: string): string { return `@[${kind}:${encodeURIComponent(id)}]` }
 

@@ -94,7 +94,7 @@ describe('workspace memory store', () => {
     expect(store.snapshot().content).toBe('')
   })
 
-  it('rejects an active interprocess lock and only reclaims a lock left by an exited owner', async () => {
+  it('preserves both active and exited-owner interprocess locks until explicit local recovery', async () => {
     const cwd = await workspace()
     const store = new WorkspaceMemoryStore(cwd)
     const lock = path.join(cwd, '.sakura', 'workspace-memory.lock')
@@ -108,8 +108,13 @@ describe('workspace memory store', () => {
     const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore', windowsHide: true })
     await once(child, 'exit')
     expect(child.pid).toBeTruthy()
-    await fs.writeFile(lock, `${child.pid}:crashed-owner`)
-    expect(await store.update({ enabled: true, content: 'recovered safely' }, 0)).toMatchObject({ content: 'recovered safely', revision: 1 })
+    const stale = `${child.pid}:crashed-owner`
+    await fs.writeFile(lock, stale)
+    await expect(store.update({ enabled: true, content: 'must not reclaim' }, 0)).rejects.toMatchObject({ code: 'EBUSY' })
+    expect(await fs.readFile(lock, 'utf8')).toBe(stale)
+    expect(store.snapshot().revision).toBe(0)
+    await fs.unlink(lock) // The fixture's explicit recovery, not automatic product deletion.
+    expect(await store.update({ enabled: true, content: 'recovered explicitly' }, 0)).toMatchObject({ content: 'recovered explicitly', revision: 1 })
     expect(await fs.readdir(path.dirname(lock))).toEqual(['workspace-memory.md'])
   })
 
