@@ -1,6 +1,6 @@
 /** HTTP JSON bridge v1; targets are operator-configured, never supplied by tool arguments. */
 import { randomUUID } from 'node:crypto'
-import { CONNECTOR_LIMITS, ConnectorError, type ConnectorAdapter, type ConnectorConfig } from './types.js'
+import { CONNECTOR_LIMITS, ConnectorDiagnosticError, ConnectorError, type ConnectorAdapter, type ConnectorConfig } from './types.js'
 import { connectorUrl, resolveConnectorHeaders, validateCapabilities, validateConnectorResult,
   validateExternalRead, validateExternalSearch } from './validation.js'
 
@@ -40,18 +40,30 @@ export const httpConnectorAdapter: ConnectorAdapter = {
       if (raw && Buffer.byteLength(raw) > CONNECTOR_LIMITS.requestBytes) throw new ConnectorError(413, 'connector request exceeds its byte budget')
       let response: Response
       try {
-        response = await fetch(base + endpoint, { method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal,
+        response = await fetch(base + endpoint, { method: body === undefined ? 'GET' : 'POST', redirect: 'manual', signal,
           headers: { accept: 'application/json', 'content-type': 'application/json', ...headers }, body: raw })
       } catch {
         if (signal.aborted) throw new ConnectorError(504, 'connector request was cancelled, disconnected or timed out; no automatic retry')
         throw new ConnectorError(502, 'connector network request failed; no automatic retry')
       }
-      if (!response.ok) { await response.body?.cancel().catch(() => {}); throw new ConnectorError(response.status === 409 ? 409 : 502, `connector returned HTTP ${response.status}`) }
-      if (!response.headers.get('content-type')?.includes('application/json')) { await response.body?.cancel().catch(() => {}); throw new ConnectorError(502, 'connector must return application/json') }
+      if (context.diagnostic) {
+        try { context.diagnostic.onStage('connection') } catch (error) { await response.body?.cancel().catch(() => {}); throw error }
+      }
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {})
+        if (context.diagnostic && (response.status === 401 || response.status === 403)) throw new ConnectorDiagnosticError('handshake', 'AUTH_REJECTED')
+        if (context.diagnostic && response.status >= 300 && response.status < 400) throw new ConnectorDiagnosticError('connection', 'REDIRECT_BLOCKED')
+        throw new ConnectorError(response.status === 409 ? 409 : 502, `connector returned HTTP ${response.status}`)
+      }
+      if (!response.headers.get('content-type')?.includes('application/json')) { await response.body?.cancel().catch(() => {}); if (context.diagnostic) throw new ConnectorDiagnosticError('capabilities', 'MALFORMED_RESPONSE'); throw new ConnectorError(502, 'connector must return application/json') }
       const text = await boundedResponse(response, signal)
-      try { return JSON.parse(text) } catch { throw new ConnectorError(502, 'connector response is invalid JSON') }
+      try { return JSON.parse(text) } catch { if (context.diagnostic) throw new ConnectorDiagnosticError('capabilities', 'MALFORMED_RESPONSE'); throw new ConnectorError(502, 'connector response is invalid JSON') }
     }
-    const capabilities = validateCapabilities(await request('/capabilities'))
+    let rawCapabilities
+    try { rawCapabilities = await request('/capabilities') } catch (error) { closed.abort(); throw error }
+    let capabilities
+    try { capabilities = validateCapabilities(rawCapabilities) }
+    catch (error) { closed.abort(); if (context.diagnostic) throw new ConnectorDiagnosticError('capabilities', 'INVALID_MANIFEST'); throw error }
     return {
       capabilities,
       call: async (action, args, signal) => validateConnectorResult(await request('/actions/' + encodeURIComponent(action), { args }, signal)),

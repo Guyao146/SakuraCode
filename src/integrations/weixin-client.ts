@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 
 export const WEIXIN_BASE_URL = 'https://ilinkai.weixin.qq.com'
 const CHANNEL_VERSION = '2.4.10'
-const VERSION = '1.1.4'
+const VERSION = '1.1.5'
 const MAX_RESPONSE_BYTES = 1024 * 1024
 
 export interface WeixinCredentials {

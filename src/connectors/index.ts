@@ -5,6 +5,8 @@ import type { ToolsService } from '../core/tools.js'
 import type { ToolContext, ToolResult } from '../core/types.js'
 import { ConnectorStore } from './store.js'
 import { httpConnectorAdapter } from './http.js'
+import { connectorTemplates } from './templates.js'
+import { diagnoseConnector, preflightConnector } from './diagnostics.js'
 import { CONNECTOR_LIMITS, ConnectorError, type ConnectorAdapter, type ConnectorCapabilities, type ConnectorConfig,
   type ConnectorRevision, type ConnectorSession, type ConnectorSnapshot, type ConnectorStatus } from './types.js'
 import { boundedInteger, connectorName, connectorSecrets, containsConnectorSecret, redactConnectorData, redactConnectorValues, validateArguments, validateCapabilities, validateConnector,
@@ -28,6 +30,7 @@ export class ConnectorsService {
   private changing = false
   private statusRevision = 0
   private readonly cwd: string
+  private readonly diagnosticsClosed = new AbortController()
 
   constructor(private readonly ctx: Context, private readonly tools: ToolsService, options: { cwd: string; connections?: ConnectorConfig[] }) {
     this.cwd = options.cwd
@@ -43,6 +46,14 @@ export class ConnectorsService {
       for (const entry of [...this.entries.values()]) if (entry.config.adapter === adapter.id) this.closeEntry(entry)
       this.changed()
     }
+  }
+  templates() { return connectorTemplates() }
+  preflight(config: unknown) { return preflightConnector(config, this.adapters) }
+  diagnose(config: unknown, options: { signal: AbortSignal; assertCurrent?: () => void }) {
+    return diagnoseConnector(config, this.adapters, this.cwd, {
+      signal: AbortSignal.any([options.signal, this.diagnosticsClosed.signal]),
+      assertCurrent: () => { this.open(); options.assertCurrent?.() },
+    })
   }
   listAdapters(): Array<{ id: string; version: 1; description: string }> {
     return [...this.adapters.values()].map(({ id, version, description }) => ({ id, version, description }))
@@ -328,6 +339,7 @@ export class ConnectorsService {
   dispose(): void {
     if (this.closed) return
     this.closed = true
+    this.diagnosticsClosed.abort()
     for (const entry of this.entries.values()) this.closeEntry(entry)
     this.entries.clear()
   }

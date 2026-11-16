@@ -47,7 +47,7 @@ describe('web client — single-file contract', () => {
 
   it('renders ordinary Markdown without depending on pending chat attachments', () => {
     const start = html.indexOf('function escapeHtml(')
-    const end = html.indexOf('/* ============================================================\n   REST 客户端', start)
+    const end = html.indexOf('async function api(', start)
     expect(start).toBeGreaterThan(0)
     expect(end).toBeGreaterThan(start)
     const scope: { mdLite?: (text: string) => string } = {}

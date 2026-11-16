@@ -87,6 +87,9 @@ export class Session {
     return write
   }
 
+  /** Wait for accepted appends before taking a bounded external backup snapshot. */
+  async flush(): Promise<void> { await this.writeChain }
+
   /** Publish a reset only after its marker reaches disk. A failed write must
    * not silently forget context in memory while leaving it intact on restart. */
   async clearContext(assertIdle: () => void = () => {}): Promise<void> {

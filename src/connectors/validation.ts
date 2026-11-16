@@ -8,70 +8,104 @@ const plain = (value: unknown): value is Record<string, unknown> => !!value && t
 export const connectorName = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,47}$/.test(value)
 const envName = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(value)
 const controlledHeader = /^(?:host|cookie|set-cookie|content-length|content-type|accept|connection|transfer-encoding|origin|referer|upgrade|te|trailer|sec-.*|proxy-.*|mcp-.*)$/i
-function text(value: unknown, name: string, max = 2048): string {
-  if (typeof value !== 'string' || !value || value.length > max || /[\u0000-\u001f\u007f-\u009f]/.test(value)) throw new ConnectorError(400, `invalid ${name}`)
+function text(value: unknown, name: string, max = 2048, field = name): string {
+  if (typeof value !== 'string' || !value || value.length > max || /[\u0000-\u001f\u007f-\u009f]/.test(value)) throw new ConnectorError(400, `invalid ${name}`, field, 'INVALID_FIELD')
   return value
 }
 export function connectorUrl(value: unknown): string {
-  const raw = text(value, 'connector URL')
+  const raw = text(value, 'connector URL', 2048, 'url')
   let url: URL
-  try { url = new URL(raw) } catch { throw new ConnectorError(400, 'invalid connector URL') }
+  try { url = new URL(raw) } catch { throw new ConnectorError(400, 'invalid connector URL', 'url', 'INVALID_URL') }
   const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase()
   const loopback = host === 'localhost' || host === '::1' || (isIP(host) === 4 && host.startsWith('127.'))
   if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback))) {
-    throw new ConnectorError(400, 'connector URL must be HTTPS, or loopback HTTP, without credentials/query/fragment')
+    throw new ConnectorError(400, 'connector URL must be HTTPS, or loopback HTTP, without credentials/query/fragment', 'url', 'UNSAFE_TARGET')
   }
   return url.href.replace(/\/$/, '')
 }
 function refs(value: unknown, headers: boolean): Record<string, string> | undefined {
   if (value === undefined) return undefined
-  if (!plain(value) || Object.keys(value).length > 32) throw new ConnectorError(400, 'invalid credential environment references')
+  const field = headers ? 'headersEnv' : 'envRefs'
+  if (!plain(value) || Object.keys(value).length > 32) throw new ConnectorError(400, 'invalid credential environment references', field, 'INVALID_CREDENTIAL_REF')
   const out: Record<string, string> = {}
   for (const [key, val] of Object.entries(value)) {
-    if (!(headers ? /^[A-Za-z][A-Za-z0-9-]{0,63}$/.test(key) && !controlledHeader.test(key) : envName(key)) || !envName(val) || ['__proto__', 'prototype', 'constructor'].includes(key)) throw new ConnectorError(400, 'only safe environment variable references are accepted')
-    if (Object.keys(out).some(name => name.toLowerCase() === key.toLowerCase())) throw new ConnectorError(400, 'duplicate environment/header name')
+    if (!(headers ? /^[A-Za-z][A-Za-z0-9-]{0,63}$/.test(key) && !controlledHeader.test(key) : envName(key)) || !envName(val) || ['__proto__', 'prototype', 'constructor'].includes(key)) throw new ConnectorError(400, 'only safe environment variable references are accepted', field, 'INVALID_CREDENTIAL_REF')
+    if (Object.keys(out).some(name => name.toLowerCase() === key.toLowerCase())) throw new ConnectorError(400, 'duplicate environment/header name', field, 'INVALID_CREDENTIAL_REF')
     out[key] = val
   }
   return out
 }
+/** Explicit executable + argv only: no shell wrappers, inline code, installers or literal credentials. */
+function safeProcess(config: ConnectorConfig): void {
+  if (!config.command) return
+  const command = config.command, base = command.replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(?:exe|com)$/, '')
+  if (command !== command.trim() || /[\r\n\u0000"'`|&;<>$%]/.test(command) || /\.(?:cmd|bat|ps1|sh)$/i.test(command) ||
+      /^(?:sh|bash|zsh|dash|fish|ksh|csh|tcsh|cmd|command|powershell|pwsh|wscript|cscript|osascript)$/.test(base)) {
+    throw new ConnectorError(400, 'local connector requires an executable without a shell wrapper', 'command', 'UNSAFE_COMMAND')
+  }
+  if (/^(?:npx|npm|pnpm|yarn|bunx|uvx|uv|pip|pip3|apt|apt-get|yum|dnf|brew|choco|winget|scoop|curl|wget)$/.test(base)) {
+    throw new ConnectorError(400, 'configure an already installed executable; no installer or downloader is run', 'command', 'INSTALLER_BLOCKED')
+  }
+  if (!/[\\/]/.test(command) && /\s/.test(command)) throw new ConnectorError(400, 'put the executable in command and separate arguments in args', 'command', 'UNSAFE_COMMAND')
+  const args = config.args ?? []
+  for (const arg of args) {
+    if (/[\u0000-\u001f\u007f-\u009f`|&;<>]/.test(arg) || /\$\(|\$\{|%[A-Za-z_][A-Za-z0-9_]*%/.test(arg) ||
+        /^(?:-c|-e|-p|--eval(?:=.*)?|--print(?:=.*)?|-command|-encodedcommand|\/c|\/k)$/i.test(arg)) {
+      throw new ConnectorError(400, 'command arguments cannot contain shell or inline-code instructions', 'args', 'UNSAFE_ARGS')
+    }
+    if (/^(?:--?|\/)(?:[A-Za-z0-9]+[-_])*(?:token|secret|password|passwd|authorization|credential|api[-_]?key|access[-_]?key)(?:$|[\s:=])/i.test(arg) || /^(?:[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY))=/i.test(arg) || /\b(?:bearer|basic)\s+\S+/i.test(arg)) {
+      throw new ConnectorError(400, 'put credentials in explicit environment references, never argv', 'args', 'INLINE_CREDENTIAL')
+    }
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(arg)) {
+      try { const url = new URL(arg); if (url.username || url.password || url.search || url.hash) throw new Error() }
+      catch { throw new ConnectorError(400, 'command URL arguments cannot carry credentials, query or fragment', 'args', 'INLINE_CREDENTIAL') }
+    }
+  }
+  const secrets = connectorSecrets(config)
+  if (secrets.some(secret => command.includes(secret))) throw new ConnectorError(400, 'credentials cannot be embedded in an executable', 'command', 'INLINE_CREDENTIAL')
+  if (args.some(arg => secrets.some(secret => arg.includes(secret)))) throw new ConnectorError(400, 'credentials cannot be embedded in command arguments', 'args', 'INLINE_CREDENTIAL')
+}
 export function validateConnector(value: unknown): ConnectorConfig {
   const fields = ['id', 'name', 'category', 'adapter', 'url', 'command', 'args', 'headersEnv', 'envRefs', 'timeoutMs', 'autoConnect', 'enabledActions', 'approvedCapabilities', 'knowledgeEnabled', 'knowledgeTools']
-  if (!plain(value) || Object.keys(value).some(key => !fields.includes(key))) throw new ConnectorError(400, 'invalid connector metadata; store environment references, not secrets')
-  if (!connectorName(value.id) || !connectorName(value.adapter) || !['software', 'knowledge'].includes(String(value.category))) throw new ConnectorError(400, 'invalid connector id, adapter or category')
-  const result: ConnectorConfig = { id: value.id, name: text(value.name, 'connector name', 100), category: value.category as ConnectorConfig['category'], adapter: value.adapter }
+  if (!plain(value) || Object.keys(value).some(key => !fields.includes(key))) throw new ConnectorError(400, 'invalid connector metadata; store environment references, not secrets', 'config', 'INVALID_FIELD')
+  if (!connectorName(value.id)) throw new ConnectorError(400, 'invalid connector id', 'id', 'INVALID_FIELD')
+  if (!connectorName(value.adapter)) throw new ConnectorError(400, 'invalid connector adapter', 'adapter', 'INVALID_FIELD')
+  if (!['software', 'knowledge'].includes(String(value.category))) throw new ConnectorError(400, 'invalid connector category', 'category', 'INVALID_FIELD')
+  const result: ConnectorConfig = { id: value.id, name: text(value.name, 'connector name', 100, 'name'), category: value.category as ConnectorConfig['category'], adapter: value.adapter }
   if (value.url !== undefined) result.url = connectorUrl(value.url)
   if (value.command !== undefined) result.command = text(value.command, 'command', 4096)
   if (value.args !== undefined) {
-    if (!Array.isArray(value.args) || value.args.length > 64 || value.args.some(arg => typeof arg !== 'string' || arg.length > 4096 || /[\u0000\r\n]/.test(arg))) throw new ConnectorError(400, 'invalid command arguments')
+    if (!Array.isArray(value.args) || value.args.length > 64 || value.args.some(arg => typeof arg !== 'string' || arg.length > 4096 || /[\u0000\r\n]/.test(arg))) throw new ConnectorError(400, 'invalid command arguments', 'args', 'INVALID_ARGS')
     result.args = [...value.args] as string[]
   }
-  if (result.adapter === 'http' && (!result.url || result.command || result.args?.length || value.envRefs !== undefined)) throw new ConnectorError(400, 'HTTP connectors require a URL, not a command')
-  if (result.adapter === 'mcp' && (!!result.url === !!result.command)) throw new ConnectorError(400, 'MCP requires exactly one URL or local command')
-  if (result.url && (result.command || result.args?.length || value.envRefs !== undefined)) throw new ConnectorError(400, 'network connectors cannot contain process settings')
-  if (result.command && value.headersEnv !== undefined) throw new ConnectorError(400, 'local process connectors cannot contain HTTP headers')
+  if (result.adapter === 'http' && (!result.url || result.command || result.args?.length || value.envRefs !== undefined)) throw new ConnectorError(400, 'HTTP connectors require a URL, not a command', !result.url ? 'url' : result.command ? 'command' : result.args?.length ? 'args' : 'envRefs', 'INVALID_TRANSPORT')
+  if (result.adapter === 'mcp' && (!!result.url === !!result.command)) throw new ConnectorError(400, 'MCP requires exactly one URL or local command', 'command', 'INVALID_TRANSPORT')
+  if (result.url && (result.command || result.args?.length || value.envRefs !== undefined)) throw new ConnectorError(400, 'network connectors cannot contain process settings', result.command ? 'command' : result.args?.length ? 'args' : 'envRefs', 'INVALID_TRANSPORT')
+  if (result.command && value.headersEnv !== undefined) throw new ConnectorError(400, 'local process connectors cannot contain HTTP headers', 'headersEnv', 'INVALID_TRANSPORT')
   result.headersEnv = refs(value.headersEnv, true)
   result.envRefs = refs(value.envRefs, false)
+  safeProcess(result)
   if (value.timeoutMs !== undefined) result.timeoutMs = boundedInteger(value.timeoutMs, 30_000, 100, CONNECTOR_LIMITS.timeoutMs, 'timeoutMs')
   for (const key of ['autoConnect', 'knowledgeEnabled'] as const) {
-    if (value[key] !== undefined && typeof value[key] !== 'boolean') throw new ConnectorError(400, `invalid ${key}`)
+    if (value[key] !== undefined && typeof value[key] !== 'boolean') throw new ConnectorError(400, `invalid ${key}`, key, 'INVALID_FIELD')
     result[key] = value[key] === true
   }
-  if (value.enabledActions !== undefined && (!Array.isArray(value.enabledActions) || value.enabledActions.length > CONNECTOR_LIMITS.actions || value.enabledActions.some(name => !connectorName(name)) || new Set(value.enabledActions).size !== value.enabledActions.length)) throw new ConnectorError(400, 'invalid enabled actions')
+  if (value.enabledActions !== undefined && (!Array.isArray(value.enabledActions) || value.enabledActions.length > CONNECTOR_LIMITS.actions || value.enabledActions.some(name => !connectorName(name)) || new Set(value.enabledActions).size !== value.enabledActions.length)) throw new ConnectorError(400, 'invalid enabled actions', 'enabledActions', 'INVALID_FIELD')
   result.enabledActions = [...(value.enabledActions as string[] | undefined ?? [])]
   if (value.approvedCapabilities !== undefined) {
-    if (typeof value.approvedCapabilities !== 'string' || !/^[a-f0-9]{64}$/.test(value.approvedCapabilities)) throw new ConnectorError(400, 'invalid approved capability fingerprint')
+    if (typeof value.approvedCapabilities !== 'string' || !/^[a-f0-9]{64}$/.test(value.approvedCapabilities)) throw new ConnectorError(400, 'invalid approved capability fingerprint', 'approvedCapabilities', 'INVALID_FIELD')
     result.approvedCapabilities = value.approvedCapabilities
   }
   if (value.knowledgeTools !== undefined) {
-    if (result.adapter !== 'mcp') throw new ConnectorError(400, 'knowledge tool bindings apply only to MCP connectors')
-    if (!plain(value.knowledgeTools) || Object.keys(value.knowledgeTools).some(key => !['search', 'read'].includes(key)) || !connectorName(value.knowledgeTools.search) || !connectorName(value.knowledgeTools.read)) throw new ConnectorError(400, 'knowledge tool bindings require explicit search/read names')
+    if (result.adapter !== 'mcp') throw new ConnectorError(400, 'knowledge tool bindings apply only to MCP connectors', 'knowledgeTools', 'INVALID_BINDINGS')
+    if (!plain(value.knowledgeTools) || Object.keys(value.knowledgeTools).some(key => !['search', 'read'].includes(key)) || !connectorName(value.knowledgeTools.search) || !connectorName(value.knowledgeTools.read)) throw new ConnectorError(400, 'knowledge tool bindings require explicit search/read names', 'knowledgeTools', 'INVALID_BINDINGS')
     result.knowledgeTools = { search: value.knowledgeTools.search, read: value.knowledgeTools.read }
   }
   return result
 }
 export function boundedInteger(value: unknown, fallback: number, min: number, max: number, name: string): number {
   if (value === undefined) return fallback
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) throw new ConnectorError(400, `${name} must be ${min}–${max}`)
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) throw new ConnectorError(400, `${name} must be ${min}–${max}`, name, 'INVALID_FIELD')
   return value
 }
 export function resolveConnectorHeaders(config: ConnectorConfig): Record<string, string> {

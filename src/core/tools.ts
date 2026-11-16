@@ -7,7 +7,7 @@
  */
 
 import type { Context } from '../kernel/index.js'
-import type { JsonSchemaObject, ToolContext, ToolDefinition, ToolOutputPreview, ToolSchema } from './types.js'
+import type { CommandExecution, JsonSchemaObject, ToolContext, ToolDefinition, ToolOutputPreview, ToolSchema } from './types.js'
 import { previewToolOutput, validateToolOutputBudget } from '../util/tool-output.js'
 
 export interface ToolsExecutePayload {
@@ -21,6 +21,7 @@ export interface ToolsExecutePayload {
   isError?: boolean
   ui?: Record<string, unknown>
   images?: string[]
+  execution?: CommandExecution
   blockedReason?: string
 }
 
@@ -104,7 +105,7 @@ export class ToolsService {
     name: string,
     argsRaw: string,
     tc: ToolContext,
-  ): Promise<{ output: string; modelPreview?: ToolOutputPreview; isError?: boolean; ui?: Record<string, unknown>; images?: string[]; durationMs: number }> {
+  ): Promise<{ output: string; modelPreview?: ToolOutputPreview; isError?: boolean; ui?: Record<string, unknown>; images?: string[]; execution?: CommandExecution; blockedReason?: string; durationMs: number }> {
     const started = Date.now()
     const tool = this.defs.get(name)
     const finish = async (payload: Partial<ToolsExecutePayload>) => {
@@ -121,10 +122,13 @@ export class ToolsService {
         isError: payload.isError ?? false,
         durationMs,
         ...(payload.images ? { images: payload.images } : {}),
+        ...(payload.execution ? { execution: payload.execution } : {}),
       })
       return {
         output,
         ...(modelPreview ? { modelPreview } : {}),
+        ...(payload.execution ? { execution: payload.execution } : {}),
+        ...(payload.blockedReason ? { blockedReason: payload.blockedReason } : {}),
         isError: payload.isError,
         ui: payload.ui,
         images: payload.images,
@@ -158,7 +162,7 @@ export class ToolsService {
       payload = await this.ctx.waterfall<ToolsExecutePayload>('tools/pre-execute', async (p) => p, payload)
       tc.signal.throwIfAborted()
       if (payload.blockedReason) {
-        return finish({ output: `error: tool "${name}" blocked — ${payload.blockedReason}`, isError: true })
+        return finish({ output: `error: tool "${name}" blocked — ${payload.blockedReason}`, isError: true, blockedReason: payload.blockedReason })
       }
       payload = await this.ctx.waterfall<ToolsExecutePayload>(
         'tools/execute',
@@ -171,6 +175,7 @@ export class ToolsService {
             p.isError = result.isError
             if (result.ui) p.ui = result.ui
             if (result.images) p.images = result.images
+            if (result.execution) p.execution = result.execution
           }
           return p
         },

@@ -387,6 +387,7 @@ export class DefaultAgentLoop implements AgentLoop {
               ...(result.modelPreview ? { modelPreview: result.modelPreview } : {}),
               isError: result.isError,
               durationMs: result.durationMs ?? 0,
+              ...(result.execution ? { execution: result.execution } : {}),
               ...(result.images ? { images: result.images } : {}),
             },
           })

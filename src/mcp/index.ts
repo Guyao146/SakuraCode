@@ -16,6 +16,8 @@ import type { Context, Plugin } from '../kernel/index.js'
 import type { ToolsService } from '../core/tools.js'
 import type { JsonSchemaObject, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { connectHttpServer, type HttpMcpConnection } from './http.js'
+import { diagnosticHandshake, diagnosticTools, type McpDiagnosticObserver } from '../connectors/mcp-diagnostics.js'
+import { ConnectorDiagnosticError } from '../connectors/types.js'
 
 // ---------------------------------------------------------------------------
 // Public contracts
@@ -33,6 +35,8 @@ export interface McpServerConfig {
   headers?: Record<string, string>
   /** Per-tool-call timeout in ms (default 120000). */
   timeoutMs?: number
+  /** Diagnostics collect strict raw capabilities without registering executable tools. */
+  diagnostic?: McpDiagnosticObserver
 }
 
 export type McpServerState = 'connecting' | 'connected' | 'error' | 'stopped'
@@ -108,6 +112,7 @@ function describeError(error: unknown): string {
 }
 
 interface PendingRequest {
+  method: string
   // `any` — the map holds requests of mixed result types (handshake + calls).
   resolve: (value: any) => void
   reject: (error: Error) => void
@@ -226,7 +231,7 @@ export class McpManager implements McpService {
       try {
         const connection = await connectHttpServer(
           name,
-          { url: config.url, headers: config.headers, timeoutMs: config.timeoutMs, signal: entry.stopped.signal },
+          { url: config.url, headers: config.headers, timeoutMs: config.timeoutMs, signal: entry.stopped.signal, diagnostic: config.diagnostic },
           (definition) => {
             if (entry.stopping || this.servers.get(name) !== entry) throw new Error('MCP connection changed')
             try {
@@ -271,24 +276,32 @@ export class McpManager implements McpService {
         env: config.inheritEnv === false ? config.env : { ...process.env, ...config.env },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        ...(config.diagnostic && process.platform !== 'win32' ? { detached: true } : {}),
       }
       // Node ≥18.20 refuses to spawn .cmd/.bat without a shell on Windows.
       if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(resolved)) options.shell = true
 
       const child = spawn(resolved, config.args ?? [], options)
       entry.child = child
+      child.once('spawn', () => {
+        if (!entry.stopping && config.diagnostic) {
+          try { config.diagnostic.onStage('connection') } catch { this.shutdownEntry(entry) }
+        }
+      })
       child.stdin?.on('error', () => {}) // EPIPE when the server dies mid-write
       child.stdout?.on('data', (chunk: Buffer) => this.onStdout(entry, chunk))
       child.stderr?.on('data', (chunk: Buffer) => this.onStderr(entry, chunk))
       child.on('exit', (code, signal) => this.onExit(entry, code, signal))
       child.on('error', (error) => this.onChildError(entry, error))
 
-      await this.request(entry, 'initialize', { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO }, HANDSHAKE_TIMEOUT_MS)
+      const initialized = await this.request(entry, 'initialize', { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO }, HANDSHAKE_TIMEOUT_MS)
+      if (config.diagnostic) { diagnosticHandshake(initialized); config.diagnostic.onStage('handshake') }
       this.notify(entry, 'notifications/initialized')
       const listing = await this.request<{ tools?: unknown }>(entry, 'tools/list', {}, HANDSHAKE_TIMEOUT_MS)
       const tools = Array.isArray(listing?.tools) ? listing.tools : []
       if (entry.stopping || this.servers.get(name) !== entry) throw new Error('MCP connection was closed')
-      this.registerTools(entry, tools)
+      if (config.diagnostic) { config.diagnostic.onTools(diagnosticTools(listing)); entry.toolCount = tools.length }
+      else this.registerTools(entry, tools)
 
       entry.state = 'connected'
       this.emitStatus(entry)
@@ -437,6 +450,7 @@ export class McpManager implements McpService {
     return new Promise<T>((resolve, reject) => {
       let onAbort: (() => void) | undefined
       const pending: PendingRequest = {
+        method,
         resolve: (value) => {
           cleanup()
           resolve(value)
@@ -447,7 +461,7 @@ export class McpManager implements McpService {
         },
         timer: setTimeout(() => {
           entry.pending.delete(id)
-          pending.reject(new Error(`mcp request "${method}" timed out after ${timeoutMs}ms`))
+          pending.reject(entry.config.diagnostic ? new ConnectorDiagnosticError(method === 'initialize' ? 'handshake' : 'capabilities', 'TIMEOUT') : new Error(`mcp request "${method}" timed out after ${timeoutMs}ms`))
         }, timeoutMs),
       }
       const cleanup = () => {
@@ -537,7 +551,7 @@ export class McpManager implements McpService {
     const pending = entry.pending.get(msg.id)
     if (!pending) return
     entry.pending.delete(msg.id)
-    if (msg.error !== undefined && msg.error !== null) pending.reject(new Error(describeRpcError(msg.error)))
+    if (msg.error !== undefined && msg.error !== null) pending.reject(entry.config.diagnostic ? new ConnectorDiagnosticError(pending.method === 'tools/list' ? 'capabilities' : 'handshake', 'RPC_REJECTED') : new Error(describeRpcError(msg.error)))
     else pending.resolve(msg.result)
   }
 
@@ -564,7 +578,11 @@ export class McpManager implements McpService {
   }
 
   private onChildError(entry: ServerEntry, error: Error): void {
-    this.failPending(entry, error.message)
+    const code = (error as NodeJS.ErrnoException).code
+    if (entry.config.diagnostic && (code === 'ENOENT' || code === 'EACCES' || code === 'EPERM')) {
+      for (const pending of entry.pending.values()) pending.reject(new ConnectorDiagnosticError('connection', code === 'ENOENT' ? 'NO_EXECUTABLE' : 'ACCESS_DENIED'))
+      entry.pending.clear()
+    } else this.failPending(entry, error.message)
     if (entry.stopping) return
     if (this.servers.get(entry.name) !== entry) return
     this.setErrored(entry, `failed to start server: ${error.message}`)

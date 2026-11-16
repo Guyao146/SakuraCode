@@ -5,8 +5,9 @@
  */
 
 import { spawn } from 'node:child_process'
+import { StringDecoder } from 'node:string_decoder'
 import type { PluginModule } from '../kernel/index.js'
-import type { ToolDefinition } from '../core/types.js'
+import type { CommandExecution, ToolDefinition, ToolResult } from '../core/types.js'
 import type { ToolsService } from '../core/tools.js'
 import {
   killProcessTree,
@@ -24,67 +25,78 @@ function runShell(
   resolved: { exe: string; args: string[] },
   command: string,
   opts: { timeoutMs?: number; workdir?: string; signal?: AbortSignal },
-): Promise<{ output: string; isError?: boolean }> {
+): Promise<ToolResult> {
+  const startedAt = new Date().toISOString()
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>
+    let out = '', outputBytes = 0, capturedBytes = 0
+    let reason: CommandExecution['reason'] = 'exit'
+    const evidence = (exitCode: number | null): CommandExecution => ({ exitCode, reason, startedAt,
+      endedAt: new Date().toISOString(), outputBytes, truncated: outputBytes > capturedBytes })
     try {
       child = spawn(resolved.exe, [...resolved.args, command], {
         cwd: opts.workdir ? resolvePath(opts.workdir) : process.cwd(),
         env: process.env,
         stdio: ['ignore', 'pipe', 'pipe'],
-        // Own process group on POSIX so a timeout kills the whole tree.
         detached: shellSpawnDetached(),
+        windowsHide: true,
       })
     } catch (error) {
-      resolve({ output: `error: failed to start ${resolved.exe}: ${(error as Error).message}`, isError: true })
+      reason = 'spawn_error'
+      resolve({ output: `error: failed to start ${resolved.exe}: ${(error as Error).message}`, isError: true, execution: evidence(null) })
       return
     }
-    let out = ''
-    let killed = false
-    const capture = (chunk: Buffer) => {
-      if (out.length < MAX_CAPTURE) out += chunk.toString('utf8')
+    const stdout = new StringDecoder('utf8'), stderr = new StringDecoder('utf8')
+    const capture = (chunk: Buffer, decoder: StringDecoder) => {
+      outputBytes += chunk.length
+      const take = Math.min(chunk.length, MAX_CAPTURE - capturedBytes)
+      if (take > 0) { out += decoder.write(chunk.subarray(0, take)); capturedBytes += take }
     }
-    child.stdout?.on('data', capture)
-    child.stderr?.on('data', capture)
-
-    const onAbort = () => {
-      killed = true
-      killProcessTree(child)
+    child.stdout?.on('data', (chunk: Buffer) => capture(chunk, stdout))
+    child.stderr?.on('data', (chunk: Buffer) => capture(chunk, stderr))
+    let drainTimer: ReturnType<typeof setTimeout> | undefined
+    const finishExitedAfterAbort = () => {
+      if (drainTimer || child.exitCode === null && child.signalCode === null) return
+      drainTimer = setTimeout(() => {
+        if (settled || reason === 'exit') return
+        const execution = evidence(child.exitCode)
+        execution.truncated = true
+        finish({ output: truncate((out || '(no output)') + '\n[interrupted process exited; output pipes did not close, captured log may be incomplete]'), isError: true, execution })
+        child.stdout?.destroy(); child.stderr?.destroy()
+      }, 1000)
     }
-    if (opts.signal) {
-      if (opts.signal.aborted) onAbort()
-      else opts.signal.addEventListener('abort', onAbort, { once: true })
-    }
-
+    const onAbort = () => { reason = 'cancelled'; killProcessTree(child); finishExitedAfterAbort() }
+    if (opts.signal?.aborted) onAbort()
+    else opts.signal?.addEventListener('abort', onAbort, { once: true })
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    const timer = setTimeout(() => {
-      killed = true
-      killProcessTree(child)
-    }, timeoutMs)
-    // Give a stuck tree a second chance with an escalated kill.
-    const escalation = setTimeout(() => {
-      if (!child.killed) killProcessTree(child)
-    }, timeoutMs + 5_000)
-
+    const timer = setTimeout(() => { reason = 'timeout'; killProcessTree(child); finishExitedAfterAbort() }, timeoutMs)
+    const escalation = setTimeout(() => { killProcessTree(child) }, timeoutMs + 5_000)
     let settled = false
-    const finish = (result: { output: string; isError?: boolean }) => {
+    const finish = (result: ToolResult) => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
-      clearTimeout(escalation)
+      clearTimeout(timer); clearTimeout(escalation); clearTimeout(drainTimer)
       opts.signal?.removeEventListener('abort', onAbort)
       resolve(result)
     }
-
     child.on('error', (error) => {
-      finish({ output: `error: failed to start ${resolved.exe}: ${error.message}`, isError: true })
+      reason = 'spawn_error'
+      finish({ output: `error: failed to start ${resolved.exe}: ${error.message}`, isError: true, execution: evidence(null) })
     })
-    child.on('close', (code) => {
+    child.on('exit', () => { if (reason !== 'exit') finishExitedAfterAbort() })
+    child.on('close', (code, signal) => {
+      if (settled) return
+      out += stdout.end() + stderr.end()
+      if (signal && reason === 'exit') reason = 'cancelled'
+      const killed = reason !== 'exit'
       const suffix = killed
-        ? `\n[exit code: ${code ?? 'null'} — killed (${opts.signal?.aborted ? 'interrupted' : `${timeoutMs}ms timeout`})]`
+        ? `\n[exit code: ${code ?? 'null'} — killed (${reason === 'cancelled' ? 'interrupted' : `${timeoutMs}ms timeout`})]`
         : `\n[exit code: ${code ?? 'null'}]`
-      // A killed or timed-out command is a tool error, not a successful result.
-      finish({ output: truncate((out || '(no output)') + suffix), isError: killed || undefined })
+      const raw = (out || '(no output)') + suffix
+      const output = truncate(raw)
+      const execution = evidence(code)
+      execution.truncated ||= output !== raw
+      finish({ output, isError: killed || code !== 0 || undefined, execution })
     })
   })
 }
@@ -143,6 +155,8 @@ export const shellToolsPlugin: PluginModule<{ cwd?: string; defaultTimeoutMs?: n
           // happened (or a SAKURA_BASH that was set) after startup.
           const shellPath = resolved ?? resolveShell(shell)
           if (!shellPath) return { output: missingShellMessage(shell), isError: true }
+          await tc.onCommandStart?.()
+          if (tc.signal.aborted) return { output: 'error: cancelled', isError: true }
           return runShell(shellPath, command, {
             timeoutMs: args.timeoutMs ? Number(args.timeoutMs) : defaultTimeoutMs,
             workdir: resolvePath(String(args.workdir ?? '.'), cwd),

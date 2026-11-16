@@ -309,6 +309,22 @@ export class LLMService {
     return matches[0]!
   }
 
+  /** In-memory routing for an explicitly selected isolated task. No credentials leave this service. */
+  isolatedAdapter(model: string, provider: string): ModelAdapter {
+    const choice = this.resolveModel(model, provider)
+    const service = this
+    return {
+      id: provider, defaultModel: choice.model, models: [choice.model],
+      modelInfo: () => ({ reasoning: choice.reasoning === true }),
+      async *stream(request) {
+        service.resolveModel(choice.model, provider)
+        if (!service.modelStatus(choice.model, provider).configured) throw new Error('Selected isolated-task model is no longer configured')
+        const adapter = service.adapters.get(provider)!
+        yield* adapter.stream({ ...request, model: choice.model, modelAdapter: provider })
+      },
+    }
+  }
+
   /** Registered upstream sites for the settings view; keys/credentials are never included. */
   listProviders(): Array<{ id: string; model?: string; models?: string[]; default: boolean; format?: UpstreamFormat; baseURL?: string }> {
     return [...this.adapters.values()].map((a) => {

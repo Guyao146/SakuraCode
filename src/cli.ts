@@ -21,7 +21,7 @@ import { cacheHitRate, summarizeUsage } from './util/tokens.js'
 import { estimateRequestContextTokens } from './util/context.js'
 import { spawnExperts } from './experts.js'
 import { UpdateChecker } from './updates.js'
-const VERSION = '1.1.4'
+const VERSION = '1.1.5'
 
 interface ParsedArgs {
   print: boolean

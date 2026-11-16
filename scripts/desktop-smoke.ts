@@ -20,6 +20,7 @@ import type { TurnMetrics } from '../src/core/types.js'
 import type { DesktopViewport } from '../src/util/viewport.js'
 import { defaultStatisticsSettings, StatisticsFileStore } from '../src/desktop/statistics.js'
 import type { ConnectorSnapshot, ExternalKnowledgeSearch, ExternalKnowledgeRead } from '../src/connectors/types.js'
+import { verifyProjectWork } from './project-work-smoke.js'
 const exampleBridgeModule = './example-connector-bridge.mjs'
 
 const exec = promisify(execFile)
@@ -528,6 +529,10 @@ module.exports = { name: 'synthetic-sakuraapi-transport', inject: ['jobs'], appl
     verifiedFeatures.push('packaged connector v1 save without network, confirmed capability discovery/enable, versioned synthetic knowledge search/read, disconnect/removal and zero model requests')
     console.log('Packaged external connector discovery, capability confirmation, versioned reference read and disconnect PASS')
   } finally { await connectorBridge.close() }
+  await verifyProjectWork(first.url, cwd)
+  assert.equal(mock.requests.length, 0, 'project task, Git and knowledge acceptance never invokes the model')
+  verifiedFeatures.push('compiled persistent tasks, real approved command exit evidence and human acceptance; raw Git review/export with unchanged index; knowledge preview/current/history restoration')
+  console.log('Packaged persistent tasks, command evidence, Git review and knowledge versions PASS')
   await browser.waitFor("document.body.classList.contains('desktop-shell') && !document.getElementById('desktopWindowControls').hidden")
   assert.equal(first.frameless, true)
   let native = await nativeWindow(first)

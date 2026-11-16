@@ -194,16 +194,16 @@ export function killProcessTree(child: ChildProcess): void {
   // No pid means spawn failed (ENOENT) — the handle is dead and kill() throws.
   if (!pid || child.exitCode !== null || child.signalCode !== null) return
   if (IS_WINDOWS) {
+    // Let taskkill enumerate descendants before terminating the parent. Killing
+    // the parent first can orphan a grandchild while it still owns our pipes.
+    const fallback = () => { try { child.kill() } catch { /* already gone */ } }
     try {
-      spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }).on('error', () => {})
-    } catch {
-      /* taskkill unavailable — the direct kill below is the fallback */
-    }
-    try {
-      child.kill()
-    } catch {
-      /* already gone */
-    }
+      const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+      const timer = setTimeout(fallback, 2000)
+      timer.unref()
+      killer.once('error', () => { clearTimeout(timer); fallback() })
+      killer.once('close', code => { clearTimeout(timer); if (code !== 0) fallback() })
+    } catch { fallback() }
     return
   }
   try {

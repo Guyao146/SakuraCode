@@ -1801,6 +1801,19 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
   .account-usage strong { font-size: 17px; }
   .composer-options .select-control { max-width: 145px; }
 }
+#persistentTasks { margin-top: 12px; min-width: 0; }
+#persistentTasks[open] { max-height: min(430px, 45dvh); overflow-y: auto; }
+#persistentTasks > summary { font-size: 12px; cursor: pointer; }
+#taskCards, #gitFiles { display: grid; gap: 10px; min-width: 0; }
+.task-card, .git-review-file { min-width: 0; padding: 12px; background: var(--surface); border-radius: 12px; overflow-wrap: anywhere; }
+.task-card .settings-actions, .git-review-file .settings-actions { gap: 6px; margin-top: 8px; }
+.task-card strong, .git-review-file summary { overflow-wrap: anywhere; }
+#gitReviewView { padding: 12px; min-width: 0; }
+#gitReviewView pre, .evidence-text { max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--mono); }
+.local-detail-modal { width: min(760px, calc(100vw - 24px)); max-width: calc(100vw - 24px); }
+.local-detail-modal .spawn-panel { width: 100%; max-width: 100%; box-sizing: border-box; }
+.local-detail-modal .form-field, .local-detail-modal textarea { min-width: 0; max-width: 100%; }
+.local-check-row { display: grid; gap: 8px; margin: 12px 0; padding: 12px; background: var(--surface); border-radius: 12px; }
 </style>
 </head>
 <body>
@@ -2093,8 +2106,9 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
         </div>
         <p class="settings-message" id="workspaceMemoryMessage" role="status" aria-live="polite"></p>
       </section>
+      <section class="settings-card" id="backupCard"><h2>工作资料备份与恢复</h2><p class="field-hint">选择会话与附件、记忆、知识版本和任务记录。不包含源码、Git、账号凭据或运行锁；恢复到新目录，不覆盖现有工作区。聊天和日志可能含手工填写的秘密，请妥善保管备份。</p><div class="settings-actions"><button class="btn btn-soft" id="backupCreate" type="button">创建本地备份</button><button class="btn btn-soft" id="backupRestore" type="button">校验并恢复备份</button></div></section>
       <section class="settings-card" id="knowledgeCard" hidden><div class="settings-card-heading"><h2>本地知识库</h2><button class="btn btn-soft compact-btn" id="knowledgeRefresh" type="button">刷新文档</button></div><p class="field-hint">当前工作区的 Markdown／TXT 资料，纯本地检索，默认不整库注入模型。内容是参考数据，不是项目规则；不执行导入脚本。</p>
-        <div class="settings-actions"><button class="btn btn-soft" id="knowledgeImportFileBtn" type="button">导入文本文件</button><button class="btn btn-soft" id="knowledgeImportFolderBtn" type="button">导入文本文件夹</button></div><input id="knowledgeImportFile" type="file" accept=".md,.txt,text/plain,text/markdown" multiple hidden><input id="knowledgeImportFolder" type="file" webkitdirectory multiple hidden>
+        <div class="settings-actions"><button class="btn btn-soft" id="documentImportBtn" type="button">导入 PDF／Word</button><button class="btn btn-soft" id="knowledgeVersionsBtn" type="button">集合与版本</button><button class="btn btn-soft" id="knowledgeImportFileBtn" type="button">导入文本文件</button><button class="btn btn-soft" id="knowledgeImportFolderBtn" type="button">导入文本文件夹</button></div><input id="knowledgeImportFile" type="file" accept=".md,.txt,text/plain,text/markdown" multiple hidden><input id="knowledgeImportFolder" type="file" webkitdirectory multiple hidden>
         <label class="form-field" for="knowledgeSearchInput">检索知识<input id="knowledgeSearchInput" type="search" maxlength="256" placeholder="中英文关键词"><button class="btn btn-soft" id="knowledgeSearchBtn" type="button">搜索相关片段</button></label>
         <p class="settings-message" id="knowledgeStatus" role="status"></p><div id="knowledgeDocuments"></div><div id="knowledgeResults"></div>
         <section id="knowledgeReader" hidden><h3 id="knowledgeReaderTitle"></h3><p class="field-hint" id="knowledgeReaderSource"></p><pre class="memory-entry-text" id="knowledgeReaderContent"></pre><div class="settings-actions"><button class="btn btn-soft" id="knowledgeReadMore" type="button">读取后续页</button><button class="btn btn-soft" id="knowledgeReference" type="button">@ 引用文档</button></div></section>
@@ -2152,7 +2166,7 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
       </section>
       </section>
       <section class="settings-category" id="settings-integrationsPanel" role="tabpanel" aria-labelledby="settings-integrationsTab" tabindex="0" hidden>
-      <section class="settings-card" id="connectorsCard" hidden><div class="settings-card-heading"><h2>外接软件与知识库</h2><div class="settings-actions"><button class="btn btn-soft compact-btn" id="connectorsRefresh" type="button">刷新连接</button><button class="btn btn-accent compact-btn" id="connectorsAdd" type="button">添加外接</button></div></div><p class="panel-note">连接已安装的软件 MCP，或提供 HTTP JSON 接口的知识库／软件。保存不启动服务；连接和能力启用需分别确认，操作继续遵循审批。</p><p class="field-hint">凭据填写环境变量名，不保存 Token／Key。查询只发送到你选择的外接知识库，结果会作为参考数据进入所选模型；不会自动上传本地知识库或对话。</p><p id="connectorsStatus" class="settings-message" role="status" aria-live="polite"></p><div id="connectorsList"></div><div id="externalKnowledgePanel" hidden><label class="form-field" for="externalKnowledgeSource">外部知识来源<select id="externalKnowledgeSource"></select></label><label class="form-field" for="externalKnowledgeQuery">检索关键词<input id="externalKnowledgeQuery" type="search" maxlength="256" placeholder="确认后向所选外接知识库发送"><button class="btn btn-soft" id="externalKnowledgeSearch" type="button">确认并检索外部知识</button></label><div id="externalKnowledgeResults"></div><section id="externalKnowledgeReader" hidden><p class="field-hint" id="externalKnowledgeSourceLabel"></p><pre class="memory-editor" id="externalKnowledgeContent"></pre><button class="btn btn-soft" id="externalKnowledgeMore" type="button" hidden>确认读取后续页</button></section></div></section>
+      <section class="settings-card" id="connectorsCard" hidden><div class="settings-card-heading"><h2>外接软件与知识库</h2><div class="settings-actions"><button class="btn btn-soft compact-btn" id="connectorsRefresh" type="button">刷新连接</button><button class="btn btn-soft compact-btn" id="connectorWizardBtn" type="button">接入向导</button><button class="btn btn-accent compact-btn" id="connectorsAdd" type="button">添加外接</button></div></div><p class="panel-note">连接已安装的软件 MCP，或提供 HTTP JSON 接口的知识库／软件。保存不启动服务；连接和能力启用需分别确认，操作继续遵循审批。</p><p class="field-hint">凭据填写环境变量名，不保存 Token／Key。查询只发送到你选择的外接知识库，结果会作为参考数据进入所选模型；不会自动上传本地知识库或对话。</p><p id="connectorsStatus" class="settings-message" role="status" aria-live="polite"></p><div id="connectorsList"></div><div id="externalKnowledgePanel" hidden><label class="form-field" for="externalKnowledgeSource">外部知识来源<select id="externalKnowledgeSource"></select></label><label class="form-field" for="externalKnowledgeQuery">检索关键词<input id="externalKnowledgeQuery" type="search" maxlength="256" placeholder="确认后向所选外接知识库发送"><button class="btn btn-soft" id="externalKnowledgeSearch" type="button">确认并检索外部知识</button></label><div id="externalKnowledgeResults"></div><section id="externalKnowledgeReader" hidden><p class="field-hint" id="externalKnowledgeSourceLabel"></p><pre class="memory-editor" id="externalKnowledgeContent"></pre><button class="btn btn-soft" id="externalKnowledgeMore" type="button" hidden>确认读取后续页</button></section></div></section>
       <section class="settings-card" id="workspaceShareCard" hidden><h2>扫码／链接连接工作区</h2><p class="panel-note">电脑主动连接你的自建 HTTPS 中转，手机流量也能查看当前工作区。默认只读，控制权限逐设备授予。</p><button class="btn btn-soft" id="settingsWorkspaceShareBtn" type="button" aria-haspopup="dialog" aria-controls="workspaceShareDialog">连接工作区</button><p class="field-hint">需要先部署自建中转。不会自动上传数据或打开电脑公网端口。</p></section>
       <div class="settings-card" id="integrationsUnavailable"><h2>手机与外部连接</h2><p class="panel-note">微信连接需要桌面版的 Windows 安全存储。在支持的桌面环境中，可扫码绑定并查看工作区任务状态。</p></div>
       <section class="settings-card weixin-card" id="weixinCard" aria-labelledby="weixinTitle" hidden>
@@ -2292,6 +2306,7 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
     <div class="panel-heading"><h3>任务进度</h3><span class="count-badge" id="todoCount">0/0</span></div>
     <progress class="task-progress" id="todoProgress" max="1" value="0" aria-label="任务完成进度" hidden></progress>
     <div id="todoList"></div>
+    <details id="persistentTasks" hidden><summary>持久任务与验收 <span id="taskCardCount" class="count-badge">0</span></summary><p class="panel-note">重启后保留。工作完成、命令验证和人工验收分开记录，不自动重放命令。</p><div class="settings-actions"><button class="btn btn-soft compact-btn" id="taskNew" type="button">新建任务</button><button class="btn btn-soft compact-btn" id="taskSaveTodos" type="button">保存当前待办</button><button class="btn btn-soft compact-btn" id="taskChecks" type="button">验收命令</button><button class="btn btn-soft compact-btn" id="taskRefresh" type="button">刷新</button></div><label class="check-field"><input id="taskShowArchived" type="checkbox">显示归档任务</label><p id="tasksStatus" class="settings-message" role="status"></p><div id="taskCards"></div><button class="btn btn-soft" id="taskCancelRun" type="button" hidden>停止验收</button></details>
   </section>
   <div class="inspector-tabs" role="tablist" aria-label="工作台面板">
     <button class="panel-tab" id="teamTab" type="button" role="tab" aria-selected="true" aria-controls="teamPanel" tabindex="0"><svg class="icon" aria-hidden="true"><use href="#i-agents"/></svg>协作</button>
@@ -2308,7 +2323,7 @@ input[type='checkbox']:disabled { opacity: .4; cursor: not-allowed; }
     </section>
     <section class="panel-section" id="agentReader" hidden aria-label="智能体独立会话"><div class="thread-header"><button class="agent-action" id="closeAgentReader" type="button">收起</button><strong id="agentReaderName"></strong><button class="agent-action" id="refreshAgentReader" type="button">刷新</button></div><p class="panel-note" id="agentReaderStatus">只读查看独立会话，不会切换主智能体。</p><div class="thread-reader" id="agentReaderBody"></div></section>
   </div>
-  <div class="panel-scroll" id="changesPanel" role="tabpanel" aria-labelledby="changesTab" tabindex="0" hidden><p class="change-summary">当前记录中成功完成的写入和编辑，点击可定位工具结果。不是 Git 差异，不包含命令间接修改。子智能体变更仅在实时接收时汇入；重载后请查看独立会话。</p><div id="changesList"></div></div>
+  <div class="panel-scroll" id="changesPanel" role="tabpanel" aria-labelledby="changesTab" tabindex="0" hidden><div class="settings-subtabs" role="group" aria-label="变更来源"><button class="btn btn-soft compact-btn" id="changesToolTab" type="button" aria-pressed="true">工具记录</button><button class="btn btn-soft compact-btn" id="changesGitTab" type="button" aria-pressed="false">Git 审阅</button></div><section id="toolChangesView"><p class="change-summary">当前记录中成功完成的写入和编辑，点击可定位工具结果。不是 Git 差异，不包含命令间接修改。子智能体变更仅在实时接收时汇入；重载后请查看独立会话。</p><div id="changesList"></div></section><section id="gitReviewView" hidden><p class="panel-note">仓库实际差异，按原始字节读取，不执行 Git 过滤器。仅审阅与下载补丁，不修改暂存区或项目文件。</p><label class="form-field" for="gitBase">本地比较基准<input id="gitBase" type="text" value="HEAD" maxlength="200" spellcheck="false"></label><label class="form-field" for="gitRange">比较范围<select id="gitRange"><option value="unstaged">未暂存：暂存区 → 工作树</option><option value="staged">已暂存：HEAD → 暂存区</option><option value="baseline">总差异：所选基准 → 工作树</option><option value="untracked">未跟踪（不含 ignore 文件）</option></select></label><div class="settings-actions"><button class="btn btn-soft compact-btn" id="gitRefresh" type="button">刷新差异</button><button class="btn btn-soft compact-btn" id="gitExport" type="button" disabled>导出选定补丁</button><button class="btn btn-soft compact-btn" id="gitCancel" type="button" hidden>取消读取</button></div><p class="settings-message" id="gitStatus" role="status"></p><div id="gitFiles"></div></section></div>
 </aside>
 
 <span class="sr-only" id="panelResizeHint">拖动调整宽度，双击或 Enter 恢复默认；左右方向键微调，Shift 加速，Home 最窄，End 最宽，拖拽时 Escape 取消。</span>
@@ -2693,9 +2708,10 @@ async function api(path, opts) {
   // The history operation owns its own pending gate. Its request must not be
   // rejected by that same gate after the user has already confirmed the target.
   const agentModelAction = /^\/api\/agents\/[^/]+\/model$/.test(path);
+  const validationApproval = path.startsWith('/api/approvals/') && !!app.state.validationBusy;
   const connectorAction = path === '/api/connectors' || path.startsWith('/api/connectors/');
   const knowledgeAction = path.startsWith('/api/knowledge/');
-  const allowed = connectorAction ? canManageConnectors() : agentModelAction ? canOperate() : knowledgeAction ? knowledgeLocal() : sharingAction ? canManageSharing() : statisticsAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.statistics : updateOpenAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.desktop : updateSettingsAction ? canOperate() && !app.auth.remote : appearanceAction ? canOperate() && !app.auth.remote && !!app.state.desktop : accountAction ? canOperate() && !app.auth.remote : windowAction ? app.auth.authenticated && app.auth.role === 'operator' && app.state.desktopWindow : updateCheck ? app.auth.authenticated && app.connected : workspaceAction || historyAction ? canOperate() : canControl(sessionAction);
+  const allowed = validationApproval ? canOperate() && !app.auth.remote : connectorAction ? canManageConnectors() : agentModelAction ? canOperate() : knowledgeAction ? knowledgeLocal() : sharingAction ? canManageSharing() : statisticsAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.statistics : updateOpenAction ? app.auth.authenticated && app.auth.role === 'operator' && app.connected && !app.auth.remote && !!app.state.desktop : updateSettingsAction ? canOperate() && !app.auth.remote : appearanceAction ? canOperate() && !app.auth.remote && !!app.state.desktop : accountAction ? canOperate() && !app.auth.remote : windowAction ? app.auth.authenticated && app.auth.role === 'operator' && app.state.desktopWindow : updateCheck ? app.auth.authenticated && app.connected : workspaceAction || historyAction ? canOperate() : canControl(sessionAction);
   if (init.method !== 'GET' && !path.startsWith('/api/auth/') && !allowed) {
     const error = new Error(app.auth.role === 'viewer' ? '只读访客不能修改工作区' : '尚未连接，操作未发送');
     error.status = 403;
@@ -3941,7 +3957,7 @@ function canOperate() {
 }
 
 function canControl(allowHistoryLoading) {
-  return canOperate() && (allowHistoryLoading || !conversationUi.pending) && !app.historySessionId && !app.deletingSession && !app.switchingWorkspace && !contextUi.pending && !historyUi.pending && !app.state.contextOperation && !app.state.memoryProcessing?.active;
+  return canOperate() && (allowHistoryLoading || !conversationUi.pending) && !app.historySessionId && !app.deletingSession && !app.switchingWorkspace && !contextUi.pending && !historyUi.pending && !app.state.contextOperation && !app.state.validationBusy && !app.state.memoryProcessing?.active;
 }
 
 function canEditDraft() {
@@ -3957,6 +3973,7 @@ function syncComposerStatus() {
     : !app.connected ? '连接暂时断开，可以继续编辑草稿；重连后再发送。'
     : app.switchingWorkspace ? '正在切换工作区，暂时不能发送。'
     : app.deletingSession ? '正在处理会话，完成后可发送；草稿仍可编辑。'
+    : app.state.validationBusy ? '正在运行项目验收，可以先编辑草稿；请在持久任务处停止或等待完成。'
     : app.state.memoryProcessing?.active ? '正在整理长期记忆，可以先编辑草稿，完成后再发送。'
     : historyUi.pending ? '正在核对或回滚对话，可以先编辑草稿，完成后再发送。'
     : contextUi.pending || app.state.contextOperation ? '正在处理对话或上下文，可以先编辑草稿，完成后再发送。'
@@ -4289,7 +4306,7 @@ function syncAccess() {
   $('resumeHistoryBtn').disabled = !canOperate() || app.state.busy;
   $('resumeHistoryBtn').hidden = !app.historySessionId || app.auth.role !== 'operator' || !!(app.state.agents || []).find(function (agent) { return agent.role !== 'main' && agent.sessionId === app.historySessionId; });
   document.querySelectorAll('[data-write]').forEach(function (node) {
-    node.disabled = !control || node.dataset.resolved === 'true' || node.dataset.submitting === 'true';
+    node.disabled = !(node.dataset.validationApproval === 'true' ? localAvailable() : control) || node.dataset.resolved === 'true' || node.dataset.submitting === 'true';
   });
   expertChip.disabled = !control || app.sending || expertChip.dataset.submitting === 'true';
   $('expertModelsBtn').disabled = !canOperate() || app.switchingWorkspace;
@@ -4305,6 +4322,7 @@ function syncAccess() {
   $('dashboardRole').textContent = app.auth.authenticated ? (app.auth.role === 'viewer' ? '只读访客 · 无写入权限' : app.auth.required ? '已认证 · 操作员' : '本地操作员') : '等待登录';
   $('dashboardAddress').textContent = location.host;
   syncMemoryAccess();
+  syncLocalFeatures();
   syncConnectorAccess();
   renderRetrySettings();
   syncSkillImport();
@@ -5161,6 +5179,7 @@ function onWorkspaceChanged(newCwd, previousCwd) {
   closeMentionMenu(); mentionUi.version++; mentionUi.workspace = ''; mentionUi.loading = false; mentionUi.candidates = [];
   memoryCatalogUi.version++; memoryCatalogUi.workspace = ''; memoryCatalogUi.loading = false; memoryCatalogUi.rows = [];
   resetMemoryEditor();
+  resetLocalFeatures();
   resetConnectorsView();
     const dialog = $('agentModelDialog');
     if (dialog) { dialog.close(); dialog.remove(); }
@@ -6790,7 +6809,8 @@ function addApproval(f) {
   card.appendChild(actions);
   chatCol.appendChild(card);
 
-  const rec = { id: f.id, card: card, allow: allow, deny: deny, always: always, status: status, resolved: false };
+  const rec = { id: f.id, card: card, allow: allow, deny: deny, always: always, status: status, resolved: false, localOnly: !!f.localOnly };
+  if (rec.localOnly) [allow, deny, always].filter(Boolean).forEach(function (node) { node.dataset.validationApproval = 'true'; node.disabled = !localAvailable(); });
   allow.addEventListener('click', function () { resolveApproval(rec, true, false); });
   deny.addEventListener('click', function () { resolveApproval(rec, false, false); });
   if (always) always.addEventListener('click', function () { resolveApproval(rec, true, true); });
@@ -6800,7 +6820,7 @@ function addApproval(f) {
 }
 
 async function resolveApproval(rec, allow, always) {
-  if (rec.resolved || rec.submitted || !canControl()) return;
+  if (rec.resolved || rec.submitted || !(rec.localOnly ? localAvailable() : canControl())) return;
   requestSubmitting(rec, true);
   rec.status.textContent = '提交中…';
   rec.status.className = 'ap-status';
@@ -7404,6 +7424,612 @@ function makeDialog(id, title, description) {
     fail: function (message) { error.textContent = message; error.hidden = false; },
     show: function () { modal.showModal(); }
   };
+}
+
+/* Local-only persistence, review and versioned knowledge share bounded requests. */
+const localRequests = new Set();
+const taskUi = { generation: 0, snapshot: null, loading: false, timer: 0 };
+const gitUi = { generation: 0, snapshot: null, loading: false, selected: new Set(), controller: null };
+const versionsUi = { generation: 0, state: null, preview: null };
+const taskStatusLabels = { pending: '未开始', in_progress: '进行中', completed: '工作完成', not_run: '未执行', awaiting_approval: '等待审批', running: '运行中', passed: '验证通过', failed: '失败', interrupted: '中断', denied: '未获批准', skipped: '明确跳过' };
+function localAvailable() { return canOperate() && !app.auth.remote && !app.switchingWorkspace; }
+async function localRequest(route, options) {
+  options = options || {};
+  if (!localAvailable()) throw new Error('此功能仅供当前工作区本机操作员使用。');
+  const workspace = app.state.workspaceId, epoch = connectionEpoch, controller = new AbortController();
+  const abort = function () { controller.abort(); };
+  localRequests.add(controller);
+  if (options.signal?.aborted) abort(); else options.signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(abort, options.timeoutMs || 45000);
+  try {
+    const headers = { 'X-Sakura-Workspace': workspace };
+    if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+    const response = await fetch(route, { method: options.body === undefined ? 'GET' : 'POST', headers: headers, credentials: 'same-origin', signal: controller.signal,
+      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }) });
+    const reader = response.body.getReader(), chunks = []; let size = 0;
+    try {
+      while (true) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength;
+        if (size > (options.maxBytes || 24 * 1024 * 1024)) { controller.abort(); throw new Error('返回内容超过安全上限，未下载不完整内容。'); } chunks.push(next.value); }
+    } finally { reader.releaseLock(); }
+    if (workspace !== app.state.workspaceId || epoch !== connectionEpoch) throw new Error('工作区或连接已改变，旧结果未应用。');
+    const blob = new Blob(chunks, { type: response.headers.get('content-type') || 'application/octet-stream' });
+    if (!response.ok) { let data; try { data = JSON.parse(await blob.text()); } catch (_) {} const error = new Error(data?.error || 'HTTP ' + response.status); error.status = response.status; throw error; }
+    const result = options.download ? blob : JSON.parse(await blob.text());
+    if (workspace !== app.state.workspaceId || epoch !== connectionEpoch) throw new Error('工作区或连接已改变，旧结果未应用。');
+    return result;
+  } finally { clearTimeout(timer); localRequests.delete(controller); options.signal?.removeEventListener('abort', abort); }
+}
+function downloadLocal(blob, name) {
+  const url = URL.createObjectURL(blob), link = el('a'); link.href = url; link.download = name; document.body.appendChild(link); link.click(); link.remove(); setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+function resetLocalFeatures() {
+  localRequests.forEach(function (controller) { controller.abort(); }); localRequests.clear();
+  clearTimeout(taskUi.timer); taskUi.generation++; taskUi.snapshot = null; taskUi.loading = false;
+  gitUi.generation++; gitUi.snapshot = null; gitUi.loading = false; gitUi.selected.clear(); gitUi.controller?.abort();
+  versionsUi.generation++; versionsUi.state = null; versionsUi.preview = null;
+  ['taskCards', 'gitFiles'].forEach(function (id) { $(id).replaceChildren(); });
+  ['tasksStatus', 'gitStatus'].forEach(function (id) { $(id).textContent = ''; });
+  document.querySelectorAll('.local-detail-modal').forEach(function (dialog) { dialog.close(); dialog.remove(); });
+}
+function syncLocalFeatures() {
+  const available = localAvailable();
+  $('persistentTasks').hidden = !available || !app.state.tasksAvailable;
+  $('changesGitTab').hidden = !available;
+  ['taskNew', 'taskSaveTodos', 'taskChecks'].forEach(function (id) { $(id).disabled = !available || taskUi.loading || !!app.state.validationBusy; });
+  $('taskRefresh').disabled = !available || taskUi.loading;
+  $('taskCancelRun').hidden = !taskUi.snapshot?.activeRunId; $('taskCancelRun').disabled = !available;
+  $('gitRefresh').disabled = !available || gitUi.loading;
+  $('gitCancel').hidden = !gitUi.loading;
+  $('gitExport').disabled = !available || gitUi.loading || !gitUi.selected.size || $('gitRange').value === 'untracked' || !!app.state.validationBusy;
+  $('backupCard').hidden = !available;
+  ['backupCreate', 'backupRestore', 'documentImportBtn', 'connectorWizardBtn'].forEach(function (id) { $(id).disabled = !available || !!app.state.validationBusy; });
+  $('knowledgeVersionsBtn').disabled = !available || knowledgeUi.importing || !!app.state.validationBusy;
+}
+function localDialog(id, title, help) {
+  const workspace = app.state.workspaceId, epoch = connectionEpoch;
+  const dialog = makeDialog(id, title, help); dialog.modal.classList.add('local-detail-modal');
+  dialog.targetCurrent = function () { return workspace === app.state.workspaceId && epoch === connectionEpoch; };
+  dialog.current = function () { return dialog.modal.isConnected && dialog.targetCurrent(); };
+  return dialog;
+}
+function taskEditable(task) { const result = { ...task }; ['createdAt', 'updatedAt', 'definitionHash', 'acceptance'].forEach(function (key) { delete result[key]; }); return result; }
+async function loadTasks() {
+  if (!localAvailable() || taskUi.loading) return;
+  const generation = ++taskUi.generation; taskUi.loading = true; clearTimeout(taskUi.timer); syncLocalFeatures();
+  try {
+    const saved = await localRequest('/api/tasks'); if (generation !== taskUi.generation) return;
+    taskUi.snapshot = saved; renderTaskCards();
+    $('tasksStatus').textContent = saved.error || (saved.activeRunId ? '验收进行中；等待审批时请查看审批卡。' : '任务保存在当前工作区；验证结果不等于人工验收。');
+    if (saved.activeRunId && $('persistentTasks').open) taskUi.timer = setTimeout(loadTasks, 1500);
+  } catch (error) { if (generation === taskUi.generation) $('tasksStatus').textContent = error.message; }
+  finally { if (generation === taskUi.generation) { taskUi.loading = false; syncLocalFeatures(); } }
+}
+function taskAction(parent, label, className, action) { const button = el('button', 'btn btn-soft compact-btn ' + className, label); button.type = 'button'; button.addEventListener('click', action); parent.appendChild(button); return button; }
+function renderTaskCards() {
+  const saved = taskUi.snapshot, list = $('taskCards'); list.replaceChildren(); if (!saved) return;
+  $('taskCardCount').textContent = String(saved.tasks.filter(function (task) { return !task.archived; }).length);
+  saved.tasks.filter(function (task) { return $('taskShowArchived').checked || !task.archived; }).forEach(function (task) {
+    const row = el('article', 'task-card'); row.dataset.taskId = task.id; row.appendChild(el('strong', '', task.title));
+    const run = saved.runs.find(function (run) { return run.taskId === task.id; });
+    row.appendChild(el('p', 'field-hint', (taskStatusLabels[task.status] || task.status) + (task.archived ? ' · 已归档' : '') + ' · ' + (run ? taskStatusLabels[run.status] : '未验证') + (task.acceptance ? ' · 已人工验收' : ' · 未人工验收')));
+    if (run) row.appendChild(el('p', 'field-hint', '历史验证结果；打开报告核对配置和代码是否已改变。'));
+    if (task.sessionId) row.appendChild(el('p', 'field-hint', '关联会话：' + task.sessionId));
+    const actions = el('div', 'settings-actions');
+    taskAction(actions, '编辑', 'task-edit', function () { openTaskEditor(task); });
+    if (!task.archived) taskAction(actions, '运行验收', 'task-verify', function () { confirmTaskValidation(task); }).disabled = !!saved.activeRunId || !task.checkIds.length;
+    if (run) taskAction(actions, '验收报告', 'task-report', function () { void openTaskReport(run.id); });
+    if (!task.archived) taskAction(actions, '人工验收', 'task-accept', function () { confirmTaskAcceptance(task); }).disabled = task.status !== 'completed' || !!saved.activeRunId;
+    taskAction(actions, task.archived ? '恢复任务' : '归档', 'task-archive', async function () { try {
+      const next = await localRequest('/api/tasks', { body: { task: { ...taskEditable(task), archived: !task.archived }, revision: saved.revision, fingerprint: saved.fingerprint, confirmed: true } });
+      taskUi.snapshot = next; renderTaskCards();
+    } catch (error) { $('tasksStatus').textContent = error.message; } });
+    if (!task.archived) taskAction(actions, '独立目录开发', 'task-isolated', function () { void openIsolatedTask(task); });
+    taskAction(actions, '准备继续', 'task-continue', function () {
+      const dialog = localDialog('taskContinueDialog', '继续持久任务', '仅切换到关联会话并准备草稿，不发送消息、不重放命令。原会话不存在时保留任务。');
+      dialog.submit.textContent = '准备草稿'; dialog.panel.addEventListener('submit', async function (event) { event.preventDefault(); dialog.busy(true);
+        try { if (input.value.trim()) throw new Error('当前输入框已有草稿，请先保存或清空后再准备任务。');
+          if (task.sessionId && task.sessionId !== app.state.sessionId) {
+          const result = await localRequest('/api/sessions', { body: { id: task.sessionId } }); adoptSession(result.sessionId); }
+          if (!dialog.current()) return;
+          input.value = task.title + (task.description ? '\n' + task.description : '') + '\n验收标准：\n' + task.criteria.join('\n'); autoGrow(); dialog.busy(false); dialog.close(); input.focus();
+        } catch (error) { dialog.busy(false); dialog.fail(error.message); }
+      }); dialog.show(); dialog.cancel.focus();
+    }).disabled = !!saved.activeRunId;
+    row.appendChild(actions); list.appendChild(row);
+  });
+  if (!list.children.length) list.appendChild(el('p', 'panel-note', '尚无持久任务。可新建或将当前待办保存为任务。'));
+}
+async function openTaskEditor(task, fromTodos) {
+  if (!localAvailable() || $('taskDialog')) return;
+  if (!taskUi.snapshot) await loadTasks(); const saved = taskUi.snapshot; if (!saved) return;
+  const dialog = localDialog('taskDialog', task ? '编辑持久任务' : '新建持久任务', '保存不执行命令；工作进度与验证结果、人工验收分别记录。');
+  const title = dialog.field('任务标题', el('input'), 'taskTitle'); title.required = true; title.maxLength = 200; title.value = task?.title || '';
+  const description = dialog.field('说明', el('textarea'), 'taskDescription'); description.maxLength = 12000; description.value = task?.description || '';
+  const priority = dialog.field('优先级', el('select'), 'taskPriority'); ['high', 'medium', 'low'].forEach(function (value, index) { priority.appendChild(new Option(['高', '中', '低'][index], value)); }); priority.value = task?.priority || 'medium';
+  const status = dialog.field('工作进度', el('select'), 'taskStatus'); ['pending', 'in_progress', 'completed'].forEach(function (value) { status.appendChild(new Option(taskStatusLabels[value], value)); }); status.value = task?.status || 'pending';
+  const criteria = dialog.field('验收标准（每行一项）', el('textarea'), 'taskCriteria'); criteria.value = (task?.criteria || []).join('\n'); criteria.rows = 3;
+  const stepSource = task?.steps || (fromTodos ? (app.state.todos || []).map(function (todo) { return { id: crypto.randomUUID(), content: todo.content, status: todo.status }; }) : []);
+  const steps = dialog.field('子任务（每行一项，完成项前加 [x]）', el('textarea'), 'taskSteps'); steps.rows = 4; steps.value = stepSource.map(function (step) { return (step.status === 'completed' ? '[x] ' : '') + step.content; }).join('\n');
+  const session = dialog.field('关联当前会话', el('input'), 'taskSession'); session.type = 'checkbox'; session.checked = !!task?.sessionId || !task && !!app.state.sessionId;
+  const choices = el('div'), selected = new Set(task?.checkIds || []);
+  saved.checks.forEach(function (check) { const label = el('label', 'check-field'), box = el('input'); box.type = 'checkbox'; box.checked = selected.has(check.id); box.dataset.checkId = check.id;
+    box.addEventListener('change', function () { if (box.checked) selected.add(check.id); else selected.delete(check.id); }); label.append(box, document.createTextNode(check.name + (check.required ? ' · 必选' : ' · 可选'))); choices.appendChild(label); });
+  dialog.field('验收命令（在工作台“验收命令”中配置）', choices, 'taskCheckChoices');
+  dialog.submit.textContent = '保存任务';
+  dialog.panel.addEventListener('submit', async function (event) {
+    event.preventDefault(); if (dialog.submit.disabled) return; dialog.busy(true);
+    const split = function (value) { return value.split(/\r?\n/).map(function (line) { return line.trim(); }).filter(Boolean); };
+    const nextSteps = split(steps.value).map(function (line, index) { const completed = /^\[x\]\s*/i.test(line), content = line.replace(/^\[x\]\s*/i, ''); const previous = stepSource[index];
+      return { id: previous?.content === content ? previous.id : crypto.randomUUID(), content: content, status: completed ? 'completed' : previous?.content === content && previous.status === 'in_progress' ? 'in_progress' : 'pending' }; });
+    const value = { ...(task ? { id: task.id } : {}), title: title.value.trim(), description: description.value, priority: priority.value, status: status.value,
+      steps: nextSteps, criteria: split(criteria.value), checkIds: Array.from(selected), archived: task?.archived || false,
+      ...(session.checked && (task?.sessionId || app.state.sessionId) ? { sessionId: task?.sessionId || app.state.sessionId } : {}) };
+    try { const result = await localRequest('/api/tasks', { body: { task: value, revision: saved.revision, fingerprint: saved.fingerprint, confirmed: true } });
+      taskUi.snapshot = result; renderTaskCards(); dialog.busy(false); dialog.close();
+    } catch (error) { dialog.busy(false); dialog.fail(error.message + '。草稿仍保留；版本冲突时请复制草稿后刷新再合并。'); }
+  }); dialog.show(); title.focus();
+}
+async function openTaskChecks() {
+  if ($('taskChecksDialog')) return; if (!taskUi.snapshot) await loadTasks(); const saved = taskUi.snapshot; if (!saved) return;
+  const dialog = localDialog('taskChecksDialog', '项目验收命令', '只保存命令配置，不运行。运行时会再次显示命令并遵循现有审批。工作目录只能在当前工作区内。');
+  const holder = el('div'), rows = []; dialog.field('检查项', holder, 'taskCheckRows');
+  function add(check) {
+    check = check || { id: crypto.randomUUID(), name: '', shell: 'bash', command: '', workdir: '.', timeoutMs: 120000, required: true };
+    const row = el('section', 'local-check-row'), fields = {};
+    [['name', '名称', 'input'], ['command', '命令', 'textarea'], ['workdir', '相对工作目录', 'input'], ['timeoutMs', '超时（毫秒）', 'input']].forEach(function (spec) {
+      const label = el('label', 'form-field', spec[1]), control = el(spec[2]); control.value = String(check[spec[0]]); control.dataset.checkField = spec[0]; control.setAttribute('aria-label', spec[1]);
+      if (spec[0] === 'timeoutMs') { control.type = 'number'; control.min = '100'; control.max = '600000'; } label.appendChild(control); row.appendChild(label); fields[spec[0]] = control;
+    });
+    const shell = el('select'); shell.setAttribute('aria-label', '命令解释器'); ['bash', 'pwsh'].forEach(function (value) { shell.appendChild(new Option(value, value)); }); shell.value = check.shell; row.appendChild(shell);
+    const label = el('label', 'check-field'), required = el('input'); required.type = 'checkbox'; required.checked = check.required; label.append(required, document.createTextNode('必选检查')); row.appendChild(label);
+    const item = { id: check.id, row: row, fields: fields, shell: shell, required: required }; rows.push(item);
+    taskAction(row, '移除检查', '', function () { rows.splice(rows.indexOf(item), 1); row.remove(); }); holder.appendChild(row);
+  }
+  saved.checks.forEach(add); const addButton = taskAction(holder, '添加检查', 'task-check-add', function () { if (rows.length < 32) add(); });
+  dialog.submit.textContent = '保存命令'; dialog.panel.addEventListener('submit', async function (event) { event.preventDefault(); dialog.busy(true);
+    const checks = rows.map(function (item) { return { id: item.id, name: item.fields.name.value, command: item.fields.command.value, workdir: item.fields.workdir.value, timeoutMs: Number(item.fields.timeoutMs.value), shell: item.shell.value, required: item.required.checked }; });
+    try { const result = await localRequest('/api/tasks/checks', { body: { checks: checks, revision: saved.revision, fingerprint: saved.fingerprint, confirmed: true } }); taskUi.snapshot = result; dialog.busy(false); dialog.close(); renderTaskCards(); }
+    catch (error) { dialog.busy(false); dialog.fail(error.message + '。当前填写内容已保留。'); }
+  }); dialog.show(); addButton.focus();
+}
+function confirmTaskValidation(task) {
+  const saved = taskUi.snapshot; if (!saved || $('taskVerifyDialog')) return;
+  const dialog = localDialog('taskVerifyDialog', '运行项目验收', '以下命令会在本机执行，可能修改文件或访问网络；遵循当前审批策略。失败即停止，重跑必须重新确认。');
+  const checks = saved.checks.filter(function (check) { return task.checkIds.includes(check.id); }), skip = new Set();
+  checks.forEach(function (check) { const box = el('div', 'local-check-row'); box.appendChild(el('strong', '', check.name)); box.appendChild(el('pre', 'evidence-text', check.shell + ' · ' + check.workdir + ' · ' + check.timeoutMs + 'ms\n' + check.command));
+    if (!check.required) { const label = el('label', 'check-field'), input = el('input'); input.type = 'checkbox'; label.append(input, document.createTextNode('本次明确跳过此可选检查')); input.addEventListener('change', function () { if (input.checked) skip.add(check.id); else skip.delete(check.id); }); box.appendChild(label); }
+    dialog.panel.insertBefore(box, dialog.submit.parentElement);
+  });
+  dialog.submit.textContent = '确认运行'; dialog.panel.addEventListener('submit', async function (event) { event.preventDefault(); dialog.busy(true);
+    try { await localRequest('/api/tasks/verify', { body: { taskId: task.id, revision: saved.revision, fingerprint: saved.fingerprint, skipIds: Array.from(skip), confirmed: true } });
+      dialog.busy(false); dialog.close(); void loadTasks(); }
+    catch (error) { dialog.busy(false); dialog.fail(error.message); }
+  }); dialog.show(); dialog.cancel.focus();
+}
+function confirmTaskAcceptance(task) {
+  const saved = taskUi.snapshot, dialog = localDialog('taskAcceptDialog', '人工验收确认', '命令通过不代表功能符合预期。请确认已核对任务说明与验收标准；本次确认只记录到当前任务版本。');
+  const note = dialog.field('验收说明（可选）', el('textarea'), 'taskAcceptNote'); note.maxLength = 2000;
+  dialog.submit.textContent = '确认验收'; dialog.panel.addEventListener('submit', async function (event) { event.preventDefault(); dialog.busy(true);
+    try { const result = await localRequest('/api/tasks/accept', { body: { taskId: task.id, note: note.value, revision: saved.revision, fingerprint: saved.fingerprint, confirmed: true } }); taskUi.snapshot = result; renderTaskCards(); dialog.busy(false); dialog.close(); }
+    catch (error) { dialog.busy(false); dialog.fail(error.message); }
+  }); dialog.show(); dialog.cancel.focus();
+}
+async function openTaskReport(runId) {
+  if ($('taskReportDialog')) return;
+  const dialog = localDialog('taskReportDialog', '验收报告', '真实退出码与历史日志。报告不证明未跟踪文件、子模块内部或外部服务状态没有变化。'); dialog.submit.hidden = true; dialog.cancel.textContent = '关闭'; dialog.show();
+  try { const data = await localRequest('/api/tasks/runs/' + encodeURIComponent(runId)); if (!dialog.modal.isConnected) return;
+    const run = data.run, content = el('div');
+    content.appendChild(el('p', 'settings-message', taskStatusLabels[run.status] + (data.definitionStale ? ' · 任务／命令配置已改变' : '') + (data.codeStale === true ? ' · 代码已变化，请重新验证' : data.codeStale === null ? ' · 代码新鲜度未验证' : ' · 已跟踪代码指纹一致')));
+    run.results.forEach(function (result) { const block = el('details'); block.open = true; block.appendChild(el('summary', '', result.name + ' · ' + taskStatusLabels[result.status] + ' · 退出码 ' + (result.exitCode === null ? '未知' : result.exitCode)));
+      block.appendChild(el('pre', 'evidence-text', result.command + '\n\n' + result.output + (result.truncated ? '\n[日志已截断]' : '') + (result.note ? '\n' + result.note : ''))); content.appendChild(block); });
+    if (run.error) content.appendChild(el('p', 'form-error', run.error));
+    taskAction(content, '导出 Markdown 报告', 'task-report-export', async function () { try { downloadLocal(await localRequest('/api/tasks/runs/' + encodeURIComponent(runId) + '/export', { download: true }), 'validation-' + runId + '.md'); } catch (error) { dialog.fail(error.message); } });
+    dialog.panel.insertBefore(content, dialog.submit.parentElement);
+  } catch (error) { dialog.fail(error.message); }
+}
+$('persistentTasks').addEventListener('toggle', function () { if (this.open) void loadTasks(); else clearTimeout(taskUi.timer); });
+$('taskNew').addEventListener('click', function () { void openTaskEditor(); });
+$('taskSaveTodos').addEventListener('click', function () { void openTaskEditor(null, true); });
+$('taskChecks').addEventListener('click', function () { void openTaskChecks(); });
+$('taskRefresh').addEventListener('click', loadTasks);
+$('taskShowArchived').addEventListener('change', renderTaskCards);
+$('taskCancelRun').addEventListener('click', async function () { try { await localRequest('/api/tasks/cancel', { body: { runId: taskUi.snapshot?.activeRunId, confirmed: true } }); void loadTasks(); } catch (error) { $('tasksStatus').textContent = error.message; } });
+
+function renderGitReview() {
+  const saved = gitUi.snapshot, list = $('gitFiles'); list.replaceChildren();
+  if (!saved) { syncLocalFeatures(); return; }
+  const range = $('gitRange').value, files = saved.ranges[range] || [];
+  const statuses = { added: '新增', modified: '修改', deleted: '删除', renamed: '重命名', type_changed: '类型变化', conflicted: '冲突', untracked: '未跟踪' };
+  $('gitStatus').textContent = saved.message || (files.length + ' 项 · 基准 ' + (saved.base.oid ? saved.base.oid.slice(0, 12) : '空仓库') + (saved.scope ? ' · 仅 ' + saved.scope : '') + ' · 原始字节比较，不应用换行／内容过滤器；子模块仅检查指针与 HEAD。');
+  files.forEach(function (file) {
+    const row = el('details', 'git-review-file'); row.dataset.gitFile = file.id;
+    const heading = el('summary', '', (file.reviewed ? '已审阅 · ' : '') + (statuses[file.status] || file.status) + ' · ' + file.path); row.appendChild(heading);
+    if (file.oldPath && file.oldPath !== file.path) row.appendChild(el('p', 'field-hint', '原路径：' + file.oldPath));
+    if (file.binary || file.conflict || file.submodule || file.symlink) row.appendChild(el('p', 'field-hint', [file.binary ? '二进制' : '', file.conflict ? '存在冲突' : '', file.submodule ? '子模块（不遍历内部变化）' : '', file.symlink ? '符号链接（不跟随目标）' : ''].filter(Boolean).join(' · ') + '，首版不导出此项。'));
+    if (file.oldMode !== file.newMode) row.appendChild(el('p', 'field-hint', '模式：' + (file.oldMode || '无') + ' → ' + (file.newMode || '无')));
+    if (file.patch !== undefined || file.text !== undefined) row.appendChild(el('pre', 'evidence-text', file.patch !== undefined ? file.patch : file.text));
+    const actions = el('div', 'settings-actions');
+    if (file.range === 'untracked' && !file.selected && !file.symlink) taskAction(actions, '明确读取此文件', 'git-read-file', function () { void gitAction('/api/git-review/read', { path: file.path }); });
+    if (file.range !== 'untracked' || file.selected) taskAction(actions, file.reviewed ? '取消已审阅' : '标记已审阅', 'git-mark-file', function () { void gitAction('/api/git-review/reviewed', { fileId: file.id, reviewed: !file.reviewed, expectedStoreFingerprint: saved.storeFingerprint }); }).disabled = !!app.state.validationBusy;
+    if (file.exportable && range !== 'untracked') { const label = el('label', 'check-field'), checked = el('input'); checked.type = 'checkbox'; checked.checked = gitUi.selected.has(file.id); checked.className = 'git-export-select';
+      checked.addEventListener('change', function () { if (checked.checked) gitUi.selected.add(file.id); else gitUi.selected.delete(file.id); syncLocalFeatures(); }); label.append(checked, document.createTextNode('加入补丁')); actions.appendChild(label); }
+    row.appendChild(actions); list.appendChild(row);
+  });
+  if (!files.length) list.appendChild(el('p', 'panel-note', '这个比较范围没有可展示的变化。'));
+  syncLocalFeatures();
+}
+async function loadGitReview() {
+  if (!localAvailable() || gitUi.loading) return;
+  const generation = ++gitUi.generation, controller = new AbortController(); gitUi.controller = controller; gitUi.loading = true; gitUi.selected.clear(); gitUi.snapshot = null; $('gitFiles').replaceChildren();
+  $('gitStatus').textContent = '正在读取仓库差异…'; syncLocalFeatures();
+  try { const result = await localRequest('/api/git-review?baseRef=' + encodeURIComponent($('gitBase').value.trim() || 'HEAD'), { signal: controller.signal });
+    if (generation === gitUi.generation) { gitUi.snapshot = result; renderGitReview(); }
+  } catch (error) { if (generation === gitUi.generation) $('gitStatus').textContent = controller.signal.aborted ? '已取消读取；未改变仓库。' : error.message; }
+  finally { if (generation === gitUi.generation) { gitUi.loading = false; gitUi.controller = null; syncLocalFeatures(); } }
+}
+async function gitAction(route, body) {
+  const saved = gitUi.snapshot; if (!saved || gitUi.loading) return;
+  const generation = ++gitUi.generation, controller = new AbortController(); gitUi.controller = controller; gitUi.loading = true; syncLocalFeatures();
+  try { const result = await localRequest(route, { body: { ...body, expectedSnapshotId: saved.snapshotId, baseRef: saved.base.requestedRef, selectedUntracked: saved.selectedUntracked, confirmed: true },
+      signal: controller.signal, download: route.endsWith('/export'), maxBytes: route.endsWith('/export') ? 4 * 1024 * 1024 : 24 * 1024 * 1024 });
+    if (generation !== gitUi.generation) return;
+    if (route.endsWith('/export')) { downloadLocal(result, 'sakuracode-' + $('gitRange').value + '.patch'); $('gitStatus').textContent = '选定补丁已生成下载；未修改暂存区和项目文件。'; }
+    else { gitUi.snapshot = result; gitUi.selected.clear(); renderGitReview(); }
+  } catch (error) { if (generation === gitUi.generation) { $('gitStatus').textContent = error.message + '。内容有变化时请刷新后重新审阅。'; if (error.status === 409) { gitUi.snapshot = null; gitUi.selected.clear(); $('gitFiles').replaceChildren(); } } }
+  finally { if (generation === gitUi.generation) { gitUi.loading = false; gitUi.controller = null; syncLocalFeatures(); } }
+}
+$('changesGitTab').addEventListener('click', function () { $('toolChangesView').hidden = true; $('gitReviewView').hidden = false; this.setAttribute('aria-pressed', 'true'); $('changesToolTab').setAttribute('aria-pressed', 'false'); void loadGitReview(); });
+$('changesToolTab').addEventListener('click', function () { $('toolChangesView').hidden = false; $('gitReviewView').hidden = true; this.setAttribute('aria-pressed', 'true'); $('changesGitTab').setAttribute('aria-pressed', 'false'); gitUi.controller?.abort(); });
+$('gitRefresh').addEventListener('click', loadGitReview);
+$('gitCancel').addEventListener('click', function () { gitUi.controller?.abort(); });
+$('gitRange').addEventListener('change', function () { gitUi.selected.clear(); renderGitReview(); });
+$('gitBase').addEventListener('input', function () { gitUi.controller?.abort(); gitUi.snapshot = null; gitUi.selected.clear(); $('gitFiles').replaceChildren(); $('gitStatus').textContent = '基准已改变，请刷新差异。'; syncLocalFeatures(); });
+$('gitExport').addEventListener('click', function () { void gitAction('/api/git-review/export', { range: $('gitRange').value, fileIds: Array.from(gitUi.selected) }); });
+
+async function openKnowledgeVersions() {
+  if (!knowledgeLocal() || $('knowledgeVersionsDialog')) return;
+  const generation = ++versionsUi.generation;
+  const dialog = localDialog('knowledgeVersionsDialog', '知识集合与版本', '旧批次不会自动迁移。管理后默认检索当前版本，历史资料与原引用保留；不扫描或上传外部资料。');
+  dialog.submit.hidden = true; dialog.cancel.textContent = '关闭'; const content = el('div'); content.id = 'knowledgeVersionCollections'; dialog.panel.insertBefore(content, dialog.submit.parentElement); dialog.show();
+  try {
+    const result = await localRequest('/api/knowledge/versions'); if (generation !== versionsUi.generation || !dialog.modal.isConnected) return; versionsUi.state = result;
+    if (result.errors?.length) { dialog.fail(result.errors.join('；')); return; }
+    const expected = { revision: result.revision, fingerprint: result.fingerprint };
+    (result.legacyBatches || []).forEach(function (batch) {
+      const row = el('section', 'local-check-row'); row.appendChild(el('strong', '', '未纳管批次 · ' + batch.batchId)); row.appendChild(el('p', 'field-hint', batch.documents.length + ' 份文档；登记只建立版本关系，不改原文件。'));
+      taskAction(row, '登记版本管理', 'knowledge-adopt', function () { dialog.close();
+        const confirm = localDialog('knowledgeAdoptDialog', '登记现有知识批次', '将此批次登记为独立集合的第一个版本。原文件、文档 ID 和内容不变。');
+        confirm.panel.insertBefore(el('p', 'field-hint', batch.batchId), confirm.submit.parentElement);
+        confirm.panel.addEventListener('submit', async function (event) { event.preventDefault(); confirm.busy(true);
+          try { await localRequest('/api/knowledge/versions/adopt', { body: { batchId: batch.batchId, ...expected, confirmed: true } }); confirm.busy(false); confirm.close(); void openKnowledgeVersions(); }
+          catch (error) { confirm.busy(false); confirm.fail(error.message); }
+        }); confirm.show(); confirm.cancel.focus();
+      }).disabled = !batch.available;
+      content.appendChild(row);
+    });
+    (result.collections || []).forEach(function (collection) {
+      const row = el('section', 'local-check-row'); row.dataset.collectionId = collection.id; row.appendChild(el('strong', '', collection.name));
+      taskAction(row, '导入新版本', 'knowledge-update', function () { dialog.close(); openKnowledgeUpdate(collection, expected); });
+      collection.versions.forEach(function (version) {
+        const history = el('details'); history.appendChild(el('summary', '', '版本 ' + version.number + (version.id === collection.activeVersionId ? ' · 当前' : ' · 历史') + ' · ' + version.documents.length + ' 份文档'));
+        if (!version.available) history.appendChild(el('p', 'form-error', version.error || '版本不可读，原数据保留。'));
+        version.documents.forEach(function (doc) { taskAction(history, '阅读 ' + doc.path, 'knowledge-version-read', function () { dialog.close(); void readKnowledge(doc.id, 1, doc.version); }).disabled = !version.available; });
+        if (version.id !== collection.activeVersionId) taskAction(history, '恢复为当前版本', 'knowledge-activate', function () {
+          dialog.close(); const confirm = localDialog('knowledgeActivateDialog', '切换当前知识版本', '切换后默认检索此版本；其他版本归档保留，原有引用不变。');
+          confirm.panel.insertBefore(el('p', 'field-hint', collection.name + ' → 版本 ' + version.number), confirm.submit.parentElement);
+          confirm.panel.addEventListener('submit', async function (event) { event.preventDefault(); confirm.busy(true);
+            try { await localRequest('/api/knowledge/versions/activate', { body: { collectionId: collection.id, versionId: version.id, ...expected, confirmed: true } });
+              confirm.busy(false); confirm.close(); mentionUi.workspace = ''; knowledgeUi.workspace = ''; void loadKnowledge(); void openKnowledgeVersions(); }
+            catch (error) { confirm.busy(false); confirm.fail(error.message); }
+          }); confirm.show(); confirm.cancel.focus();
+        }).disabled = !version.available;
+        row.appendChild(history);
+      }); content.appendChild(row);
+    });
+    if (!content.children.length) content.appendChild(el('p', 'panel-note', '先导入 Markdown／TXT 资料，再明确选择批次登记版本管理。'));
+  } catch (error) { if (generation === versionsUi.generation && dialog.modal.isConnected) dialog.fail(error.message); }
+}
+function openKnowledgeUpdate(collection, expected) {
+  const dialog = localDialog('knowledgeUpdateDialog', '更新知识集合', '选择这个集合的新版本完整文件列表，先预览增删改再确认。未包含的旧文件仅退出当前版，历史仍保留。');
+  const picker = dialog.field('选择 Markdown／TXT 文件', el('input'), 'knowledgeUpdateFiles'); picker.type = 'file'; picker.accept = '.md,.txt,text/plain,text/markdown'; picker.multiple = true;
+  const folder = dialog.field('或选择完整文件夹', el('input'), 'knowledgeUpdateFolder'); folder.type = 'file'; folder.multiple = true; folder.setAttribute('webkitdirectory', '');
+  const removeTop = dialog.field('文件夹路径去掉最外层目录', el('input'), 'knowledgeUpdateStripFolder'); removeTop.type = 'checkbox';
+  const preview = el('div'); preview.id = 'knowledgeUpdatePreview'; dialog.panel.insertBefore(preview, dialog.submit.parentElement);
+  let files = [], prepared = null, submitted = false;
+  dialog.submit.textContent = '预览版本差异';
+  const reset = function () { if (prepared) void localRequest('/api/knowledge/versions/cancel', { body: { previewId: prepared.previewId, confirmed: true } }).catch(function () {}); prepared = null; preview.replaceChildren(); dialog.submit.textContent = '预览版本差异'; };
+  picker.addEventListener('change', function () { folder.value = ''; files = Array.from(picker.files); reset(); });
+  folder.addEventListener('change', function () { picker.value = ''; files = Array.from(folder.files); reset(); }); removeTop.addEventListener('change', reset);
+  dialog.modal.addEventListener('close', function () { if (prepared && !submitted && dialog.targetCurrent()) void localRequest('/api/knowledge/versions/cancel', { body: { previewId: prepared.previewId, confirmed: true } }).catch(function () {}); });
+  dialog.panel.addEventListener('submit', async function (event) {
+    event.preventDefault(); if (dialog.submit.disabled) return; dialog.busy(true);
+    try {
+      if (!prepared) {
+        if (!files.length || files.length > 128 || files.some(function (file) { return file.size > 256 * 1024 || !/\.(md|txt)$/i.test(file.name); }) || files.reduce(function (n, file) { return n + file.size; }, 0) > 4 * 1024 * 1024) throw new Error('请选择 1–128 个 Markdown／TXT 文件，每个最多 256 KiB、总计 4 MiB。');
+        const documents = await Promise.all(files.map(async function (file) { let name = file.webkitRelativePath || file.name; if (removeTop.checked && file.webkitRelativePath) name = name.split('/').slice(1).join('/');
+          return { path: name, content: new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer()) }; }));
+        if (!dialog.current()) return;
+        prepared = await localRequest('/api/knowledge/versions/preview', { body: { collectionId: collection.id, files: documents, ...expected, confirmed: true } });
+        preview.replaceChildren(); const titles = { added: '新增', removed: '移出当前版', modified: '修改', unchanged: '未变' };
+        ['added', 'removed', 'modified', 'unchanged'].forEach(function (kind) { preview.appendChild(el('p', 'field-hint', titles[kind] + ' ' + prepared.diff[kind].length)); prepared.diff[kind].forEach(function (file) { preview.appendChild(el('div', 'memory-entry-text', file)); }); });
+        preview.appendChild(el('p', 'panel-note', '确认只切换当前知识版本，不执行文件、不发送模型。预览过期或源文件变化会拒绝提交。'));
+        taskAction(preview, '重新预览当前选择', 'knowledge-repreview', function () { reset(); });
+        dialog.busy(false); dialog.submit.textContent = '确认发布新版本'; dialog.cancel.focus(); return;
+      }
+      await localRequest('/api/knowledge/versions/commit', { body: { previewId: prepared.previewId, ...prepared.expected, confirmed: true } });
+      submitted = true; dialog.busy(false); dialog.close(); knowledgeUi.workspace = ''; mentionUi.workspace = ''; void loadKnowledge(); void openKnowledgeVersions();
+    } catch (error) { dialog.busy(false); dialog.fail(error.message + '。文件选择保留；冲突或过期时需刷新后重新预览。'); }
+  }); dialog.show(); picker.focus();
+}
+$('knowledgeVersionsBtn').addEventListener('click', openKnowledgeVersions);
+
+async function selectedFileBase64(file, maxBytes) {
+  if (!file || !file.size || file.size > maxBytes) throw new Error('请选择大小在限制内的文件。');
+  const bytes = new Uint8Array(await file.arrayBuffer()); let binary = '';
+  for (let start = 0; start < bytes.length; start += 16384) binary += String.fromCharCode.apply(null, bytes.subarray(start, start + 16384));
+  return btoa(binary);
+}
+function dialogStatus(dialog) { const status = el('p', 'settings-message'); status.setAttribute('role', 'status'); dialog.panel.insertBefore(status, dialog.submit.parentElement); return status; }
+function addOperationCancel(dialog, controller) {
+  const button = taskAction(dialog.submit.parentElement, '停止当前操作', 'local-operation-cancel', function () { controller.abort(); });
+  dialog.modal.addEventListener('close', function () { controller.abort(); }); return button;
+}
+async function openDocumentImport() {
+  if (!localAvailable() || $('documentImportDialog')) return;
+  const dialog = localDialog('documentImportDialog', 'PDF／Word 资料入库', '本机解析文本型 PDF／DOCX，先预览并选择页或段落，再确认入库。不支持扫描件 OCR、旧 DOC 或宏文档，不执行外部资源。');
+  const picker = dialog.field('原文档（最多 16 MiB）', el('input'), 'documentPicker'); picker.type = 'file'; picker.accept = '.pdf,.docx';
+  const collection = dialog.field('导入目标', el('select'), 'documentTarget'); collection.appendChild(new Option('创建新的知识集合', ''));
+  const units = el('div'); units.id = 'documentUnits'; dialog.panel.insertBefore(units, dialog.submit.parentElement);
+  const status = dialogStatus(dialog); let parsed = null, prepared = null, state = null, controller = null, committed = false;
+  const selected = new Set(); dialog.submit.textContent = '解析并预览'; dialog.submit.disabled = true; dialog.show();
+  try { state = await localRequest('/api/knowledge/versions'); if (dialog.current()) state.collections.forEach(function (c) { collection.appendChild(new Option(c.name, c.id)); }); } catch (error) { if (dialog.current()) dialog.fail(error.message); }
+  function resetPrepared() { if (prepared) void localRequest('/api/documents/cancel', { body: { id: prepared.id, confirmed: true } }).catch(function () {}); prepared = null; dialog.submit.textContent = parsed ? '预览入库变更' : '解析并预览'; }
+  picker.addEventListener('change', function () { if (parsed) void localRequest('/api/documents/cancel', { body: { documentId: parsed.id, confirmed: true } }).catch(function () {}); parsed = null; selected.clear(); units.replaceChildren(); resetPrepared(); });
+  collection.addEventListener('change', resetPrepared);
+  const stop = taskAction(dialog.submit.parentElement, '停止解析', 'document-stop', function () { controller?.abort(); });
+  dialog.modal.addEventListener('close', function () { controller?.abort(); if (!committed && dialog.targetCurrent()) void localRequest('/api/documents/cancel', { body: { id: prepared?.id, documentId: parsed?.id, confirmed: true } }).catch(function () {}); });
+  dialog.panel.addEventListener('submit', async function (event) {
+    event.preventDefault(); if (dialog.submit.disabled) return; dialog.busy(true); controller = new AbortController();
+    try {
+      if (!parsed) {
+        const file = picker.files[0], base64 = await selectedFileBase64(file, 16 * 1024 * 1024); if (!dialog.current()) return;
+        status.textContent = '正在本机解析…'; parsed = await localRequest('/api/documents/parse', { body: { name: file.name, base64, confirmed: true }, signal: controller.signal, timeoutMs: 60000 });
+        if (!dialog.current()) return; units.replaceChildren(); selected.clear();
+        parsed.units.forEach(function (unit) { const row = el('details', 'local-check-row'), summary = el('summary', '', unit.label), label = el('label', 'check-field'), box = el('input'); box.type = 'checkbox'; box.dataset.documentUnit = unit.id; box.disabled = !unit.text.trim();
+          box.addEventListener('change', function () { if (box.checked) selected.add(unit.id); else selected.delete(unit.id); resetPrepared(); });
+          label.append(box, document.createTextNode('选择此页／段落')); row.append(summary, label, el('pre', 'evidence-text', unit.text)); units.appendChild(row); });
+        status.textContent = '原件 SHA-256：' + parsed.sha256 + '。' + parsed.warnings.join('；'); dialog.submit.textContent = '预览入库变更';
+      } else if (!prepared) {
+        if (!selected.size) throw new Error('请展开并选择至少一个有正文的页或段落。');
+        prepared = await localRequest('/api/documents/prepare', { body: { documentId: parsed.id, unitIds: Array.from(selected), collectionId: collection.value || undefined,
+          revision: state ? { revision: state.revision, fingerprint: state.fingerprint } : undefined, confirmed: true }, signal: controller.signal });
+        status.textContent = '新增 ' + prepared.diff.added.length + '，修改 ' + prepared.diff.modified.length + '，移除 ' + prepared.diff.removed.length + '，保留 ' + prepared.diff.unchanged.length + '。原件会在本地保存，旧集合未选文档仍保留。';
+        dialog.submit.textContent = '确认入库';
+      } else {
+        status.textContent = '正在保存原件与知识版本…';
+        const result = await localRequest('/api/documents/commit', { body: { id: prepared.id, confirmed: true }, signal: controller.signal });
+        committed = true; dialog.busy(false); dialog.close(); knowledgeUi.workspace = ''; mentionUi.workspace = ''; void loadKnowledge();
+        $('knowledgeStatus').textContent = '已导入 ' + result.imported + ' 份解析文本；未调用模型。'; return;
+      }
+    } catch (error) { if (dialog.current()) dialog.fail(error.message + '。未自动重试；如原件已保存而知识登记失败，原件不会被当作已检索知识。'); }
+    finally { if (dialog.current()) { dialog.busy(false); controller = null; } }
+  });
+  if (dialog.current()) dialog.submit.disabled = false;
+}
+$('documentImportBtn').addEventListener('click', openDocumentImport);
+
+async function openBackupCreate() {
+  if (!localAvailable() || $('backupCreateDialog')) return;
+  const dialog = localDialog('backupCreateDialog', '创建工作资料备份', '不包含源码、Git 或账号凭据。会话、附件和日志可能含私密内容；仅下载到你选择的位置，不上传服务。');
+  const status = dialogStatus(dialog), picks = el('div'); picks.id = 'backupSelection'; dialog.panel.insertBefore(picks, dialog.submit.parentElement);
+  const selected = new Set(), components = {};
+  ['memory', 'knowledge', 'tasks'].forEach(function (key, i) { const label = el('label', 'check-field'), box = el('input'); box.type = 'checkbox'; box.dataset.backupComponent = key; components[key] = box;
+    label.append(box, document.createTextNode(['记忆（恢复后默认关闭）', '知识与历史版本／原件', '任务与历史验收报告'][i])); picks.appendChild(label); });
+  let preview = null, controller = null; dialog.submit.disabled = true; dialog.submit.textContent = '预览备份清单'; dialog.show();
+  try { const catalog = await localRequest('/api/backups'); if (!dialog.current()) return;
+    catalog.sessions.forEach(function (session) { const label = el('label', 'check-field'), box = el('input'); box.type = 'checkbox'; box.dataset.backupSession = session.id;
+      box.addEventListener('change', function () { if (box.checked) selected.add(session.id); else selected.delete(session.id); }); label.append(box, document.createTextNode('会话：' + (session.title || session.id))); picks.appendChild(label); }); dialog.submit.disabled = false;
+  } catch (error) { dialog.fail(error.message); }
+  picks.addEventListener('change', function () { if (preview) void localRequest('/api/backups/cancel', { body: { id: preview.id, confirmed: true } }).catch(function () {}); preview = null; dialog.submit.textContent = '预览备份清单'; });
+  taskAction(dialog.submit.parentElement, '停止操作', 'backup-stop', function () { controller?.abort(); });
+  dialog.modal.addEventListener('close', function () { controller?.abort(); if (preview && dialog.targetCurrent()) void localRequest('/api/backups/cancel', { body: { id: preview.id, confirmed: true } }).catch(function () {}); });
+  dialog.panel.addEventListener('submit', async function (event) { event.preventDefault(); if (dialog.submit.disabled) return; dialog.busy(true); controller = new AbortController();
+    try {
+      if (!preview) { preview = await localRequest('/api/backups/preview', { body: { confirmed: true, selection: { sessionIds: Array.from(selected), memory: components.memory.checked, knowledge: components.knowledge.checked, tasks: components.tasks.checked } }, signal: controller.signal, timeoutMs: 120000 });
+        status.textContent = preview.files + ' 个文件，' + preview.bytes + ' 字节，含 ' + preview.sessionIds.length + ' 个依赖完整的会话。' + preview.warnings.join('；'); dialog.submit.textContent = '确认生成并下载';
+      } else { const bytes = await localRequest('/api/backups/download', { body: { id: preview.id, fingerprint: preview.fingerprint, confirmed: true }, signal: controller.signal, timeoutMs: 120000, download: true, maxBytes: 48 * 1024 * 1024 });
+        downloadLocal(bytes, 'sakuracode-workspace.sakura-backup'); preview = null; status.textContent = '备份下载已生成。请自行妥善保管；校验值用于完整性，不证明来源可信。'; dialog.submit.textContent = '重新预览备份'; }
+    } catch (error) { if (dialog.current()) dialog.fail(error.message + '。源数据变化时请重新预览。'); }
+    finally { if (dialog.current()) { controller = null; dialog.busy(false); } }
+  });
+}
+function openBackupRestore() {
+  if (!localAvailable() || $('backupRestoreDialog')) return;
+  const dialog = localDialog('backupRestoreDialog', '校验并恢复备份', '恢复到新目录，不覆盖原工作区、不自动打开或执行。记忆默认关闭，验收结果仅作历史，旧代码回滚检查点不会激活。');
+  const picker = dialog.field('备份文件（最多 48 MiB）', el('input'), 'backupRestoreFile'); picker.type = 'file'; picker.accept = '.sakura-backup';
+  const parent = dialog.field('新目录的父路径（绝对路径）', el('input'), 'backupRestoreParent'); parent.placeholder = '例如 D:\\Projects';
+  const name = dialog.field('新的工作资料目录名', el('input'), 'backupRestoreName'); name.value = 'Restored-workspace';
+  const status = dialogStatus(dialog); let preview = null, controller = null;
+  dialog.submit.textContent = '校验并预览'; taskAction(dialog.submit.parentElement, '停止操作', '', function () { controller?.abort(); });
+  picker.addEventListener('change', function () { if (preview) void localRequest('/api/backups/cancel', { body: { id: preview.id, confirmed: true } }).catch(function () {}); preview = null; dialog.submit.textContent = '校验并预览'; });
+  dialog.modal.addEventListener('close', function () { controller?.abort(); if (preview && dialog.targetCurrent()) void localRequest('/api/backups/cancel', { body: { id: preview.id, confirmed: true } }).catch(function () {}); });
+  dialog.panel.addEventListener('submit', async function (event) { event.preventDefault(); if (dialog.submit.disabled) return; dialog.busy(true); controller = new AbortController();
+    try {
+      if (!preview) { const base64 = await selectedFileBase64(picker.files[0], 48 * 1024 * 1024); if (!dialog.current()) return;
+        preview = await localRequest('/api/backups/inspect', { body: { base64, confirmed: true }, signal: controller.signal, timeoutMs: 120000 });
+        status.textContent = '校验通过：' + preview.files + ' 文件，' + preview.sessionIds.length + ' 会话；组件：' + preview.components.join('、') + '。' + preview.warnings.join('；'); dialog.submit.textContent = '确认恢复到新目录';
+      } else { const result = await localRequest('/api/backups/restore', { body: { id: preview.id, fingerprint: preview.fingerprint, parent: parent.value, name: name.value, confirmed: true }, signal: controller.signal, timeoutMs: 120000 });
+        preview = null; status.textContent = '恢复完成：' + result.directory + '。请先阅读 RESTORE-REPORT.txt，再明确打开工作区；没有自动续跑任务。'; dialog.submit.hidden = true; dialog.cancel.textContent = '完成'; }
+    } catch (error) { if (dialog.current()) dialog.fail(error.message + '。原工作区未覆盖。'); }
+    finally { if (dialog.current()) { controller = null; dialog.busy(false); } }
+  }); dialog.show();
+}
+$('backupCreate').addEventListener('click', openBackupCreate); $('backupRestore').addEventListener('click', openBackupRestore);
+
+async function openConnectorWizard() {
+  if (!localAvailable() || $('connectorWizardDialog')) return;
+  const dialog = localDialog('connectorWizardDialog', '外接软件接入向导', '先选类型并检查字段；确认目标后才启动短连接诊断。诊断不启用工具，不调用软件动作或知识查询。高级表单仍可使用。');
+  const select = dialog.field('1 · 连接类型', el('select'), 'wizardTemplate');
+  const id = dialog.field('2 · 连接 ID', el('input'), 'wizardId'), name = dialog.field('名称', el('input'), 'wizardName');
+  const target = dialog.field('3 · 程序绝对路径或服务 URL', el('input'), 'wizardTarget');
+  const args = dialog.field('本机程序参数（每行一个，不填密钥）', el('textarea'), 'wizardArgs');
+  const credentials = dialog.field('凭据引用（每行 目标变量或头名=环境变量名）', el('textarea'), 'wizardCredentials');
+  const category = dialog.field('用途', el('select'), 'wizardCategory'); category.append(new Option('软件', 'software'), new Option('知识库', 'knowledge'));
+  const status = dialogStatus(dialog), output = el('pre', 'evidence-text'); output.id = 'wizardReport'; dialog.panel.insertBefore(output, dialog.submit.parentElement);
+  let templates = [], config = null, report = null, checked = false, controller = null;
+  const diagnostic = taskAction(dialog.submit.parentElement, '确认目标并诊断', 'wizard-diagnose', async function () {
+    if (!checked || !config) { dialog.fail('请先通过字段检查。'); return; }
+    const preview = localDialog('wizardConfirmDialog', '确认诊断目标', '本机程序会启动，网络目标会收到握手请求。诊断仅检查协议声明，不测试知识查询结果，不自动重试。');
+    preview.panel.insertBefore(el('pre', 'evidence-text', config.command ? config.command + '\n参数：\n' + (config.args || []).join('\n') : config.url), preview.submit.parentElement);
+    preview.panel.addEventListener('submit', async function (event) { event.preventDefault(); preview.close(); dialog.busy(true); controller = new AbortController();
+      try { report = await localRequest('/api/connector-wizard/diagnose', { body: { connection: config, confirmed: true }, signal: controller.signal, timeoutMs: 45000 });
+        if (!dialog.current()) return; output.textContent = report.stages.map(function (stage) { return stage.stage + ' · ' + stage.status + ' · ' + stage.durationMs + 'ms\n' + stage.message + (stage.recommendation ? '\n' + stage.recommendation : ''); }).join('\n\n') + '\n\n' + report.warnings.join('\n');
+        status.textContent = report.ok ? '诊断完成，能力仍未启用；可保存后明确连接。' : '诊断未通过，请按提示修正；没有自动重试。';
+      } catch (error) { if (dialog.current()) dialog.fail(error.message); } finally { if (dialog.current()) { controller = null; dialog.busy(false); } }
+    }); preview.show(); preview.cancel.focus();
+  }); diagnostic.disabled = true;
+  const save = taskAction(dialog.submit.parentElement, '保存配置（不连接）', 'wizard-save', async function () {
+    if (!checked || !config) return; dialog.busy(true);
+    try { const saved = await localRequest('/api/connectors'); await localRequest('/api/connectors', { body: { connection: config, revision: saved.revision, fingerprint: saved.fingerprint, confirmed: true } });
+      dialog.busy(false); dialog.close(); void loadConnectors(); }
+    catch (error) { dialog.busy(false); dialog.fail(error.message); }
+  }); save.disabled = true;
+  taskAction(dialog.submit.parentElement, '停止诊断', 'wizard-stop', function () { controller?.abort(); });
+  taskAction(dialog.submit.parentElement, '导出脱敏报告', 'wizard-export', function () { if (report) downloadLocal(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }), 'connector-diagnostic.json'); });
+  dialog.modal.addEventListener('close', function () { controller?.abort(); });
+  function reset() { checked = false; config = null; report = null; output.textContent = ''; diagnostic.disabled = true; save.disabled = true; }
+  function templateChanged() { const template = templates.find(function (row) { return row.id === select.value; }); if (!template) return;
+    id.value = template.config.id; name.value = template.config.name; target.value = template.config.command || template.config.url || ''; args.value = ''; credentials.value = ''; args.disabled = !template.config.command && template.id !== 'local-mcp'; reset(); }
+  select.addEventListener('change', templateChanged);
+  [id, name, target, args, credentials, category].forEach(function (field) { field.addEventListener('input', reset); field.addEventListener('change', reset); });
+  dialog.submit.textContent = '检查配置字段'; dialog.submit.disabled = true; dialog.show();
+  try { const result = await localRequest('/api/connector-wizard'); if (!dialog.current()) return; templates = result.templates; templates.forEach(function (template) { select.appendChild(new Option(template.title, template.id)); }); templateChanged(); dialog.submit.disabled = false; }
+  catch (error) { dialog.fail(error.message); }
+  dialog.panel.addEventListener('submit', async function (event) { event.preventDefault(); dialog.busy(true);
+    try { const template = templates.find(function (row) { return row.id === select.value; }), refs = {};
+      credentials.value.split(/\r?\n/).filter(function (line) { return line.trim(); }).forEach(function (line) { const pair = line.trim().split('='); if (pair.length !== 2 || !pair[0] || !pair[1]) throw new Error('凭据引用格式应为 目标名称=环境变量名。'); if (Object.hasOwn(refs, pair[0])) throw new Error('凭据目标重复。'); Object.defineProperty(refs, pair[0], { value: pair[1], enumerable: true }); });
+      config = { ...template.config, id: id.value.trim(), name: name.value.trim(), category: category.value, autoConnect: false, enabledActions: [], knowledgeEnabled: false };
+      if (template.id === 'local-mcp') { config.command = target.value.trim(); config.args = args.value.split(/\r?\n/).filter(Boolean); config.envRefs = refs; }
+      else { config.url = target.value.trim(); config.headersEnv = refs; }
+      const result = await localRequest('/api/connector-wizard/preflight', { body: { connection: config } }); checked = result.ok;
+      status.textContent = result.ok ? '静态检查通过；尚未启动程序或验证服务可达性。' : result.issues.map(function (issue) { return issue.field + '：' + issue.message + ' ' + issue.recommendation; }).join('；');
+      diagnostic.disabled = save.disabled = !checked;
+    } catch (error) { checked = false; dialog.fail(error.message); } finally { if (dialog.current()) dialog.busy(false); }
+  });
+}
+$('connectorWizardBtn').addEventListener('click', openConnectorWizard);
+
+async function openIsolatedTask(task) {
+  if (!localAvailable() || $('isolatedTaskDialog')) return;
+  const dialog = localDialog('isolatedTaskDialog', '独立目录开发', '从已提交的本地基准创建独立代码目录，不复制原未提交内容、个人资料或凭据。代码隔离不是安全沙箱；工具仍具有当前用户权限。');
+  const base = dialog.field('本地基准', el('input'), 'isolatedBase'); base.value = 'HEAD';
+  const model = dialog.field('独立任务模型', el('select'), 'isolatedModel');
+  const catalog = app.state.modelCatalog || [];
+  catalog.forEach(function (choice, index) { model.appendChild(new Option(choice.adapter + '/' + choice.model, String(index))); });
+  model.value = String(Math.max(0, catalog.findIndex(function (choice) { return choice.default; })));
+  const prompt = dialog.field('任务说明（确认启动后才发送模型）', el('textarea'), 'isolatedPrompt'); prompt.value = task.title + '\n' + task.description; prompt.maxLength = 32000;
+  const status = dialogStatus(dialog), details = el('div'); details.id = 'isolatedDetails'; dialog.panel.insertBefore(details, dialog.submit.parentElement);
+  dialog.submit.hidden = true; dialog.cancel.textContent = '关闭面板';
+  let info = null, snapshot = null, execution = null, preview = null, pending = false, timer = 0, controller = null;
+  const selected = new Set();
+  const choose = function () { const choice = catalog[Number(model.value)]; if (!choice) throw new Error('请选择已配置模型。'); return { model: choice.model, adapter: choice.adapter }; };
+  const controls = el('div', 'settings-actions'); dialog.panel.insertBefore(controls, dialog.submit.parentElement);
+  async function operate(route, body) {
+    if (pending) throw new Error('上一操作正在进行。'); pending = true; controller = new AbortController();
+    try { return await localRequest(route, { body: { ...body, confirmed: true }, signal: controller.signal, timeoutMs: 150000 }); }
+    finally { pending = false; controller = null; }
+  }
+  function showFiles() {
+    details.replaceChildren(); selected.clear();
+    if (!snapshot) return;
+    snapshot.files.forEach(function (file) { const row = el('details', 'local-check-row'); row.appendChild(el('summary', '', file.status + ' · ' + file.path + (file.integrated ? ' · 已整合' : '')));
+      if (file.integrable) { const label = el('label', 'check-field'), checkbox = el('input'); checkbox.type = 'checkbox'; checkbox.dataset.isolatedFile = file.path;
+        checkbox.addEventListener('change', function () { if (checkbox.checked) selected.add(file.path); else selected.delete(file.path); }); label.append(checkbox, document.createTextNode('选择整合到原工作区')); row.appendChild(label); }
+      else row.appendChild(el('p', 'field-hint', '非普通文本、链接或私有文件，不支持自动整合。'));
+      if (file.text !== undefined) row.appendChild(el('pre', 'evidence-text', file.text)); details.appendChild(row);
+    });
+    if (!snapshot.files.length) details.appendChild(el('p', 'field-hint', '独立目录暂无相对基准的变化。'));
+  }
+  async function refresh(full) {
+    if (!info || pending || !dialog.current()) return;
+    try { execution = await localRequest('/api/worktrees/status?id=' + encodeURIComponent(info.id)); if (!dialog.current()) return;
+      status.textContent = '代码目录：' + info.path + '\n数据目录：' + info.dataDir + '\n' + (execution.running ? '独立任务／验收运行中' : '当前未运行') + (execution.execution?.error ? '\n' + execution.execution.error : '');
+      if (full && !execution.running) { snapshot = await localRequest('/api/worktrees/read?id=' + encodeURIComponent(info.id), { timeoutMs: 150000 }); showFiles(); }
+      if (execution.running) { clearTimeout(timer); timer = setTimeout(function () { void refresh(false); }, 2000); }
+    } catch (error) { if (dialog.current()) dialog.fail(error.message); }
+  }
+  const create = taskAction(controls, '预览创建独立目录', 'isolated-create', async function () {
+    try {
+      if (info) return;
+      if (!preview) { preview = await operate('/api/worktrees/preview-create', { taskId: task.id, baseRef: base.value.trim() || 'HEAD' });
+        status.textContent = '基准 ' + preview.commit + '，' + preview.files + ' 文件／' + preview.bytes + ' 字节。原未提交内容不会复制。' + preview.warnings.join('\n'); create.textContent = '确认创建目录（不启动）'; }
+      else { info = await operate('/api/worktrees/create', { previewId: preview.id, expectedFingerprint: preview.fingerprint }); preview = null; base.disabled = true; create.hidden = true; await refresh(true); }
+    } catch (error) { preview = null; create.textContent = '预览创建独立目录'; dialog.fail(error.message); }
+  });
+  base.addEventListener('input', function () { preview = null; create.textContent = '预览创建独立目录'; });
+  taskAction(controls, '确认启动／发送后续任务', 'isolated-start', async function () {
+    if (!info) { dialog.fail('先创建独立目录。'); return; }
+    const confirm = localDialog('isolatedStartDialog', '确认启动独立任务', '将任务说明发送给所选模型，可能执行有副作用的工具调用；按独立任务的审批策略处理。不会发送原主会话历史。');
+    confirm.panel.insertBefore(el('pre', 'evidence-text', model.selectedOptions[0]?.textContent + '\n' + prompt.value), confirm.submit.parentElement);
+    confirm.panel.addEventListener('submit', async function (event) { event.preventDefault(); confirm.busy(true);
+      try { await operate('/api/worktrees/start', { id: info.id, text: prompt.value, ...choose() }); confirm.busy(false); confirm.close(); await refresh(false); }
+      catch (error) { confirm.busy(false); confirm.fail(error.message); }
+    }); confirm.show(); confirm.cancel.focus();
+  });
+  taskAction(controls, '重新打开（不执行）', 'isolated-open', async function () { try { if (!info) return; await operate('/api/worktrees/open', { id: info.id, ...choose() }); await refresh(false); } catch (error) { dialog.fail(error.message); } });
+  taskAction(controls, '停止任务与验收', 'isolated-stop', async function () { try { controller?.abort(); if (!info) return; await localRequest('/api/worktrees/stop', { body: { id: info.id, confirmed: true }, timeoutMs: 30000 }); await refresh(true); } catch (error) { dialog.fail(error.message); } });
+  taskAction(controls, '查看独立会话', 'isolated-history', async function () {
+    try { if (!info) return; const history = await localRequest('/api/worktrees/records?id=' + encodeURIComponent(info.id)); if (!dialog.current()) return;
+      const viewer = localDialog('isolatedHistoryDialog', '独立会话记录', '只读查看，不改变主会话。只显示最近有界记录，未自动发送给模型。'); viewer.submit.hidden = true; viewer.cancel.textContent = '关闭';
+      history.records.forEach(function (record) { if (['user/message', 'assistant/message', 'tool/result', 'assistant/attempt'].includes(record.type)) viewer.panel.insertBefore(el('pre', 'evidence-text', record.type + '\n' + String(record.payload.content ?? record.payload.output ?? record.payload.error ?? '')), viewer.submit.parentElement); });
+      viewer.show();
+    } catch (error) { dialog.fail(error.message); }
+  });
+  taskAction(controls, '刷新成果', 'isolated-refresh', function () { void refresh(true); });
+  taskAction(controls, '运行目录内验收', 'isolated-verify', async function () {
+    if (!info) return;
+    try { await operate('/api/worktrees/open', { id: info.id, ...choose() }); await refresh(false);
+      const saved = execution?.validation;
+      const confirm = localDialog('isolatedVerifyDialog', '确认独立目录验收', '只在独立代码目录执行已保存的检查。报告不会当作原工作区验收通过。命令仍经过独立会话审批。');
+      confirm.panel.insertBefore(el('pre', 'evidence-text', (saved?.checks || []).map(function (c) { return c.name + '\n' + c.shell + ' · ' + c.workdir + '\n' + c.command; }).join('\n\n')), confirm.submit.parentElement);
+      confirm.panel.addEventListener('submit', async function (event) { event.preventDefault(); confirm.busy(true); try { await operate('/api/worktrees/verify', { id: info.id, ...choose() }); confirm.busy(false); confirm.close(); await refresh(false); } catch (error) { confirm.busy(false); confirm.fail(error.message); } }); confirm.show(); confirm.cancel.focus();
+    } catch (error) { dialog.fail(error.message); }
+  });
+  taskAction(controls, '查看目录验收报告', 'isolated-report', async function () { try { if (!info) return; await refresh(false); const run = execution?.validation?.runs?.[0]; if (!run) throw new Error('暂无此目录的运行报告，先打开任务再查看。');
+    const report = await localRequest('/api/worktrees/report?id=' + encodeURIComponent(info.id) + '&runId=' + encodeURIComponent(run.id)); const viewer = localDialog('isolatedReportDialog', '独立目录验收报告', '历史执行证据，不等于主工作区已通过。'); viewer.submit.hidden = true;
+    viewer.panel.insertBefore(el('pre', 'evidence-text', JSON.stringify(report, null, 2)), viewer.submit.parentElement); viewer.show();
+  } catch (error) { dialog.fail(error.message); } });
+  taskAction(controls, '预览选定整合', 'isolated-integrate', async function () {
+    try { if (!info || !snapshot || !selected.size) throw new Error('刷新成果后明确选择需要整合的普通文本文件。');
+      const proposal = await operate('/api/worktrees/preview-integrate', { id: info.id, expectedFingerprint: snapshot.fingerprint, paths: Array.from(selected) });
+      const confirm = localDialog('isolatedIntegrateDialog', '确认整合选定文件', '只修改原工作区选中文本，不暂存、不提交或推送。存在冲突则停止；失败保留前镜像和恢复记录。');
+      confirm.panel.insertBefore(el('pre', 'evidence-text', proposal.files.map(function (file) { return file.status + ' ' + file.path; }).join('\n') + '\n' + proposal.conflicts.map(function (c) { return c.path + ': ' + c.reason; }).join('\n')), confirm.submit.parentElement);
+      confirm.submit.disabled = !proposal.canIntegrate;
+      confirm.panel.addEventListener('submit', async function (event) { event.preventDefault(); confirm.busy(true); try { const result = await operate('/api/worktrees/integrate', { id: info.id, previewId: proposal.id, expectedFingerprint: proposal.fingerprint }); confirm.busy(false); confirm.close(); await refresh(true); status.textContent += '\n已整合 ' + result.applied.length + ' 文件，暂存区未变。'; } catch (error) { confirm.busy(false); confirm.fail(error.message); } });
+      confirm.show(); confirm.cancel.focus();
+    } catch (error) { dialog.fail(error.message); }
+  });
+  taskAction(controls, '暂停并关闭执行上下文', 'isolated-release', async function () { try { if (!info) return; await operate('/api/worktrees/release', { id: info.id }); await refresh(false); } catch (error) { dialog.fail(error.message); } });
+  taskAction(controls, '清理独立代码目录', 'isolated-cleanup', async function () {
+    if (!info) return;
+    try { await refresh(true); if (!snapshot) return;
+      const confirm = localDialog('isolatedCleanupDialog', '确认清理独立代码目录', '将移除独立代码目录；会话与数据目录保留。未整合成果默认阻止清理，只有明确放弃时才删除。不会删除原项目或无关分支。');
+      const discard = confirm.field('我确认放弃所有未整合成果', el('input'), 'isolatedDiscard'); discard.type = 'checkbox';
+      confirm.panel.insertBefore(el('p', 'field-hint', info.path), confirm.submit.parentElement);
+      confirm.panel.addEventListener('submit', async function (event) { event.preventDefault(); confirm.busy(true);
+        try { await operate('/api/worktrees/cleanup', { id: info.id, expectedFingerprint: snapshot.fingerprint, discard: discard.checked, confirmDiscard: discard.checked }); confirm.busy(false); confirm.close(); dialog.close(); }
+        catch (error) { confirm.busy(false); confirm.fail(error.message); }
+      }); confirm.show(); confirm.cancel.focus();
+    } catch (error) { dialog.fail(error.message); }
+  });
+  const go = taskAction(controls, '处理待审批请求', 'isolated-approvals', function () { dialog.close(); jumpToApproval(); });
+  go.title = '关闭详情面板并定位到本机审批卡；不会自动允许。';
+  dialog.modal.addEventListener('close', function () { clearTimeout(timer); controller?.abort(); });
+  dialog.show(); status.textContent = '正在读取独立目录记录…';
+  try { const listed = await localRequest('/api/worktrees', { timeoutMs: 150000 }); if (!dialog.current()) return; info = listed.worktrees.find(function (row) { return row.taskId === task.id; }) || null;
+    if (info) { base.value = info.commit; base.disabled = true; create.hidden = true; await refresh(true); }
+    else status.textContent = '先预览基准，再确认创建；此时不会启动模型或执行仓库脚本。';
+  } catch (error) { if (dialog.current()) dialog.fail(error.message); }
 }
 
 function openSpawnModal() {
@@ -8768,6 +9394,8 @@ function applyState(st) {
   if (Array.isArray(st.tools)) app.state.tools = st.tools;
   if (Array.isArray(st.plugins)) app.state.plugins = st.plugins;
   if (Array.isArray(st.mcp)) app.state.mcp = st.mcp;
+  if (st.tasksAvailable !== undefined) app.state.tasksAvailable = st.tasksAvailable;
+  if (st.validationBusy !== undefined) app.state.validationBusy = st.validationBusy;
   if (st.connectorsAvailable !== undefined) app.state.connectorsAvailable = st.connectorsAvailable;
   if (st.connectorsChanging !== undefined) app.state.connectorsChanging = st.connectorsChanging;
   if (st.connectorsRevision !== undefined && st.connectorsRevision !== app.state.connectorsRevision) {
@@ -9804,6 +10432,7 @@ let reconnectTimer = 0;
 let connectionEpoch = 0;
 
 function stopConnection() {
+  resetLocalFeatures();
   cancelAnimationFrame(startupUi.frame); startupUi.frame = 0; startupUi.version++;
   cancelAnimationFrame(viewportUi.frame); viewportUi.frame = 0;
   clearTimeout(viewportUi.retry); clearTimeout(viewportUi.settle); document.body.classList.remove('viewport-settling');
@@ -9857,6 +10486,7 @@ function showLogin(message) {
   app.state.workspaceMemory = null;
   app.state.desktopWindow = false;
   resetMemoryEditor();
+  resetLocalFeatures();
   resetConnectorsView(); app.state.connectorsAvailable = false; app.state.connectorsChanging = false; app.state.connectorsRevision = -1;
   renderDesktopWindow();
   clearWeixinView();
@@ -10093,6 +10723,9 @@ function handleFrame(f) {
       if (p && !p.resolved) paintPlanResolved(p, f.decision);
       break;
     }
+    case 'tasks/changed':
+      if ($('persistentTasks').open) void loadTasks();
+      break;
     case 'ui/todos':
       app.state.todos = Array.isArray(f.todos) ? f.todos : [];
       renderTodos();

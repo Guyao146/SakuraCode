@@ -53,7 +53,7 @@ export interface ConnectorAdapter {
   id: string
   version: 1
   description: string
-  connect(config: Readonly<ConnectorConfig>, context: { cwd: string; signal: AbortSignal }): Promise<ConnectorSession>
+  connect(config: Readonly<ConnectorConfig>, context: { cwd: string; signal: AbortSignal; diagnostic?: { onStage(stage: 'connection' | 'handshake'): void } }): Promise<ConnectorSession>
 }
 export interface ConnectorStatus {
   id: string; state: 'disconnected' | 'connecting' | 'connected' | 'error'
@@ -65,6 +65,49 @@ export interface ConnectorSnapshot {
   revision: number; fingerprint: string; connections: ConnectorConfig[]; statuses: ConnectorStatus[]; error?: string
 }
 export interface ConnectorRevision { revision: number; fingerprint: string }
+export type ConnectorDiagnosticStageName = 'field-check' | 'target' | 'credentials' | 'connection' | 'handshake' | 'capabilities'
+export interface ConnectorDiagnosticStage {
+  stage: ConnectorDiagnosticStageName
+  status: 'success' | 'failed' | 'skipped' | 'unknown'
+  durationMs: number
+  code?: string
+  message: string
+  recommendation?: string
+}
+export interface ConnectorFieldIssue { field: string; code: string; message: string; recommendation: string }
+export interface ConnectorConfigSummary {
+  adapter: 'mcp' | 'http' | 'other' | 'unknown'
+  category: 'software' | 'knowledge' | 'unknown'
+  targetKind: 'local' | 'network' | 'unspecified'
+  argumentCount: number
+  credentialCount: number
+  knowledgeBindings: boolean
+}
+export interface ConnectorPreflightReport {
+  ok: boolean
+  configSummary: ConnectorConfigSummary
+  issues: ConnectorFieldIssue[]
+  /** Indexed field paths only: neither reference names nor credential values are exported. */
+  credentials: Array<{ field: string; present: boolean }>
+  stages: ConnectorDiagnosticStage[]
+}
+export interface ConnectorDiagnosticReport extends ConnectorPreflightReport {
+  durationMs: number
+  capabilities?: { actionCount: number; actions: string[]; truncated: boolean; knowledge: { search: boolean; read: boolean; queryTested: false } }
+  warnings: string[]
+}
+export interface ConnectorTemplate {
+  id: 'local-mcp' | 'https-mcp' | 'http-json-bridge'
+  title: string
+  description: string
+  config: ConnectorConfig
+}
+/** Only trusted boundaries produce these codes; upstream message text is never classified. */
+export class ConnectorDiagnosticError extends Error {
+  constructor(readonly stage: 'connection' | 'handshake' | 'capabilities', readonly code: 'AUTH_REJECTED' | 'REDIRECT_BLOCKED' | 'MALFORMED_RESPONSE' | 'INVALID_MANIFEST' | 'INVALID_BINDINGS' | 'TIMEOUT' | 'NO_EXECUTABLE' | 'ACCESS_DENIED' | 'RPC_REJECTED', message = code) {
+    super(message); this.name = 'ConnectorDiagnosticError'
+  }
+}
 export class ConnectorError extends Error {
-  constructor(readonly status: number, message: string) { super(message); this.name = 'ConnectorError' }
+  constructor(readonly status: number, message: string, readonly field?: string, readonly code?: string) { super(message); this.name = 'ConnectorError' }
 }

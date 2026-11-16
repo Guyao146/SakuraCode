@@ -2,27 +2,36 @@
 import { Context } from '../kernel/index.js'
 import { ToolsService } from '../core/tools.js'
 import { McpManager, type McpServerConfig } from '../mcp/index.js'
-import type { ConnectorAdapter } from './types.js'
-import { ConnectorError } from './types.js'
+import type { ConnectorAdapter, ConnectorCapabilities } from './types.js'
+import { ConnectorDiagnosticError, ConnectorError } from './types.js'
 import { connectorUrl, resolveConnectorHeaders, validateCapabilities, validateExternalRead, validateExternalSearch } from './validation.js'
 
-const PROCESS_ENV = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA']
+const PROCESS_ENV = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP']
 export const mcpConnectorAdapter: ConnectorAdapter = {
   id: 'mcp', version: 1, description: 'MCP stdio / Streamable HTTP, with explicitly enabled capabilities',
   async connect(config, context) {
     const scope = new Context()
     const tools = new ToolsService(scope)
     scope.provide('tools'); scope.set('tools', tools)
-    const env: Record<string, string> = {}
+    const env: Record<string, string> = { HOME: '', USERPROFILE: '', APPDATA: '', LOCALAPPDATA: '' }
     for (const name of PROCESS_ENV) if (process.env[name] !== undefined) env[name] = process.env[name]!
     for (const [name, variable] of Object.entries(config.envRefs ?? {})) {
       const value = process.env[variable]
-      if (value === undefined || value.length > 8192 || value.includes('\0')) throw new ConnectorError(400, `process environment reference ${variable} is missing or invalid`)
+      if (!value || value.length > 8192 || value.includes('\0')) throw new ConnectorError(400, `process environment reference ${variable} is missing or invalid`)
       env[name] = value
     }
     const server: McpServerConfig = config.url
       ? { url: connectorUrl(config.url), headers: resolveConnectorHeaders(config), timeoutMs: config.timeoutMs }
       : { command: config.command, args: config.args, env, inheritEnv: false, timeoutMs: config.timeoutMs }
+    let diagnosticCapabilities: ConnectorCapabilities | undefined
+    if (context.diagnostic) server.diagnostic = {
+      onStage: context.diagnostic.onStage,
+      onTools: listed => {
+        const search = config.knowledgeTools?.search, read = config.knowledgeTools?.read
+        if (config.knowledgeTools && (!listed.some(tool => tool.name === search) || !listed.some(tool => tool.name === read))) throw new ConnectorDiagnosticError('capabilities', 'INVALID_BINDINGS')
+        diagnosticCapabilities = validateCapabilities({ version: 1, actions: listed.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema })), ...(search && read ? { knowledge: { search: true, read: true } } : {}) })
+      },
+    }
     const manager = new McpManager(scope, { [config.id]: server }, context.cwd)
     const listeners = new Set<() => void>()
     let closed = false
@@ -35,8 +44,17 @@ export const mcpConnectorAdapter: ConnectorAdapter = {
     if (context.signal.aborted) { stop(); throw new ConnectorError(409, 'MCP connection cancelled') }
     context.signal.addEventListener('abort', stop, { once: true })
     try {
-      await manager.start()
+      // reconnect(name) performs one connection and preserves native typed failure evidence.
+      await manager.reconnect(config.id)
       context.signal.throwIfAborted()
+      if (context.diagnostic) {
+        if (!diagnosticCapabilities) throw new ConnectorDiagnosticError('capabilities', 'INVALID_MANIFEST')
+        const unavailable = async (): Promise<never> => { throw new ConnectorError(403, 'diagnostic sessions cannot invoke capabilities') }
+        return { capabilities: diagnosticCapabilities, call: unavailable,
+          ...(diagnosticCapabilities.knowledge ? { search: unavailable, read: unavailable } : {}),
+          close: () => { context.signal.removeEventListener('abort', stop); listeners.clear(); stop() },
+        }
+      }
       if (manager.status()[0]?.state !== 'connected' || manager.status()[0]?.error) throw new ConnectorError(502, 'MCP connection failed or contains skipped/conflicting tools; check the configured software, endpoint and credentials')
       const prefix = `mcp__${config.id}__`
       const definitions = new Map(tools.list().map(tool => [tool.name.slice(prefix.length), tool]))

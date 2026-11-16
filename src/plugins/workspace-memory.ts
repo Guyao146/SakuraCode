@@ -194,6 +194,16 @@ function parseMarkdown(raw: string): StoredMemoryState {
     revision: Number(row.revision), updatedAt: row.updatedAt as string | null, contentStartLine: match[0].split('\n').length }
 }
 
+export function validateMemoryBackup(raw: string, legacy: boolean): void { if (legacy) parseState(raw); else parseMarkdown(raw) }
+
+/** Restored notes are inert until explicitly enabled in the new workspace. */
+export function restoredMemory(raw: string, legacy: boolean): string {
+  const state = legacy ? parseState(raw) : parseMarkdown(raw)
+  state.enabled = false; state.processing.auto = false; state.processingPaused = true
+  state.processingError = 'Restored backup; enable memory and automatic processing explicitly after review.'
+  return markdown(state)
+}
+
 export class WorkspaceMemoryStore implements WorkspaceMemoryService {
   readonly file: string
   readonly legacyFile: string

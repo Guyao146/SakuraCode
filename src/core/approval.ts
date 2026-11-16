@@ -18,6 +18,7 @@ export interface ApprovalRequest {
   agentId: string
   /** Optional for third-party callers; tools pass their turn cancellation signal. */
   signal?: AbortSignal
+  localOnly?: boolean
 }
 
 export type ConfirmHandler = (req: ApprovalRequest) => Promise<boolean> | boolean
@@ -88,7 +89,7 @@ export const approvalPlugin = {
 
     ctx.on('tools/pre-execute', async (payload, next) => {
       if (!payload.tool) return next(payload)
-      const verdict = await service.check({ tool: payload.tool, args: payload.args, agentId: payload.tc.agentId, signal: payload.tc.signal })
+      const verdict = await service.check({ tool: payload.tool, args: payload.args, agentId: payload.tc.agentId, signal: payload.tc.signal, localOnly: payload.tc.localOnly })
       if (!verdict.allowed) {
         payload.blockedReason = verdict.reason
         return payload // short-circuit without next(): the call never executes

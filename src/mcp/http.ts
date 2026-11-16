@@ -21,6 +21,8 @@
 
 import type { JsonSchemaObject, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { boundedResponse } from '../connectors/http.js'
+import { diagnosticHandshake, diagnosticTools, type McpDiagnosticObserver } from '../connectors/mcp-diagnostics.js'
+import { ConnectorDiagnosticError } from '../connectors/types.js'
 
 // ---------------------------------------------------------------------------
 // Public contracts
@@ -35,6 +37,7 @@ export interface HttpMcpServerConfig {
   timeoutMs?: number
   /** Manager-owned cancellation also covers the initialize handshake. */
   signal?: AbortSignal
+  diagnostic?: McpDiagnosticObserver
 }
 
 /** Same lifecycle states as the stdio transport's McpServerState. */
@@ -234,18 +237,23 @@ async function postJson(
   try {
     const response = await fetch(state.cfg.url, {
       method: 'POST',
-      redirect: 'error',
+      redirect: 'manual',
       headers: buildHeaders(state),
       body: JSON.stringify(message),
       signal: abortSignal,
     })
+    if (state.cfg.diagnostic && methodLabel === 'initialize') {
+      try { state.cfg.diagnostic.onStage('connection') } catch (error) { await response.body?.cancel().catch(() => {}); throw error }
+    }
     const session = response.headers.get('mcp-session-id')
     if (session) {
-      if (session.length > 256 || /[\u0000-\u001f\u007f]/.test(session)) throw new Error('invalid MCP session id')
+      if (session.length > 256 || /[\u0000-\u001f\u007f]/.test(session)) { await response.body?.cancel().catch(() => {}); throw new Error('invalid MCP session id') }
       state.sessionId = session
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {})
+      if (state.cfg.diagnostic && (response.status === 401 || response.status === 403)) throw new ConnectorDiagnosticError(methodLabel === 'tools/list' ? 'capabilities' : 'handshake', 'AUTH_REJECTED')
+      if (state.cfg.diagnostic && response.status >= 300 && response.status < 400) throw new ConnectorDiagnosticError('connection', 'REDIRECT_BLOCKED')
       throw new Error(`mcp http ${methodLabel} failed with status ${response.status}`)
     }
     const contentType = response.headers.get('content-type') ?? ''
@@ -266,12 +274,16 @@ async function postJson(
     try {
       parsed = JSON.parse(text)
     } catch {
+      if (state.cfg.diagnostic) throw new ConnectorDiagnosticError(methodLabel === 'tools/list' ? 'capabilities' : 'handshake', 'MALFORMED_RESPONSE')
       throw new Error(`mcp http: invalid JSON response to "${methodLabel}"`)
     }
     return parsed
   } catch (error) {
     if (state.closed || state.cfg.signal?.aborted) throw new Error(`connection to mcp server "${state.name}" was closed`)
-    if (timeoutSignal.aborted) throw new Error(`mcp request "${methodLabel}" timed out after ${timeoutMs}ms`)
+    if (timeoutSignal.aborted) {
+      if (state.cfg.diagnostic) throw new ConnectorDiagnosticError(methodLabel === 'tools/list' ? 'capabilities' : 'handshake', 'TIMEOUT')
+      throw new Error(`mcp request "${methodLabel}" timed out after ${timeoutMs}ms`)
+    }
     if (extraSignal?.aborted) throw new Error('mcp tool call aborted')
     throw error
   } finally {
@@ -296,13 +308,16 @@ async function rpc<T>(
   const body = { jsonrpc: '2.0', id, method, ...(params !== undefined ? { params } : {}) }
   const parsed = await postJson(state, body, method, id, timeoutMs, signal)
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    if (state.cfg.diagnostic) throw new ConnectorDiagnosticError(method === 'tools/list' ? 'capabilities' : 'handshake', 'MALFORMED_RESPONSE')
     throw new Error(`mcp http: invalid response to "${method}"`)
   }
   const message = parsed as JsonRpcResponse
   if (message.id !== id || !('result' in message) && !('error' in message)) {
+    if (state.cfg.diagnostic) throw new ConnectorDiagnosticError(method === 'tools/list' ? 'capabilities' : 'handshake', 'MALFORMED_RESPONSE')
     throw new Error(`mcp http: invalid JSON-RPC response to "${method}"`)
   }
   if (message.error !== undefined && message.error !== null) {
+    if (state.cfg.diagnostic) throw new ConnectorDiagnosticError(method === 'tools/list' ? 'capabilities' : 'handshake', 'RPC_REJECTED')
     throw new Error(describeRpcError(message.error))
   }
   return message.result as T
@@ -385,10 +400,20 @@ export async function connectHttpServer(
   const state: HttpConnState = { name, cfg, nextId: 0, closed: false, inFlight: new Set() }
   setStatus({ state: 'connecting', toolCount: 0 })
   try {
-    await rpc(state, 'initialize', { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO }, HANDSHAKE_TIMEOUT_MS)
+    const initialized = await rpc(state, 'initialize', { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO }, HANDSHAKE_TIMEOUT_MS)
+    if (cfg.diagnostic) { diagnosticHandshake(initialized); cfg.diagnostic.onStage('handshake') }
     await notify(state, 'notifications/initialized', HANDSHAKE_TIMEOUT_MS)
     const listing = await rpc<{ tools?: unknown }>(state, 'tools/list', {}, HANDSHAKE_TIMEOUT_MS)
     const tools = Array.isArray(listing?.tools) ? listing.tools : []
+    if (cfg.diagnostic) {
+      cfg.diagnostic.onTools(diagnosticTools(listing))
+      setStatus({ state: 'connected', toolCount: tools.length })
+      return {
+        get sessionId() { return state.sessionId },
+        call: async () => { throw new Error('diagnostic sessions cannot invoke tools') },
+        close: () => closeConnection(state, unregisterAll, setStatus),
+      }
+    }
 
     let toolCount = 0
     const skipped: string[] = []

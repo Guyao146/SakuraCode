@@ -72,6 +72,10 @@ export interface ToolContext {
   /** Agent that invoked the tool. */
   agentId: string
   signal: AbortSignal
+  /** Internal execution observer; called after approval and before spawning a shell. */
+  onCommandStart?: () => Promise<void>
+  /** Internal UI validation requests must not expose command details remotely. */
+  localOnly?: boolean
   checkpoint?: CheckpointTarget
   /** Shared main context that was visible when this step's request was built. */
   sharedContext?: { sessionId: string; throughSeq: number; userSeq: number }
@@ -83,9 +87,20 @@ export interface ToolOutputPreview {
   content: string
 }
 
+export interface CommandExecution {
+  exitCode: number | null
+  reason: 'exit' | 'timeout' | 'cancelled' | 'spawn_error'
+  startedAt: string
+  endedAt: string
+  outputBytes: number
+  truncated: boolean
+}
+
 export interface ToolResult {
   output: string
   isError?: boolean
+  /** Process evidence supplied by shell tools, never accepted as tool arguments. */
+  execution?: CommandExecution
   /** Structured extras carried for UI rendering, never sent to the model. */
   ui?: Record<string, unknown>
   /**
@@ -226,7 +241,7 @@ export type SessionEventPayload =
   | { type: 'tool/call'; payload: { id: string; name: string; arguments: string } }
   | {
       type: 'tool/result'
-      payload: { id: string; name: string; output: string; modelPreview?: ToolOutputPreview; isError?: boolean; durationMs: number; images?: string[] }
+      payload: { id: string; name: string; output: string; modelPreview?: ToolOutputPreview; isError?: boolean; durationMs: number; images?: string[]; execution?: CommandExecution }
     }
   | { type: 'session/note'; payload: Record<string, unknown> }
   | { type: 'collaboration/message'; payload: CollaborationRecord }

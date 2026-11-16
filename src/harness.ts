@@ -50,6 +50,8 @@ import { memoryProcessingPlugin } from './plugins/memory-processing.js'
 import { workspaceMemoryToolsPlugin } from './tools/memory.js'
 import { knowledgePlugin } from './knowledge/plugin.js'
 import { knowledgeToolsPlugin } from './tools/knowledge.js'
+import { tasksPlugin } from './tasks/plugin.js'
+import { taskToolsPlugin } from './tools/tasks.js'
 import { modelProfilesPlugin } from './plugins/model-profiles.js'
 import { retryPlugin } from './core/retry.js'
 import { mcpPlugin } from './mcp/index.js'
@@ -77,6 +79,7 @@ export const BASE_BUNDLE: Array<{ plugin: Plugin; name: string }> = [
   { name: 'core-llm', plugin: llmPlugin },
   { name: 'core-model-profiles', plugin: modelProfilesPlugin },
   { name: 'core-tools', plugin: toolsPlugin },
+  { name: 'core-tasks', plugin: tasksPlugin },
   { name: 'core-agent-defs', plugin: agentDefsPlugin },
   { name: 'core-skills', plugin: skillsPlugin },
   { name: 'core-jobs', plugin: jobsPlugin },
@@ -93,6 +96,7 @@ export const BASE_BUNDLE: Array<{ plugin: Plugin; name: string }> = [
   { name: 'tool-jobs', plugin: jobToolsPlugin },
   { name: 'tool-output-read', plugin: toolOutputReadPlugin },
   { name: 'tool-todo', plugin: todoToolsPlugin },
+  { name: 'tool-tasks', plugin: taskToolsPlugin },
   { name: 'tool-plan', plugin: planToolsPlugin },
   { name: 'tool-web', plugin: webToolsPlugin },
   { name: 'tool-web-search', plugin: webSearchToolsPlugin },
@@ -110,6 +114,8 @@ export const BASE_BUNDLE: Array<{ plugin: Plugin; name: string }> = [
 export interface HarnessOptions {
   config?: SakuraConfig
   cwd?: string
+  /** Trusted host-owned data directory; tools still execute under cwd. */
+  dataCwd?: string
   sessionDir?: string
   jobsDir?: string
   approvalMode?: ApprovalMode
@@ -156,6 +162,7 @@ export async function createHarness(opts: HarnessOptions = {}): Promise<Harness>
 async function composeHarness(ctx: HarnessContext, opts: HarnessOptions): Promise<Harness> {
   const config = opts.config ?? {}
   const cwd = path.resolve(opts.cwd ?? process.cwd())
+  const dataCwd = path.resolve(opts.dataCwd ?? cwd)
 
   // Feed harness-level overrides into the plugin rows, then honor disabled rows.
   const { bundles, plugins } = resolveProfile(config)
@@ -170,11 +177,11 @@ async function composeHarness(ctx: HarnessContext, opts: HarnessOptions): Promis
   }
   const userSessionDir = rows['core-session']?.config?.dir as string | undefined
   setRow('core-session', {
-    dir: path.resolve(cwd, opts.sessionDir ?? userSessionDir ?? '.sakura/sessions'),
+    dir: path.resolve(dataCwd, opts.sessionDir ?? userSessionDir ?? '.sakura/sessions'),
   })
   const userJobsDir = rows['core-jobs']?.config?.dir as string | undefined
   setRow('core-jobs', {
-    dir: path.resolve(cwd, opts.jobsDir ?? userJobsDir ?? '.sakura/jobs'),
+    dir: path.resolve(dataCwd, opts.jobsDir ?? userJobsDir ?? '.sakura/jobs'),
   })
   if (opts.approvalMode) setRow('core-approval', { mode: opts.approvalMode })
   setRow('core-llm', {
@@ -198,8 +205,9 @@ async function composeHarness(ctx: HarnessContext, opts: HarnessOptions): Promis
     setRow('core-skills', { cwd })
     setRow('core-agent-defs', { cwd })
     setRow('core-project-memory', { cwd })
-    setRow('core-workspace-memory', { cwd })
-    setRow('core-knowledge', { cwd })
+    setRow('core-workspace-memory', { cwd: dataCwd })
+    setRow('core-knowledge', { cwd: dataCwd })
+    setRow('core-tasks', { cwd, dataCwd })
     setRow('core-checkpoints', { cwd })
     setRow('tool-fs', { cwd })
     setRow('tool-fs-search', { cwd })

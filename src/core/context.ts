@@ -55,6 +55,11 @@ export class HarnessContext extends Context {
     return this.peek<import('../mcp/index.js').McpService>('mcp')
   }
 
+  /** Durable workspace tasks (optional service). */
+  get tasks(): import('../tasks/service.js').TasksService | undefined {
+    return this.peek<import('../tasks/service.js').TasksService>('tasks')
+  }
+
   /** Explicit external software/knowledge registry (optional service). */
   get connectors(): import('../connectors/index.js').ConnectorsService | undefined {
     return this.peek<import('../connectors/index.js').ConnectorsService>('connectors')

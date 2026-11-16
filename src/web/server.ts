@@ -61,8 +61,18 @@ import QRCode from 'qrcode'
 import { WorkspaceShareClient } from '../sharing/client.js'
 import { isShareId, validShareRole, SHARE_LIMITS, type ShareRequest, type ShareReply } from '../sharing/protocol.js'
 import { projectSharedWorkspace, projectSharedHistory } from './sharing.js'
+import { handleTaskApi } from './tasks-api.js'
+import { handleGitReviewApi } from './git-review-api.js'
+import { handleDataApi } from './data-api.js'
+import { DocumentImportService } from './document-import.js'
+import { BackupService } from '../backup/service.js'
+import { WorktreeService } from '../worktrees/index.js'
+import { IsolatedTasks } from './isolated-tasks.js'
+import { handleWorktreeApi } from './worktrees-api.js'
+import type { TasksService } from '../tasks/service.js'
+import { GitReviewService } from '../git/index.js'
 
-const VERSION = '1.1.4'
+const VERSION = '1.1.5'
 export { VERSION as WEB_VERSION }
 
 /** Harness events mirrored verbatim to SSE clients ({ type, ...payload }). */
@@ -437,12 +447,19 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   let weixin: WeixinBridge | undefined
   let workspaceShare: WorkspaceShareClient | undefined
   let shareQr: { url: string; dataUrl: string } | undefined
-  const stateFor = (state: Record<string, unknown>, principal: WebPrincipal): Record<string, unknown> =>
-    principal.role === 'operator' ? state : { ...state, statistics: undefined, sharing: undefined, sharingAvailable: false }
+  const localRunApprovals = new Set<string>()
+  const stateFor = (state: Record<string, unknown>, principal: WebPrincipal): Record<string, unknown> => {
+    if (principal.role === 'operator' && !access.remote) return state
+    return { ...state, statistics: undefined, sharing: undefined, sharingAvailable: false,
+      tasksAvailable: false, validationBusy: false,
+      pendingRequests: (state.pendingRequests as Array<Record<string, unknown>> | undefined)?.filter(request => !request.localOnly) }
+  }
   const broadcast = (event: Record<string, unknown>): void => {
     if (closed) return
+    if (event.type === 'approval/request' && event.localOnly && typeof event.id === 'string') localRunApprovals.add(event.id)
+    if (event.type === 'approval/resolved' && typeof event.id === 'string' && localRunApprovals.delete(event.id)) event = { ...event, localOnly: true }
     if (event.type === 'workspace/changed') { weixin?.workspaceChanged(); void workspaceShare?.stop() }
-    else weixin?.observe(event)
+    else if (!event.localOnly) weixin?.observe(event)
     if (event.type !== 'sharing/state' && ['ui/text', 'ui/turn/start', 'ui/turn/end', 'ui/tool/result', 'agent/status', 'session/changed', 'session/deleted', 'ui/todos', 'state'].includes(String(event.type))) {
       // Publish only committed, projected history; raw streaming chunks can split a credential.
       workspaceShare?.observe({ type: 'changed' })
@@ -457,6 +474,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
         res.destroy()
         continue
       }
+      if (event.localOnly && (access.remote || principal.role !== 'operator')) continue
       if (event.type === 'desktop/statistics' && principal.role !== 'operator' || event.type === 'sharing/state' && (principal.role !== 'operator' || access.remote)) continue
       try {
         if (res.writableLength > 1024 * 1024) { res.destroy(); clients.delete(res) }
@@ -727,6 +745,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   }
 
   function submitUserTask(text: string, images?: string[], preparedFiles?: ReadonlyMap<string, StoredChatFiles>, originalText?: string): boolean {
+    if (dataOperation) throw new HttpError(409, '工作资料操作正在进行，请等待完成。')
+    if (ctx.tasks?.isBusy()) throw new HttpError(409, '项目验收正在运行，请先停止或等待完成。')
     const main = mainAgent()
     if (ctx.peek<ConnectorsService>('connectors')?.isChanging()) throw new HttpError(409, '外接连接正在改变，请完成后再发送任务。')
     const mount = ctx, epoch = sessionEpoch
@@ -760,7 +780,17 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     return queued
   }
 
+  let worktrees: WorktreeService
+  let isolatedTasks: IsolatedTasks | undefined
+  const isolatedClosing = new Set<Promise<void>>()
+  let backupService: BackupService | undefined
+  let documentImports: DocumentImportService | undefined
+  let dataOperation = false
+  let gitReview: GitReviewService
+  let gitAbort = new AbortController()
   function bindHarness(next: Harness): void {
+    gitAbort.abort(); gitAbort = new AbortController()
+    gitReview = new GitReviewService(workspaceCwd)
     contextCache = null
     statsCache = null
     // The roster is rebuilt on remount, so the expert team cannot survive one.
@@ -772,6 +802,30 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     previous?.dispose()
     harness = next
     ctx = next.ctx
+    if (isolatedTasks) {
+      const closing = isolatedTasks.close(); isolatedClosing.add(closing)
+      void closing.finally(() => isolatedClosing.delete(closing)).catch(() => {})
+    }
+    worktrees = new WorktreeService(workspaceCwd)
+    const mount = next.ctx
+    isolatedTasks = new IsolatedTasks(worktrees, () => next, async (id, request) => {
+      if (closed || ctx !== mount) return false
+      return pending.wait({ type: 'approval/request', id: randomUUID(), agentId: request.agentId, toolName: request.tool.name,
+        kind: request.tool.kind, mode: next.ctx.approval.mode, summary: '独立任务 ' + id.slice(0, 8) + '：' + summarize(request.args),
+        localOnly: true, isolatedTaskId: id }, request.signal)
+    }, () => { if (ctx === mount) broadcast({ type: 'isolated/changed', localOnly: true }) }, () => {
+      if (closed || ctx !== mount) throw new HttpError(409, '工作区已改变，独立任务已暂停。')
+    })
+    backupService?.close(); documentImports?.close()
+    backupService = new BackupService(workspaceCwd, ctx.sessions)
+    const knowledge = ctx.peek<KnowledgeStore>('knowledge')
+    documentImports = knowledge ? new DocumentImportService(workspaceCwd, knowledge) : undefined
+    const review = gitReview
+    ctx.tasks?.setCodeReader(async signal => {
+      const state = await review.getTrackedFingerprint({ signal })
+      return state.repositoryId && state.fingerprint ? { repository: state.repositoryId, head: state.headOid, fingerprint: state.fingerprint, scope: state.scope ?? '' } : undefined
+    })
+    ctx.on('tasks/changed', () => { broadcast({ type: 'tasks/changed', localOnly: true }); void refreshState() })
     ctx.on('agent/turn-queued', (payload: { turnGroup: string; turnId: string; agentId: string }) => {
       const team = teamTurns.get(payload.turnGroup)
       if (team) { team.pending.add(payload.turnId); team.members.add(payload.agentId) }
@@ -796,7 +850,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
         .finally(() => { if (teamTurns.get(payload.turnGroup) === team) teamTurns.delete(payload.turnGroup) })
     })
     ctx.peek<MemoryProcessingService>('memoryProcessing')?.setBusyChecker(() =>
-      settingsUpdating || !!contextOperation || switching || switchingWorkspace || !!deletingSession || closed)
+      settingsUpdating || !!contextOperation || switching || switchingWorkspace || !!deletingSession || closed || !!ctx.tasks?.isBusy() || dataOperation)
     ctx.peek<RetryService>('retry')?.configure(retryPolicy)
     ctx.peek<RetryService>('retry')?.setConfirmHandler(async request => {
       if (closed) return false
@@ -1036,6 +1090,8 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       revision,
       server: { startedAt, remote: access.remote, authenticated: access.required },
       sharingAvailable: !access.remote,
+      tasksAvailable: !access.remote && !!ctx.tasks,
+      validationBusy: !access.remote && !!ctx.tasks?.isBusy(),
       connectorsAvailable: !access.remote && !!ctx.peek<ConnectorsService>('connectors'),
       connectorsChanging: ctx.peek<ConnectorsService>('connectors')?.isChanging() ?? false,
       connectorsRevision: !access.remote ? ctx.peek<ConnectorsService>('connectors')?.revision() : undefined,
@@ -1134,6 +1190,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       kind: req.tool.kind,
       summary: summarize(req.args),
       mode: ctx.approval.mode,
+      ...(req.localOnly ? { localOnly: true } : {}),
     }, req.signal)
   }
 
@@ -1154,7 +1211,10 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   // Session switching: the roster is cleared (subagents included) and a
   // fresh main agent adopts the target session.
   // ------------------------------------------------------------------
-  function assertAgentsIdle(): void {
+  function assertAgentsIdle(allowDataOperation = false): void {
+    if (isolatedTasks?.isBusy()) throw new HttpError(409, '独立任务正在运行，请先停止后再修改工作区设置或整合。')
+    if (dataOperation && !allowDataOperation) throw new HttpError(409, '工作资料正在备份、恢复或导入，请等待完成。')
+    if (ctx.tasks?.isBusy()) throw new HttpError(409, '项目验收正在运行，请先停止或等待完成。')
     if (ctx.peek<ConnectorsService>('connectors')?.isChanging()) throw new HttpError(409, '外接连接正在改变，请等待完成。')
     if (ctx.peek<MemoryProcessingService>('memoryProcessing')?.status().active) throw new HttpError(409, '长期记忆正在整理，请等待完成。')
     if (teamTurns.size) throw new HttpError(409, '专家协作回合正在收尾，请等待统计保存完成。')
@@ -1206,6 +1266,7 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
   }
 
   function sessionDeletionBlock(id: string): 'running' | 'bound' | 'compacting' | 'pending' | null {
+    if (ctx.tasks?.isBusy()) return 'running'
     const agents = ctx.agents.list()
     const current = agents.some((agent) => agent.meta.role === 'main' && sameSession(agent.sessionId, id))
     if (agents.some((agent) => agent.status === 'running' &&
@@ -2049,6 +2110,87 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
     }
     assertWorkspaceSame()
 
+    if (pathname === '/api/worktrees' || pathname.startsWith('/api/worktrees/')) {
+      if (access.remote || principal.role !== 'operator' || !isLoopbackHost(req.socket.remoteAddress ?? '') || !isolatedTasks) throw new HttpError(404, '独立任务仅供本机操作员使用。')
+      const mount = ctx, workspace = workspaceId(), execution = isolatedTasks, service = worktrees
+      const current = () => {
+        assertWorkspaceSame()
+        if (closed || mount !== ctx || !access.isActive(principal) || req.headers['x-sakura-workspace'] !== workspace) throw new HttpError(409, '独立任务所属工作区或登录状态已改变。')
+      }
+      const controller = new AbortController(), abort = () => controller.abort()
+      const signal = AbortSignal.any([controller.signal, gitAbort.signal, shutdownController.signal])
+      const locking = method === 'POST' && ['preview-create', 'create', 'preview-integrate', 'integrate', 'cleanup'].some(action => pathname === '/api/worktrees/' + action)
+      if (method === 'POST' && dataOperation && !['/api/worktrees/stop', '/api/worktrees/release'].includes(pathname)) throw new HttpError(409, '工作资料操作正在进行，请等待完成。')
+      if (locking) { assertAgentsIdle(); dataOperation = true }
+      res.once('close', abort)
+      try { await handleWorktreeApi(req, res, url, { service, execution, workspaceId: workspace, current,
+        idle: () => assertAgentsIdle(locking), signal, body: () => bodyJson(req, 128 * 1024),
+        taskExists: async id => { const saved = await ctx.tasks?.snapshot(); current(); return !!saved?.tasks.some(task => task.id === id && !task.archived) },
+      }) } finally { if (locking) dataOperation = false; res.off('close', abort) }
+      return
+    }
+
+    if (dataOperation && method !== 'GET' && method !== 'HEAD' && !/^\/api\/(approvals|questions|plans|retry)(\/|$)/.test(pathname) && pathname !== '/api/interrupt') {
+      throw new HttpError(409, '工作资料操作正在进行，请等待完成。')
+    }
+    if (/^\/api\/(backups|documents|connector-wizard)(\/|$)/.test(pathname)) {
+      if (access.remote || principal.role !== 'operator' || !isLoopbackHost(req.socket.remoteAddress ?? '') || !backupService) throw new HttpError(404, '工作资料管理仅供本机操作员使用。')
+      const mount = ctx, workspace = workspaceId(), controller = new AbortController()
+      const abort = () => controller.abort()
+      res.once('close', abort)
+      const signal = AbortSignal.any([controller.signal, gitAbort.signal, shutdownController.signal])
+      const current = () => {
+        signal.throwIfAborted(); assertWorkspaceSame()
+        if (closed || ctx !== mount || !access.isActive(principal) || req.headers['x-sakura-workspace'] !== workspace) throw new HttpError(409, '工作区或登录状态已改变，请重新预览。')
+      }
+      const locks = method === 'POST' && !pathname.endsWith('/preflight') && !pathname.endsWith('/cancel')
+      current()
+      if (locks) { assertAgentsIdle(); dataOperation = true }
+      try { await handleDataApi(req, res, url, { backup: backupService, documents: documentImports, connectors: ctx.connectors,
+        workspaceId: workspace, current, idle: () => assertAgentsIdle(true), signal, body: bodyJson.bind(null, req) }) }
+      finally { if (locks) dataOperation = false; res.off('close', abort) }
+      return
+    }
+
+    if (pathname === '/api/tasks' || pathname.startsWith('/api/tasks/')) {
+      if (access.remote || principal.role !== 'operator' || !isLoopbackHost(req.socket.remoteAddress ?? '') || !ctx.tasks) {
+        throw new HttpError(404, '持久任务与验收只对本机操作员开放。')
+      }
+      const mount = ctx, tasks = ctx.tasks, workspace = workspaceId()
+      const current = () => {
+        assertSessionSame()
+        if (closed || ctx !== mount || !access.isActive(principal) || req.headers['x-sakura-workspace'] !== workspace) {
+          throw new HttpError(409, '工作区或登录状态已改变，请刷新后重试。')
+        }
+      }
+      await handleTaskApi(req, res, url, { service: tasks, workspaceId: workspace, current, idle: assertAgentsIdle, body: bodyJson.bind(null, req),
+        main: () => { const main = mainAgent(); return { id: main.id, sessionId: isSessionId(main.sessionId) ? main.sessionId : '' } },
+        notify: () => { broadcast({ type: 'tasks/changed', localOnly: true }); void refreshState() },
+        rememberRun: async (sessionId, taskId, runId) => { current(); const session = await mount.sessions.open(sessionId); current()
+          await session.append({ type: 'session/note', payload: { note: 'task-validation', taskId, runId } }) },
+      })
+      return
+    }
+
+    if (pathname === '/api/git-review' || pathname.startsWith('/api/git-review/')) {
+      if (access.remote || principal.role !== 'operator' || !isLoopbackHost(req.socket.remoteAddress ?? '')) throw new HttpError(404, 'Git 审阅只对本机操作员开放。')
+      const mount = ctx, workspace = workspaceId(), controller = new AbortController()
+      const abort = () => controller.abort()
+      const current = () => {
+        assertWorkspaceSame()
+        if (closed || mount !== ctx || !access.isActive(principal) || req.headers['x-sakura-workspace'] !== workspace) throw new HttpError(409, '工作区或连接已改变，请刷新 Git 差异。')
+      }
+      const signal = AbortSignal.any([controller.signal, gitAbort.signal, shutdownController.signal])
+      res.once('close', abort)
+      try { await handleGitReviewApi(req, res, url, { review: gitReview, workspaceId: workspace, current, idle: assertAgentsIdle, signal, body: bodyJson.bind(null, req) }) }
+      finally { res.off('close', abort) }
+      return
+    }
+
+    if (ctx.tasks?.isBusy() && method !== 'GET' && method !== 'HEAD' && !/^\/api\/(approvals|questions|plans|retry)(\/|$)/.test(pathname) && pathname !== '/api/interrupt') {
+      throw new HttpError(409, '项目验收正在运行，请先停止或等待完成。')
+    }
+
     if (pathname === '/api/events' && method === 'GET') {
       if (clients.size >= 64) throw new HttpError(503, 'too many event stream clients')
       res.writeHead(200, {
@@ -2376,6 +2518,30 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       const knowledge = ctx.peek<KnowledgeStore>('knowledge')
       if (!knowledge) throw new HttpError(404, '知识库未挂载。')
       try {
+        if (pathname === '/api/knowledge/versions' || pathname.startsWith('/api/knowledge/versions/')) {
+          const workspace = workspaceId(), mount = ctx
+          const current = () => {
+            assertWorkspaceSame()
+            if (closed || mount !== ctx || !access.isActive(principal) || req.headers['x-sakura-workspace'] !== workspace) throw new HttpError(409, '工作区或连接已改变，请重新预览知识版本。')
+          }
+          current()
+          if (method === 'GET' && pathname === '/api/knowledge/versions') {
+            const state = await knowledge.getVersionState(current); current(); json(res, 200, { ...state, workspaceId: workspace }); return
+          }
+          if (method !== 'POST') throw new HttpError(404, 'unknown knowledge version operation')
+          const body = await bodyJson(req, KNOWLEDGE_LIMITS.maxTotalBytes * 6 + 8192); current(); assertAgentsIdle()
+          if (body.confirmed !== true) throw new HttpError(400, '知识版本修改需要明确确认。')
+          const expected = { revision: body.revision as number, fingerprint: body.fingerprint as string }
+          const action = pathname.slice('/api/knowledge/versions/'.length)
+          const mutate = () => { current(); assertAgentsIdle() }
+          const result = action === 'adopt' ? await knowledge.adoptLegacy(body.batchId as string, expected, mutate) :
+            action === 'preview' ? await knowledge.previewUpdate({ collectionId: body.collectionId as string, files: body.files as Array<{ path: string; content: string }> }, expected, current) :
+            action === 'commit' ? await knowledge.commitUpdate(body.previewId as string, expected, mutate) :
+            action === 'activate' ? await knowledge.activateVersion(body.collectionId as string, body.versionId as string, expected, mutate) :
+            action === 'cancel' ? await knowledge.cancelPreview(body.previewId as string) : undefined
+          if (!result) throw new HttpError(404, 'unknown knowledge version operation')
+          current(); json(res, 200, { ...result, workspaceId: workspace }); return
+        }
         if (method === 'GET' && pathname === '/api/knowledge') {
           const result = await knowledge.reload(); assertWorkspaceSame(); json(res, 200, { ...result, workspaceId: workspaceId() }); return
         }
@@ -2657,12 +2823,14 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
         throw new HttpError(400, 'allow must be boolean; always must be boolean when supplied')
       }
       const entry = pending.get(approvalMatch[1]!)
+      if (entry?.localOnly && (access.remote || principal.role !== 'operator' || !isLoopbackHost(req.socket.remoteAddress ?? ''))) throw new HttpError(404, 'approval is local only')
       if (!entry || !pending.resolve(approvalMatch[1]!, body.allow)) {
         json(res, 404, { error: 'unknown or already-resolved approval' })
         return
       }
       if (body.allow === true && body.always === true) {
-        ctx.approval.engine.allowForSession(String(entry.toolName))
+        if (entry.isolatedTaskId) isolatedTasks?.allowForSession(String(entry.isolatedTaskId), String(entry.toolName))
+        else ctx.approval.engine.allowForSession(String(entry.toolName))
         broadcast({ type: 'notice', level: 'info', message: `"${entry.toolName}" allowed for this session` })
       }
       json(res, 200, { ok: true })
@@ -3445,6 +3613,11 @@ export async function runWebServer(opts: WebServerOptions = {}): Promise<WebServ
       if (closed) return
       closed = true
       shutdownController.abort()
+      gitAbort.abort()
+      await isolatedTasks?.close()
+      await Promise.allSettled(isolatedClosing)
+      backupService?.close(); documentImports?.close()
+      await ctx.tasks?.close()
       stopStatisticsListener?.()
       statistics?.close()
       clearInterval(heartbeat)

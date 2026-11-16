@@ -10,6 +10,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSyn
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
+import { buildDocumentParser } from './build-document-parser.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 process.chdir(root)
@@ -32,6 +33,7 @@ const vipAssets = Object.fromEntries(Array.from({ length: 10 }, (_, index) => {
 rmSync('build', { recursive: true, force: true })
 mkdirSync('build', { recursive: true })
 
+const documentParser = await buildDocumentParser()
 await build({
   entryPoints: ['src/cli.ts'],
   bundle: true,
@@ -41,6 +43,13 @@ await build({
   legalComments: 'none',
   outfile: 'build/sakura.cjs',
   plugins: [
+    {
+      name: 'sakura-embed-document-parser',
+      setup(b) {
+        b.onResolve({ filter: /^sakura-document-parser-embed$/ }, () => ({ path: 'parser', namespace: 'sakura-parser' }))
+        b.onLoad({ filter: /.*/, namespace: 'sakura-parser' }, () => ({ contents: `export default ${JSON.stringify(documentParser)}`, loader: 'js' }))
+      },
+    },
     {
       name: 'sakura-embed-web',
       setup(b) {
