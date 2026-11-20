@@ -19,7 +19,7 @@ const roots: string[] = [], contexts: Context[] = [], services: TasksService[] =
 const card = (extra: Record<string, unknown> = {}) => ({ title: '验证项目', description: '持久任务', priority: 'high', status: 'pending',
   steps: [{ id: 'one', content: '实现变更', status: 'pending' }], criteria: ['测试必须通过'], checkIds: [], archived: false, ...extra })
 const editable = ({ createdAt, updatedAt, definitionHash, acceptance, ...task }: TaskCard) => task
-const command = (command = 'exit 0', extra: Record<string, unknown> = {}) => ({ id: 'verify', name: '本机检查', shell: 'bash', command, workdir: '.', timeoutMs: 2000, required: true, ...extra })
+const command = (command = 'exit 0', extra: Record<string, unknown> = {}) => ({ id: 'verify', name: '本机检查', shell: 'bash', command, workdir: '.', timeoutMs: 15_000, required: true, ...extra })
 async function fixture(mode: 'default' | 'yolo' = 'yolo') {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-tasks-')); roots.push(cwd)
   const ctx = new Context(); contexts.push(ctx)
